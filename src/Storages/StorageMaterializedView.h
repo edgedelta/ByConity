@@ -28,7 +28,6 @@
 #include <Storages/StorageInMemoryMetadata.h>
 #include <Storages/MaterializedView/RefreshSchedule.h>
 #include <Storages/MaterializedView/PartitionTransformer.h>
-#include <Storages/MaterializedView/MaterializedViewVersionedPartCache.h>
 
 namespace DB
 {
@@ -131,21 +130,9 @@ public:
 
     /// get async refrsh params
     AsyncRefreshParamPtrs getAsyncRefreshParams(ContextMutablePtr local_context, bool combine_params);
-    void validatePartitionBased(ContextMutablePtr local_context);
-    
+    void validateMv(ContextMutablePtr local_context);
     void validateAndSyncBaseTablePartitions(
-        PartitionDiffPtr & partition_diff,
-        VersionPartContainerPtrs & latest_versioned_partitions,
-        ContextMutablePtr local_context,
-        bool for_rewrite = false);
-
-    void syncBaseTablePartitions(
-        PartitionDiffPtr & partition_diff,
-        VersionPartContainerPtrs & latest_versioned_partitions,
-        const std::unordered_set<StoragePtr> & depend_base_tables,
-        const std::unordered_set<StorageID> & non_depend_base_tables,
-        ContextMutablePtr local_context,
-        bool for_rewrite = false);
+        PartitionDiffPtr & partition_diff, VersionPartContainerPtrs & latest_versioned_partitions, ContextMutablePtr local_context, bool for_rewrite = false);
     String versionPartitionToString(const VersionPart & part);
     RefreshSchedule & getRefreshSchedule() { return refresh_schedule; }
     PartitionTransformerPtr getPartitionTransformer() const { return partition_transformer; }
@@ -154,7 +141,6 @@ public:
     void dropMvMeta(ContextMutablePtr local_context);
 
     bool async() { return refresh_schedule.async(); }
-    bool sync() { return !async(); }
     UInt64 checkAndCalRefreshSeconds() const { return refresh_schedule.prescribeNextElaps(); }
     
 private:
@@ -170,11 +156,11 @@ private:
 
     void executeByInsertOverwrite(AsyncRefreshParamPtr param, ContextMutablePtr local_context);
 
-    VersionPartContainerPtrs getPreviousPartitions(ContextMutablePtr local_context);
+    void syncBaseTablePartitions(
+        PartitionDiffPtr & partition_diff, VersionPartContainerPtrs & latest_versioned_partitions, ContextMutablePtr local_context, bool for_rewrite = false);
 
     void insertRefreshTaskLog(AsyncRefreshParamPtr param, RefreshViewTaskStatus status,
-                            bool is_insert_overwrite, std::chrono::time_point<std::chrono::system_clock> start_time,
-                            ContextMutablePtr local_context, String exception = {});
+          bool is_insert_overwrite, std::chrono::time_point<std::chrono::system_clock> start_time, ContextMutablePtr local_context);
 
     /// Will be initialized in constructor
     StorageID target_table_id = StorageID::createEmpty();
@@ -184,9 +170,6 @@ private:
     // Async refresh task
     RefreshSchedule refresh_schedule;
     PartitionTransformerPtr partition_transformer;
-
-    // mv meta cache
-    MaterializedViewVersionedPartCache & cache;
 
     Poco::Logger * log;
 
