@@ -31,7 +31,7 @@ namespace DB
 PropertySets PropertyDeterminer::determineRequiredProperty(QueryPlanStepPtr step, const Property & property, Context & context)
 {
     DeterminerContext ctx{property, context};
-    DeterminerVisitor visitor{};
+    static DeterminerVisitor visitor{};
     PropertySets input_properties = VisitorUtil::accept(step, visitor, ctx);
     if (!property.getCTEDescriptions().empty() || !property.getTableLayout().empty())
     {
@@ -71,6 +71,11 @@ PropertySets DeterminerVisitor::visitPartitionTopNStep(const PartitionTopNStep &
     return {{require}};
 }
 
+PropertySets DeterminerVisitor::visitFinalSampleStep(const FinalSampleStep &, DeterminerContext &)
+{
+    throw Exception("Not impl property determiner", ErrorCodes::NOT_IMPLEMENTED);
+}
+
 PropertySets DeterminerVisitor::visitOffsetStep(const OffsetStep &, DeterminerContext &)
 {
     return {{Property{Partitioning{Partitioning::Handle::SINGLE}}}};
@@ -81,14 +86,9 @@ PropertySets DeterminerVisitor::visitFinishSortingStep(const FinishSortingStep &
     return {{Property{Partitioning{Partitioning::Handle::SINGLE}}}};
 }
 
-PropertySets DeterminerVisitor::visitFinalSampleStep(const FinalSampleStep & step, DeterminerContext & ctx)
-{
-    return visitStep(step, ctx);
-}
-
 PropertySets DeterminerVisitor::visitProjectionStep(const ProjectionStep & step, DeterminerContext & ctx)
 {
-    if (step.isFinalProject() && ctx.getRequired().getNodePartitioning().getComponent() != Partitioning::Component::WORKER)
+    if (step.isFinalProject() && (ctx.getRequired().getNodePartitioning().getComponent() != Partitioning::Component::WORKER || ctx.getContext().getSettingsRef().bsp_mode))
         return {{Property{Partitioning{Partitioning::Handle::SINGLE}}}};
     auto assignments = step.getAssignments();
     std::unordered_map<String, String> identities = Utils::computeIdentityTranslations(assignments);
@@ -99,11 +99,9 @@ PropertySets DeterminerVisitor::visitProjectionStep(const ProjectionStep & step,
     return {{translated}};
 }
 
-PropertySets DeterminerVisitor::visitArrayJoinStep(const ArrayJoinStep &, DeterminerContext & context)
+PropertySets DeterminerVisitor::visitArrayJoinStep(const ArrayJoinStep &, DeterminerContext &)
 {
-    auto require = context.getRequired();
-    require.setPreferred(true);
-    return {{require}};
+    return {{Property{Partitioning{Partitioning::Handle::SINGLE}}}};
 }
 
 PropertySets DeterminerVisitor::visitFilterStep(const FilterStep &, DeterminerContext & context)
@@ -274,7 +272,7 @@ PropertySets DeterminerVisitor::visitAggregatingStep(const AggregatingStep & ste
     return sets;
 }
 
-PropertySets DeterminerVisitor::visitTotalsHavingStep(const TotalsHavingStep &, DeterminerContext &)
+PropertySets DeterminerVisitor::visitTotalsHavingStep(const TotalsHavingStep & , DeterminerContext & )
 {
     return {{Property{Partitioning{Partitioning::Handle::SINGLE}}}};
 }
@@ -479,7 +477,8 @@ PropertySets DeterminerVisitor::visitWindowStep(const WindowStep & step, Determi
     else
     {
         PropertySet set;
-        set.emplace_back(Property{Partitioning{Partitioning::Handle::FIXED_HASH, group_bys, false}});
+        set.emplace_back(Property{
+            Partitioning{Partitioning::Handle::FIXED_HASH, group_bys, false}});
         sets.emplace_back(set);
     }
     return sets;
@@ -543,19 +542,4 @@ PropertySets DeterminerVisitor::visitTableFinishStep(const TableFinishStep &, De
     node.setComponent(Partitioning::Component::WORKER);
     return {{Property{node}}};
 }
-
-PropertySets DeterminerVisitor::visitOutfileWriteStep(const OutfileWriteStep &, DeterminerContext &)
-{
-    auto node = Partitioning{Partitioning::Handle::FIXED_ARBITRARY};
-    node.setComponent(Partitioning::Component::WORKER);
-    return {{Property{node}}};
-}
-
-PropertySets DeterminerVisitor::visitOutfileFinishStep(const OutfileFinishStep &, DeterminerContext &)
-{
-    auto node = Partitioning{Partitioning::Handle::SINGLE};
-    node.setComponent(Partitioning::Component::WORKER);
-    return {{Property{node}}};
-}
-
 }
