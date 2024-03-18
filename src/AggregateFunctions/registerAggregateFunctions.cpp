@@ -148,6 +148,7 @@ void registerAggregateFunctionCombinatorResample(AggregateFunctionCombinatorFact
 void registerAggregateFunctionCombinatorDistinct(AggregateFunctionCombinatorFactory &);
 void registerAggregateFunctionCombinatorStack(AggregateFunctionCombinatorFactory &);
 void registerAggregateFunctionCombinatorMap(AggregateFunctionCombinatorFactory & factory);
+void registerAggregateFunctionCombinatorOrderBy(AggregateFunctionCombinatorFactory &);
 
 void registerWindowFunctions(AggregateFunctionFactory & factory);
 
@@ -285,6 +286,7 @@ void registerAggregateFunctions()
         registerAggregateFunctionCombinatorDistinct(factory);
         registerAggregateFunctionCombinatorStack(factory);
         registerAggregateFunctionCombinatorMap(factory);
+        registerAggregateFunctionCombinatorOrderBy(factory);
     }
 }
 
