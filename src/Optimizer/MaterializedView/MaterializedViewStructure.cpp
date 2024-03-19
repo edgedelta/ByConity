@@ -34,7 +34,7 @@
 #include <QueryPlan/QueryPlanner.h>
 #include <QueryPlan/SymbolMapper.h>
 #include <Common/Exception.h>
-#include <Core/Field.h>
+#include "Core/Field.h"
 
 #include <unordered_map>
 
@@ -120,9 +120,8 @@ MaterializedViewStructurePtr MaterializedViewStructure::buildFrom(
     auto symbol_map = SymbolTransformMap::buildFrom(*query);
     if (!symbol_map)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "materialized view query plan node contains duplicate symbol");
-
-    InnerJoinCollector inner_join_collector;
-    inner_join_collector.collect(query);
+    
+    PlanNodes inner_sources = InnerJoinCollector::collect(query);
 
     std::unordered_set<IQueryPlanStep::Type> skip_nodes;
     skip_nodes.emplace(IQueryPlanStep::Type::Aggregating);
@@ -147,7 +146,7 @@ MaterializedViewStructurePtr MaterializedViewStructure::buildFrom(
     }
 
     ExpressionEquivalences expression_equivalences;
-    auto inner_sources_node_set = join_hyper_graph.getNodeSet(inner_join_collector.getInnerSources());
+    auto inner_sources_node_set = join_hyper_graph.getNodeSet(inner_sources);
     for (const auto & join_clause : join_hyper_graph.getJoinConditions())
     {
         if ((inner_sources_node_set & join_clause.first) == join_clause.first)
@@ -180,15 +179,9 @@ MaterializedViewStructurePtr MaterializedViewStructure::buildFrom(
             break;
         const auto & query_column = root->getCurrentDataStream().header.getByPosition(index++);
         if (!removeNullable(removeLowCardinality(query_column.type))->equals(*removeNullable(removeLowCardinality(table_column.type))))
-            throw Exception(
-                ErrorCodes::LOGICAL_ERROR,
-                "materialized view query output type is inconsistent with target table columns type: {} (type: {}) in query, "
-                "{}(type: {}) in {}",
-                query_column.name,
-                query_column.type->getName(),
-                table_column.name,
-                table_column.type->getName(),
-                target_storage_id.getFullTableName());
+            throw Exception(ErrorCodes::LOGICAL_ERROR, 
+                "materialized view physical columns type is inconsistent with select outputs for column " + table_column.name + " in "
+                    + target_storage_id.getFullTableName());
 
         auto query_column_name = output_columns_to_query_columns_map.at(query_column.name);
         output_columns.emplace(query_column_name);
@@ -205,8 +198,7 @@ MaterializedViewStructurePtr MaterializedViewStructure::buildFrom(
         std::move(target_table),
         std::move(base_tables),
         std::move(join_hyper_graph),
-        inner_join_collector.getInnerSources(),
-        inner_join_collector.getOuterSources(),
+        std::move(inner_sources),
         std::move(aggregating_step),
         has_having_filter,
         std::move(*symbol_map),
