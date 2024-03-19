@@ -19,9 +19,6 @@
 #include <Common/escapeForFileName.h>
 #include <Common/quoteString.h>
 #include <Common/RowExistsColumnInfo.h>
-#include <Common/SipHash.h>
-#include <Common/StringUtils/StringUtils.h>
-#include <Storages/DataDestinationType.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeDate.h>
 #include <DataTypes/DataTypeDateTime.h>
@@ -66,7 +63,6 @@
 #include <Optimizer/SelectQueryInfoHelper.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreeWhereOptimizer.h>
-#include <MergeTreeCommon/IMergeTreePartMeta.h>
 
 
 namespace
@@ -536,9 +532,6 @@ void MergeTreeMetaBase::checkTTLExpressions(const StorageInMemoryMetadata & new_
     {
         for (const auto & move_ttl : new_table_ttl.move_ttl)
         {
-            if (move_ttl.destination_type == DataDestinationType::BYTECOOL)
-                continue;
-
             if (!getDestinationForMoveTTL(move_ttl))
             {
                 String message;
@@ -658,7 +651,7 @@ MergeTreeMetaBase::MutableDataPartPtr MergeTreeMetaBase::cloneAndLoadDataPartOnS
     if (auto src_part_in_memory = asInMemoryPart(src_part))
     {
         const auto & src_relative_data_path = src_part_in_memory->storage.getRelativeDataPath(IStorage::StorageLocation::MAIN);
-        auto flushed_part_path = src_part_in_memory->getRelativePathForPrefix(tmp_part_prefix, /*is_detach*/false);
+        auto flushed_part_path = src_part_in_memory->getRelativePathForPrefix(tmp_part_prefix);
         src_part_in_memory->flushToDisk(src_relative_data_path, flushed_part_path, metadata_snapshot);
         src_part_path = fs::path(src_relative_data_path) / flushed_part_path / "";
     }
@@ -1541,27 +1534,12 @@ String MergeTreeMetaBase::getStorageUniqueID() const
         return storage_address;
 }
 
-UUID MergeTreeMetaBase::getCnchStorageUUID() const
+void MergeTreeMetaBase::calculateColumnSizesImpl()
 {
-    if (getStorageID().hasUUID())
-        return getStorageID().uuid;
-    else
-    {
-        /// Get cnch table uuid from settings as CloudMergeTree has no uuid for Kafka task
-        String uuid_str = getSettings()->cnch_table_uuid.value;
-        if (!uuid_str.empty())
-            return UUIDHelpers::toUUID(uuid_str);
-        else
-            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Storage uuid of table {} can't be empty", getStorageID().getNameForLogs());
-    }
-}
+    Stopwatch stopwatch;
 
-using DataPart = IMergeTreeDataPart;
-using DataPartPtr = std::shared_ptr<const DataPart>;
-using DataPartsVector = std::vector<DataPartPtr>;
+    column_sizes.clear();
 
-std::pair<DataPartsVector, double> MergeTreeMetaBase::getCalculatedPartsAndRatio() const
-{
     /// Take into account only committed parts
     auto committed_parts_range = getDataPartsStateRange(DataPartState::Committed);
     DataPartsVector committed_parts{committed_parts_range.begin(), committed_parts_range.end()};
@@ -1582,18 +1560,6 @@ std::pair<DataPartsVector, double> MergeTreeMetaBase::getCalculatedPartsAndRatio
     {
         calculated_parts = committed_parts;
     }
-    return std::make_pair(calculated_parts, ratio);
-}
-
-void MergeTreeMetaBase::calculateColumnSizesImpl()
-{
-    Stopwatch stopwatch;
-
-    column_sizes.clear();
-
-    auto parts_and_ratio = getCalculatedPartsAndRatio();
-    DataPartsVector calculated_parts = parts_and_ratio.first;
-    double ratio = parts_and_ratio.second;
 
     for (const auto & part : calculated_parts)
         addPartContributionToColumnSizes(part);
@@ -1711,7 +1677,7 @@ bool MergeTreeMetaBase::mayBenefitFromIndexForIn(
     }
 }
 
-TableDefinitionHash MergeTreeMetaBase::getTableHashForClusterBy() const
+UInt64 MergeTreeMetaBase::getTableHashForClusterBy() const
 {
     const auto & metadata = getInMemoryMetadata();
     const auto & partition_by_ast = metadata.getPartitionKeyAST();
@@ -1725,12 +1691,10 @@ TableDefinitionHash MergeTreeMetaBase::getTableHashForClusterBy() const
 
     cluster_definition.erase(remove(cluster_definition.begin(), cluster_definition.end(), '\''), cluster_definition.end());
 
-    UInt64 determin_hash = sipHash64(cluster_definition);
+    std::hash<String> hasher;
+    auto cluster_definition_hash = hasher(cluster_definition);
 
-    UInt64 v1_hash = compatibility::v1::hash(cluster_definition);
-    UInt64 v2_hash = compatibility::v2::hash(cluster_definition);
-
-    return {determin_hash, v1_hash, v2_hash};
+    return cluster_definition_hash;
 
 }
 
@@ -1855,59 +1819,116 @@ void MergeTreeMetaBase::checkColumnsValidity(const ColumnsDescription & columns,
     }
 }
 
-bool MergeTreeMetaBase::commitTxnFromWorkerSide(const StorageMetadataPtr & metadata_snapshot, ContextPtr query_context) const
+ASTPtr MergeTreeMetaBase::applyFilter(
+    ASTPtr query_filter, SelectQueryInfo & query_info, ContextPtr query_context, PlanNodeStatisticsPtr storage_statistics) const
 {
-    if (!metadata_snapshot->hasUniqueKey())
-        return false;
-    bool enable_staging_area = query_context->getSettingsRef().enable_staging_area_for_write || getSettings()->cloud_enable_staging_area;
-    bool enable_append_mode = query_context->getSettingsRef().dedup_key_mode == DedupKeyMode::APPEND;
-    return !enable_append_mode && !enable_staging_area;
-}
+    const auto & settings = query_context->getSettingsRef();
+    auto * select_query = query_info.getSelectQuery();
+    ASTs conjuncts = PredicateUtils::extractConjuncts(query_filter);
 
-ColumnSize MergeTreeMetaBase::getMapColumnSizes(const DataPartPtr & part, const String & map_implicit_column_name) const
-{
-    auto part_checksums = part->getChecksums();
-    if (part_checksums->empty())
-        return {};
-
-    // we don't modify anything, maybe we do not need this lock
-    auto lock = lockPartsRead();
-
-    // __string_params__'btm' -> string_params
-    auto name = parseMapNameFromImplicitColName(map_implicit_column_name) ;
-    auto pair = part->columns_ptr->tryGetByName(name);
-    if (pair.has_value())
+    /// Set partition_filter
+    /// this should be done before setting query.where() to avoid partition filters being chosen as prewhere
+    if (settings.enable_partition_filter_push_down)
     {
-        auto part_column_size = part->getMapColumnSize(map_implicit_column_name, *(pair->type));
-        return part_column_size;
-    }
-    return {};
-}
+        ASTs push_predicates;
+        ASTs remain_predicates;
 
-ColumnSize MergeTreeMetaBase::calculateMapColumnSizesImpl(const String & map_implicit_column_name) const
-{
-    Stopwatch stopwatch;
-    auto parts_and_ratio = getCalculatedPartsAndRatio();
-    DataPartsVector calculated_parts = parts_and_ratio.first;
-    double ratio = parts_and_ratio.second;
+        Names partition_key_names = getInMemoryMetadataPtr()->getPartitionKey().column_names;
+        Names virtual_key_names = getSampleBlockWithVirtualColumns().getNames();
+        partition_key_names.insert(partition_key_names.end(), virtual_key_names.begin(), virtual_key_names.end());
+        auto iter = std::stable_partition(conjuncts.begin(), conjuncts.end(), [&](const auto & predicate) {
+            PartitionPredicateVisitor::Data visitor_data{query_context, partition_key_names};
+            PartitionPredicateVisitor(visitor_data).visit(predicate);
+            return visitor_data.getMatch();
+        });
 
-    ColumnSize map_column_size;
-    for (const auto & part : calculated_parts)
-    {
-        const ColumnSize & map_col_size = getMapColumnSizes(part, map_implicit_column_name);
-        map_column_size.add(map_col_size);
-    }
+        push_predicates.insert(push_predicates.end(), conjuncts.begin(), iter);
+        remain_predicates.insert(remain_predicates.end(), iter, conjuncts.end());
 
-    if (ratio > 1.0)
-    {
-        map_column_size.marks = map_column_size.marks * ratio;
-        map_column_size.data_compressed = map_column_size.data_compressed * ratio;
-        map_column_size.data_uncompressed = map_column_size.data_uncompressed * ratio;
+        ASTPtr new_partition_filter;
+
+        if (query_info.partition_filter)
+        {
+            push_predicates.push_back(query_info.partition_filter);
+            new_partition_filter = PredicateUtils::combineConjuncts(push_predicates);
+        }
+        else
+        {
+            new_partition_filter = PredicateUtils::combineConjuncts<false>(push_predicates);
+        }
+
+        if (!PredicateUtils::isTruePredicate(new_partition_filter))
+            query_info.partition_filter = std::move(new_partition_filter);
+
+        conjuncts.swap(remain_predicates);
     }
 
-    LOG_DEBUG(log, "Calculate columns size elapsed: {} ms.", stopwatch.elapsedMilliseconds());
+    /// Set query.where()
+    IStorage::applyFilter(PredicateUtils::combineConjuncts(conjuncts), query_info, query_context, storage_statistics);
 
-    return map_column_size;
+    /// Set query.prewhere(), strategy 1: by selectivity
+    if (select_query->where() && !select_query->prewhere() && supportsPrewhere() && settings.enable_active_prewhere && storage_statistics)
+    {
+        std::vector<ASTPtr> full_conjuncts = PredicateUtils::extractConjuncts(select_query->getWhere());
+        std::vector<ASTPtr> pre_conjuncts;
+        std::vector<ASTPtr> where_conjuncts;
+
+        IdentifierNameSet used_columns;
+        select_query->getWhere()->collectIdentifierNames(used_columns);
+        const auto & columns_desc = getInMemoryMetadataPtr()->getColumns();
+        NamesAndTypes names_and_types;
+        for (const auto & col_name : used_columns)
+            names_and_types.emplace_back(columns_desc.getPhysical(col_name));
+
+        for (const auto & conjunct : full_conjuncts)
+        {
+            double selectivity = FilterEstimator::estimateFilterSelectivity(storage_statistics, conjunct, names_and_types, query_context);
+            LOG_DEBUG(
+                &Poco::Logger::get("OptimizerActivePrewhere"),
+                "conjunct=" + serializeAST(*conjunct) + ", selectivity=" + std::to_string(selectivity));
+
+            if (selectivity <= query_context->getSettingsRef().max_active_prewhere_selectivity
+                && pre_conjuncts.size() < query_context->getSettingsRef().max_active_prewhere_size)
+                pre_conjuncts.push_back(conjunct);
+            else
+                where_conjuncts.push_back(conjunct);
+        }
+
+        if (!pre_conjuncts.empty())
+            select_query->setExpression(ASTSelectQuery::Expression::PREWHERE, PredicateUtils::combineConjuncts(pre_conjuncts));
+
+        if (!where_conjuncts.empty())
+            select_query->setExpression(ASTSelectQuery::Expression::WHERE, PredicateUtils::combineConjuncts(where_conjuncts));
+        else
+            select_query->setExpression(ASTSelectQuery::Expression::WHERE, nullptr);
+    }
+
+    /// Set query.prewhere(), strategy 2: by IO cost
+    if (select_query->where() && !select_query->prewhere() && supportsPrewhere() && settings.enable_optimizer_early_prewhere_push_down)
+    {
+        /// PREWHERE optimization: transfer some condition from WHERE to PREWHERE if enabled and viable
+        if (const auto & column_size = getColumnSizes(); !column_size.empty())
+        {
+            /// Extract column compressed sizes.
+            std::unordered_map<std::string, UInt64> column_compressed_sizes;
+            for (const auto & [name, sizes] : column_size)
+                column_compressed_sizes[name] = sizes.data_compressed;
+
+            auto current_info = buildSelectQueryInfoForQuery(query_info.query, query_context);
+            MergeTreeWhereOptimizer{
+                current_info,
+                query_context,
+                std::move(column_compressed_sizes),
+                getInMemoryMetadataPtr(),
+                current_info.syntax_analyzer_result->requiredSourceColumns(),
+                &Poco::Logger::get("OptimizerEarlyPrewherePushdown")};
+        }
+    }
+
+    /// remove prewhere from query plan
+    if (auto prewhere = select_query->prewhere())
+        PredicateUtils::subtract(conjuncts, PredicateUtils::extractConjuncts(prewhere));
+
+    return PredicateUtils::combineConjuncts(conjuncts);
 }
-
 }
