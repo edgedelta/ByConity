@@ -54,6 +54,8 @@ struct FormatSettings
     bool decimal_trailing_zeros = false;
     bool check_data_overflow = false;
 
+    bool seekable_read = true;
+    bool avoid_buffering = true;
     enum class DateTimeInputFormat
     {
         Basic,      /// Default format for fast parsing: YYYY-MM-DD hh:mm:ss (ISO-8601 without fractional part and timezone) or NNNNNNNNNN unix timestamp.
@@ -144,9 +146,9 @@ struct FormatSettings
         bool output_string_as_string = false;
         bool output_fixed_string_as_fixed_byte_array = true;
         bool preserve_order = false;
-        size_t file_size = 0 ;
         bool case_insensitive_column_matching = false;
         UInt64 max_block_size = 8192;
+        bool filter_push_down = true;
     } parquet;
 
     struct Orc

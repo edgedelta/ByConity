@@ -456,7 +456,6 @@ struct ContextSharedPart
 
     bool shutdown_called = false;
     bool restrict_tenanted_users_to_whitelist_settings = false;
-    bool restrict_tenanted_users_to_system_tables = true;
 
     Stopwatch uptime_watch;
 
@@ -803,8 +802,7 @@ ReadSettings Context::getReadSettings() const
     res.remote_read_min_bytes_for_seek = settings.remote_read_min_bytes_for_seek;
     res.disk_cache_mode = settings.disk_cache_mode;
     res.skip_download_if_exceeds_query_cache = settings.skip_download_if_exceeds_query_cache;
-    res.parquet_parallel_read= settings.parquet_parallel_read;
-    res.parquet_decode_threads = settings.max_download_thread;
+    res.parquet_decode_threads = settings.max_download_threads;
     res.filtered_ratio_to_use_skip_read = settings.filtered_ratio_to_use_skip_read;
     return res;
 }
@@ -1583,10 +1581,11 @@ void Context::setUser(const Credentials & credentials, const Poco::Net::SocketAd
     applySettingsChanges(default_profile_info->settings);
 }
 
-String Context::formatUserName(const String & name)
+void Context::setUser(const String & name, const String & password, const Poco::Net::SocketAddress & address)
 {
     //CNCH multi-tenant user name pattern from gateway client: {tenant_id}`{user_name}
     String user = name;
+    bool pushed = false;
     if (auto pos = user.find('`'); pos != String::npos)
     {
         auto tenant_id = String(user.c_str(), pos);
@@ -1598,12 +1597,9 @@ String Context::formatUserName(const String & name)
         else
             user = std::move(sub_user); ///{tenant_id}`default=>default
     }
-    return user;
-}
-
-void Context::setUser(const String & name, const String & password, const Poco::Net::SocketAddress & address)
-{
-    setUser(BasicCredentials(formatUserName(name), password), address);
+    setUser(BasicCredentials(user, password), address);
+    if (pushed)
+        popTenantId();
 }
 
 void Context::setUserWithoutCheckingPassword(const String & name, const Poco::Net::SocketAddress & address)
@@ -2175,7 +2171,8 @@ void Context::applySettingsChanges(const SettingsChanges & changes)
         {
             if (!SettingsChanges::WHITELIST_SETTINGS.contains(change.name))
                 throw Exception(ErrorCodes::UNKNOWN_SETTING, "Unknown or disabled setting " + change.name +
-                    " for tenant user. Contact the admin about whether it is needed to add it to tenant_whitelist_settings in configuration");
+                    "for tenant user. Contact the admin about whether it is needed to add it to tenant_whitelist_settings"
+                    " in configuration");
         }
     }
 
@@ -4335,17 +4332,6 @@ void Context::setIsRestrictSettingsToWhitelist(bool is_restrict)
 {
     /// Lock isn't required, you should set it at start
     shared->restrict_tenanted_users_to_whitelist_settings = is_restrict;
-}
-
-bool Context::getIsRestrictSystemTables() const
-{
-    return shared->restrict_tenanted_users_to_system_tables;
-}
-
-void Context::setIsRestrictSystemTables(bool is_restrict)
-{
-    /// Lock isn't required, you should set it at start
-    shared->restrict_tenanted_users_to_system_tables = is_restrict;
 }
 
 void Context::addRestrictSettingsToWhitelist(const std::vector<String>& setting_names) const
