@@ -139,6 +139,8 @@ private:
     const bool allow_extended_conversion;
     const bool enable_subcolumn_optimization_through_union;
 
+    Poco::Logger * logger = &Poco::Logger::get("QueryAnalyzer");
+
     void analyzeSetOperation(ASTPtr & node, ASTs & selects);
 
     /// FROM clause
@@ -628,16 +630,19 @@ ScopePtr QueryAnalyzerVisitor::analyzeTable(
     {
         for (const auto & column : columns_description.getOrdinary())
         {
+            LOG_TRACE(logger, "analyze table {}, add ordinary field {}", full_table_name, column.name);
             add_field(column.name, column.type, true);
         }
 
         for (const auto & column : columns_description.getMaterialized())
         {
+            LOG_TRACE(logger, "analyze table {}, add materialized field {}", full_table_name, column.name);
             add_field(column.name, column.type, false);
         }
 
         for (const auto & column : storage->getVirtuals())
         {
+            LOG_TRACE(logger, "analyze table {}, add virtual field {}", full_table_name, column.name);
             add_field(column.name, column.type, false);
         }
 
@@ -645,6 +650,7 @@ ScopePtr QueryAnalyzerVisitor::analyzeTable(
         {
             for (const auto & column : columns_description.getSubcolumnsOfAllPhysical())
             {
+                LOG_TRACE(logger, "analyze table {}, add subcolumn field {}", full_table_name, column.name);
                 add_field(column.name, column.type, false);
             }
         }
@@ -681,6 +687,7 @@ ScopePtr QueryAnalyzerVisitor::analyzeTable(
         {
             auto col_type = ExprAnalyzer::analyze(alias_col, scope, context, analysis, options);
             auto col_name = alias_col->tryGetAlias();
+            LOG_TRACE(logger, "analyze table {}, add alias field {}", full_table_name, col_name);
             add_field(col_name, col_type, false);
         }
 
