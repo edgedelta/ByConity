@@ -154,6 +154,11 @@ PlanNodePtr UnifyNullableVisitor::visitIntersectOrExceptNode(IntersectOrExceptNo
     return visitPlanNode(node, context);
 }
 
+PlanNodePtr UnifyNullableVisitor::visitLocalExchangeNode(LocalExchangeNode & node, ContextMutablePtr & context)
+{
+    return visitPlanNode(node, context);
+}
+
 PlanNodePtr UnifyNullableVisitor::visitMultiJoinNode(MultiJoinNode & node, ContextMutablePtr & context)
 {
     return visitPlanNode(node, context);

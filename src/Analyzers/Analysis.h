@@ -189,18 +189,6 @@ struct SubColumnReference
     }
 };
 
-struct ColumnWithType
-{
-    DataTypePtr type;
-    ColumnPtr column;
-
-    ColumnWithType() { }
-    ColumnWithType(const DataTypePtr & type_, const ColumnPtr & column_)
-        : type(type_), column(column_)
-    {}
-    ColumnWithType(const DataTypePtr & type_) : type(type_){}
-};
-
 struct HintAnalysis
 {
     size_t leading_hint_count = 0;
@@ -225,12 +213,16 @@ struct InsertAnalysis
     NamesAndTypes columns;
 };
 
-struct OutfileAnalysis
+struct ColumnWithType
 {
-    String out_file;
-    String format;
-    String compression_method;
-    size_t compression_level;
+    DataTypePtr type;
+    ColumnPtr column;
+
+    ColumnWithType() { }
+    ColumnWithType(const DataTypePtr & type_, const ColumnPtr & column_)
+        : type(type_), column(column_)
+    {}
+    ColumnWithType(const DataTypePtr & type_) : type(type_){}
 };
 
 template<typename Key, typename Val>
@@ -324,6 +316,7 @@ struct Analysis
     std::vector<WindowAnalysisPtr> & getWindowAnalysisOfSelectQuery(ASTSelectQuery & select_query);
 
     /// Subqueries
+    std::unordered_map<ASTPtr, bool> subquery_support_semi_anti;
     ListMultimap<ASTSelectQuery * , ASTPtr> scalar_subqueries;
     std::vector<ASTPtr> & getScalarSubqueries(ASTSelectQuery & select_query);
 
@@ -430,19 +423,12 @@ struct Analysis
     HintAnalysis hint_analysis;
     HintAnalysis & getHintInfo() { return hint_analysis; }
 
-    /// outfile info
-    std::optional<OutfileAnalysis> outfile_analysis;
-    std::optional<OutfileAnalysis> & getOutfileInfo() { return outfile_analysis; }
-
     std::unordered_map<ASTSelectQuery *, ArrayJoinAnalysis> array_join_analysis;
     ArrayJoinAnalysis & getArrayJoinAnalysis(ASTSelectQuery & select_query);
 
     /// Insert
     std::optional<InsertAnalysis> insert_analysis;
-    std::optional<InsertAnalysis> & getInsert()
-    {
-        return insert_analysis;
-    }
+    std::optional<InsertAnalysis> & getInsert() { return insert_analysis; }
 
     // Which columns are used in query, used for EXPLAIN ANALYSIS reporting.
     // A difference with read_columns is, columns used in alias columns are not included.

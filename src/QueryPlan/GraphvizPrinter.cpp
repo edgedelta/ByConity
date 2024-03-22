@@ -1739,7 +1739,7 @@ String StepPrinter::printExchangeStep(const ExchangeStep & step)
     }
     details << "|";
     details << "Shuffle Keys \\n";
-    for (const auto & column : step.getSchema().getPartitioningColumns())
+    for (const auto & column : step.getSchema().getColumns())
     {
         details << column << " ";
     }
@@ -3591,7 +3591,16 @@ String GraphvizPrinter::printGroup(const Group & group, const std::unordered_map
 
         if (expr->getStep()->getType() == IQueryPlanStep::Type::Join)
         {
-            auto join_step = dynamic_cast<const JoinStep *>(expr->getStep().get());
+            const auto * join_step = dynamic_cast<const JoinStep *>(expr->getStep().get());
+            for (size_t i = 0; i < join_step->getLeftKeys().size(); i++)
+            {
+                result += " " + escapeSpecialCharacters(join_step->getLeftKeys()[i]);
+                result += "=" + escapeSpecialCharacters(join_step->getRightKeys()[i]);
+            }
+            // if (!PredicateUtils::isTruePredicate(join_step->getFilter()))
+            // {
+            //     result += " " + escapeSpecialCharacters(serializeAST(*join_step->getFilter()));
+            // }
             if (join_step->getDistributionType() == DistributionType::REPARTITION)
             {
                 result += " repartition";
@@ -3604,9 +3613,10 @@ String GraphvizPrinter::printGroup(const Group & group, const std::unordered_map
         }
         if (expr->getStep()->getType() == IQueryPlanStep::Type::CTERef)
         {
-            auto cte_step = dynamic_cast<const CTERefStep *>(expr->getStep().get());
+            const auto * cte_step = dynamic_cast<const CTERefStep *>(expr->getStep().get());
             result += " id: " + std::to_string(cte_step->getId());
         }
+        result += " " + std::to_string(static_cast<UInt8>(expr->getProduceRule()));
         result += "<BR/>";
         return result;
     };
@@ -3652,11 +3662,6 @@ String GraphvizPrinter::printGroup(const Group & group, const std::unordered_map
     if (group.getJoinRootId() != 0)
     {
         out << "<TR><TD COLSPAN=\"3\">Join Root Id: " << group.getJoinRootId() << "</TD></TR>";
-    }
-
-    if (group.isMagic())
-    {
-        out << "<TR><TD COLSPAN=\"3\">MagicSet</TD></TR>";
     }
 
     // for (const auto & join_set : group.getJoinSets())
@@ -3714,19 +3719,19 @@ String GraphvizPrinter::printGroup(const Group & group, const std::unordered_map
         else if (partitioning.getComponent() == Partitioning::Component::WORKER)
             component_str = " WORKER";
 
-        if (partitioning.getPartitioningHandle() == Partitioning::Handle::SINGLE)
+        if (partitioning.getHandle() == Partitioning::Handle::SINGLE)
             return String("SINGLE") + component_str;
-        else if (partitioning.getPartitioningHandle() == Partitioning::Handle::FIXED_BROADCAST)
+        else if (partitioning.getHandle() == Partitioning::Handle::FIXED_BROADCAST)
             return String("BROADCAST") + component_str;
-        else if (partitioning.getPartitioningHandle() == Partitioning::Handle::ARBITRARY)
+        else if (partitioning.getHandle() == Partitioning::Handle::ARBITRARY)
             return String("ARBITRARY") + component_str;
-        else if (partitioning.getPartitioningHandle() == Partitioning::Handle::BUCKET_TABLE)
+        else if (partitioning.getHandle() == Partitioning::Handle::BUCKET_TABLE)
             return String("BUCKET_TABLE") + component_str;
-        else if (partitioning.getPartitioningHandle() == Partitioning::Handle::FIXED_ARBITRARY)
+        else if (partitioning.getHandle() == Partitioning::Handle::FIXED_ARBITRARY)
             return String("FIXED_ARBITRARY") + component_str;
-        else if (partitioning.getPartitioningHandle() == Partitioning::Handle::FIXED_HASH)
+        else if (partitioning.getHandle() == Partitioning::Handle::FIXED_HASH)
         {
-            if (partitioning.getPartitioningColumns().empty())
+            if (partitioning.getColumns().empty())
             {
                 return String("FIXED_HASH[]") + component_str;
             }
@@ -3734,9 +3739,9 @@ String GraphvizPrinter::printGroup(const Group & group, const std::unordered_map
             {
                 auto result = String("FIXED_HASH[")
                     + std::accumulate(
-                                  std::next(partitioning.getPartitioningColumns().begin()),
-                                  partitioning.getPartitioningColumns().end(),
-                                  partitioning.getPartitioningColumns()[0],
+                                  std::next(partitioning.getColumns().begin()),
+                                  partitioning.getColumns().end(),
+                                  partitioning.getColumns()[0],
                                   fold_string)
                     + "]";
                 if (partitioning.isEnforceRoundRobin())
@@ -3756,8 +3761,6 @@ String GraphvizPrinter::printGroup(const Group & group, const std::unordered_map
     auto property_str = [&](const Property & property) {
         std::stringstream ss;
         ss << partition_str(property.getNodePartitioning());
-        if (property.isPreferred())
-            ss << "?";
         ss << " ";
         ss << property.getCTEDescriptions().toString();
         return ss.str();
