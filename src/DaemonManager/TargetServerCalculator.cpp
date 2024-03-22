@@ -58,8 +58,8 @@ CnchServerClientPtr TargetServerCalculator::getTargetServerForCnchKafka(const St
     auto kafka_storage = catalog->tryGetTableByUUID(context, UUIDHelpers::UUIDToString(storage_id.uuid), TxnTimestamp::maxTS());
     if (!kafka_storage)
     {
-        LOG_INFO(log, "Cannot get table by UUID for {}", storage_id.getNameForLogs());
-        throw Exception(ErrorCodes::BAD_REQUEST_PARAMETER, "Cannot get table by UUID for {}", storage_id.getNameForLogs());
+        LOG_INFO(log, "Cannot get Kafka table by UUID for {}", storage_id.getNameForLogs());
+        throw Exception(ErrorCodes::BAD_REQUEST_PARAMETER, "Cannot get Kafka table by UUID for {}", storage_id.getNameForLogs());
     }
 
     auto dependencies = catalog->getAllViewsOn(context, kafka_storage, TxnTimestamp::maxTS());

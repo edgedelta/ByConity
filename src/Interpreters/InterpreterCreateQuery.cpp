@@ -69,7 +69,6 @@
 #include <Access/AccessRightsElement.h>
 
 #include <DataTypes/DataTypeFactory.h>
-#include <DataTypes/IDataType.h>
 #include <DataTypes/NestedUtils.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <DataTypes/DataTypeLowCardinality.h>
@@ -578,22 +577,12 @@ ColumnsDescription InterpreterCreateQuery::getColumnsDescription(
         {
             column_type = DataTypeFactory::instance().get(col_decl.type);
 
-            if (col_decl.unsigned_modifier)
-            {
-                if (!isInteger(column_type))
-                    throw Exception("Can only use SIGNED/UNSIGNED modifier with integer type", ErrorCodes::ILLEGAL_SYNTAX_FOR_DATA_TYPE);
-                if (isSignedInteger(column_type) && *col_decl.unsigned_modifier)
-                    column_type = makeUnsigned(column_type);
-                if (isUnsignedInteger(column_type) && !(*col_decl.unsigned_modifier))
-                    column_type = makeSigned(column_type);
-            }
-
             if (col_decl.null_modifier)
             {
                 if (column_type->isNullable())
                     throw Exception("Can't use [NOT] NULL modifier with Nullable type", ErrorCodes::ILLEGAL_SYNTAX_FOR_DATA_TYPE);
                 if (*col_decl.null_modifier)
-                    column_type = JoinCommon::convertTypeToNullable(column_type);
+                    column_type = makeNullable(column_type);
             }
             else if (make_columns_nullable)
             {
@@ -1025,8 +1014,6 @@ void InterpreterCreateQuery::setEngine(ASTCreateQuery & create) const
                 as_create.storage->ttl_table = nullptr;
 
             create.set(create.storage, as_create.storage->ptr());
-            if (as_create.comment)
-                create.set(create.comment, as_create.comment->ptr());
         }
         else if (as_create.as_table_function)
             create.as_table_function = as_create.as_table_function->clone();
@@ -1404,7 +1391,7 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
 
     if (create.replace_table)
         return doCreateOrReplaceTable(create, properties);
-
+    
     /// when create materialized view and tenant id is not empty add setting tenant_id to select query
     if (create.is_materialized_view && !getCurrentTenantId().empty())
     {
@@ -1421,7 +1408,7 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
                 select->setOrReplace(setting_ptr, settings);
                 create.setOrReplace(create.select, select);
             }
-        }
+        }   
         else
         {
             select->as<ASTSelectWithUnionQuery &>().settings_ast = settings;
@@ -1572,23 +1559,11 @@ bool InterpreterCreateQuery::doCreateTable(ASTCreateQuery & create,
     try
     {
         res->checkColumnsValidity(properties.columns);
-        if (auto * view = dynamic_cast<StorageMaterializedView *>(res.get()))
-        {
-            // if (view->async() && getContext()->getSettingsRef().enable_non_partitioned_base_refresh_throw_exception)
-            //     view->validatePartitionBased(getContext());
-
-            if (view->tryGetTargetTable() && !view->hasInnerTable())
-            {
-                StoragePtr target_table = view->tryGetTargetTable();
-                // if (!target_table->getInMemoryMetadataPtr()->getColumns().getMaterialized().empty())
-                //     throw Exception(
-                //         ErrorCodes::ILLEGAL_COLUMN,
-                //         "Cannot create materialized view {} to target table {} with materialized columns {}",
-                //         view->getStorageID().getNameForLogs(),
-                //         target_table->getStorageID().getNameForLogs(),
-                //         target_table->getInMemoryMetadataPtr()->getColumns().getMaterialized().toString());
-            }
-        }
+        // if (auto * view = dynamic_cast<StorageMaterializedView *>(res.get()))
+        // {
+        //     if (view->async() && getContext()->getSettingsRef().enable_non_partitioned_base_refresh_throw_exception)
+        //         view->validatePartitionBased(getContext());
+        // }
     }
     catch (...)
     {
