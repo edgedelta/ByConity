@@ -14,6 +14,7 @@
 #include <ServiceDiscovery/ServiceDiscoveryFactory.h>
 #include <Storages/HDFS/WriteBufferFromHDFS.h>
 #include <Common/config.h>
+#include "Interpreters/Context_fwd.h"
 
 #include <Parsers/ASTLiteral.h>
 #include <Parsers/ASTQueryWithOutput.h>

@@ -83,7 +83,7 @@ public:
         children.emplace_back(settings_);
         ast_settings = std::move(settings_);
     }
-    
+
     const ASTPtr & getExplainedQuery() const
     {
         auto * select_query = query->as<ASTSelectWithUnionQuery>();

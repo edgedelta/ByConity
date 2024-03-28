@@ -26,6 +26,7 @@
 #include <QueryPlan/CTEVisitHelper.h>
 #include <QueryPlan/PlanVisitor.h>
 #include <Interpreters/ProcessorProfile.h>
+#include "QueryPlan/PlanNode.h"
 
 namespace DB
 {
