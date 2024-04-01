@@ -19,7 +19,6 @@
 #include <optional>
 #include <set>
 #include <Catalog/CatalogUtils.h>
-#include <Catalog/CatalogSettings.h>
 #include <Catalog/DataModelPartWrapper.h>
 #include <Catalog/MetastoreProxy.h>
 #include <Core/SettingsEnums.h>
@@ -95,8 +94,6 @@ public:
     Catalog(Context & _context, const MetastoreConfig & config, String _name_space = "default");
 
     ~Catalog() = default;
-
-    void loadFromConfig(const String & config_elem, const Poco::Util::AbstractConfiguration & config);
 
     MetastoreProxy::MetastorePtr getMetastore();
 
@@ -197,9 +194,9 @@ public:
         const TxnTimestamp & txnID,
         const TxnTimestamp & ts);
 
-    void createUDF(const String & prefix_name, const String & name, const String & create_query);
+    void createUDF(const String & db, const String & name, const String & create_query);
 
-    void dropUDF(const String & resolved_name);
+    void dropUDF(const String & db, const String & name);
 
     void detachTable(const String & db, const String & name, const TxnTimestamp & ts);
 
@@ -215,7 +212,7 @@ public:
         const TxnTimestamp & previous_version,
         const TxnTimestamp & txnID,
         const TxnTimestamp & ts,
-        const bool is_modify_cluster_by);
+        const bool is_recluster);
 
     void renameTable(
         const Settings & query_settings,
@@ -253,9 +250,6 @@ public:
      * @brief Get the Server Data Parts In Partitions With Delete Bitmap Metas.
      * For data consistency, data parts and delete bitmap metas must use the same transaction records to filter out. Otherwise it will get incorrect result.
      * Please see more detail in doc: https://bytedance.larkoffice.com/docx/Xo52dhoMnofCROxvXUUceyK9nQd
-     *
-     * @param bucket_numbers If empty fetch all bucket_numbers (by default),
-     * otherwise fetch the given bucket_numbers.
      */
     ServerDataPartsWithDBM getServerDataPartsInPartitionsWithDBM(
         const ConstStoragePtr & storage,
@@ -265,7 +259,6 @@ public:
         VisibilityLevel visibility = VisibilityLevel::Visible,
         const std::set<Int64> & bucket_numbers = {});
 
-    /// @param bucket_numbers If empty fetch all bucket_numbers, otherwise fetch the given bucket_numbers.
     ServerDataPartsVector getServerDataPartsInPartitions(
         const ConstStoragePtr & storage,
         const Strings & partitions,
@@ -296,15 +289,12 @@ public:
     /////////////////////////////
 
     /// fetch all delete bitmaps <= ts in the given partitions
-    ///
-    /// @param bucket_numbers If empty fetch all bucket_numbers, otherwise fetch the given bucket_numbers.
     DeleteBitmapMetaPtrVector getDeleteBitmapsInPartitions(
         const ConstStoragePtr & storage,
         const Strings & partitions,
         const TxnTimestamp & ts,
         const Context * session_context = nullptr,
-        VisibilityLevel visibility = VisibilityLevel::Visible,
-        const std::set<Int64> & bucket_numbers = {});
+        VisibilityLevel visibility = VisibilityLevel::Visible);
     DeleteBitmapMetaPtrVector getDeleteBitmapsInPartitionsFromMetastore(
         const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts, VisibilityLevel visibility = VisibilityLevel::Visible);
     DeleteBitmapMetaPtrVector getTrashedDeleteBitmapsInPartitions(
@@ -478,17 +468,6 @@ public:
 
     UndoBufferIterator getUndoBufferIterator() const;
 
-
-    /**
-     * @brief Try to create table meta proactively.
-     *        This function is used to help MV to get
-     *        table meta without waiting for lazy loading.
-     *
-     * @param uuid Table uuid.
-     * @param host_port Host server for the table.
-     */
-    void notifyTableCreated(const UUID & uuid, const HostWithPorts & host_port) noexcept;
-
     /// get transaction records, if the records exists, we can check with the transaction coordinator to detect zombie record.
     /// the transaction record will be cleared only after all intents have been cleared and set commit time for all parts.
     /// For zombie record, the intents to be clear can be scanned from intents space with txnid. The parts can be get from undo buffer.
@@ -603,11 +582,9 @@ public:
      * Trashed items including data parts, staged parts, and deleted bitmaps.
      *
      * @param limit Limit the result retured. Disabled with value `0`.
-     * @param start_key When provided, KV scan will start from the `start_key`,
-     * and it will be updated after calling this method.
      * @return Trashed parts.
      */
-    TrashItems getDataItemsInTrash(const StoragePtr & storage, const size_t & limit = 0, String * start_key = nullptr);
+    TrashItems getDataItemsInTrash(const StoragePtr & storage, const size_t & limit = 0);
 
     void markPartitionDeleted(const StoragePtr & table, const Strings & partitions);
     void deletePartitionsMetadata(const StoragePtr & table, const PartitionWithGCStatus & partitions);
@@ -853,7 +830,7 @@ public:
     std::vector<AccessEntityModel> getAllAccessEntities(EntityType type);
     std::optional<String> tryGetAccessEntityName(const UUID & uuid);
     void dropAccessEntity(EntityType type, const UUID & uuid, const String & name);
-    void putAccessEntity(EntityType type, AccessEntityModel & new_access_entity, const AccessEntityModel & old_access_entity, bool replace_if_exists = true);
+    void putAccessEntity(EntityType type, AccessEntityModel & new_access_entity, AccessEntityModel & old_access_entity, bool replace_if_exists = true);
 
 
 private:
@@ -863,9 +840,10 @@ private:
     const String name_space;
     String topology_key;
 
+    UInt32 max_commit_size_one_batch {2000};
     std::unordered_map<UUID, std::shared_ptr<std::mutex>> nhut_mutex;
     std::mutex all_storage_nhut_mutex;
-    CatalogSettings settings;
+    UInt32 max_drop_size_one_batch {10000};
 
     std::shared_ptr<Protos::DataModelDB> tryGetDatabaseFromMetastore(const String & database, const UInt64 & ts);
     std::shared_ptr<Protos::DataModelTable>
@@ -1037,5 +1015,6 @@ void remove_not_exist_items(std::vector<T> & items_to_write, std::vector<size_t>
 }
 
 using CatalogPtr = std::shared_ptr<Catalog>;
+void notifyOtherServersOnAccessEntityChange(const Context & context, EntityType type, const String & tenanted_name, const UUID & uuid);
 void fillUUIDForDictionary(DB::Protos::DataModelDictionary &);
 }
