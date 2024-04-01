@@ -305,15 +305,6 @@ void SegmentScheduler::updateQueryStatus(const RuntimeSegmentsStatus & segment_s
 
 void SegmentScheduler::updateSegmentStatus(const RuntimeSegmentsStatus & segment_status)
 {
-    LOG_TRACE(
-        log,
-        "updateSegmentStatus, query_id:{}, segment_id:{}, parallel_id:{}, is_succeed:{} is_cancelled:{} cpu:{}",
-        segment_status.query_id,
-        segment_status.segment_id,
-        segment_status.parallel_index,
-        segment_status.is_succeed,
-        segment_status.is_cancelled,
-        segment_status.metrics.cpu_micros);
     std::unique_lock<bthread::Mutex> lock(segment_status_mutex);
     auto segment_status_iter = segment_status_map.find(segment_status.query_id);
     if (segment_status_iter == segment_status_map.end())
