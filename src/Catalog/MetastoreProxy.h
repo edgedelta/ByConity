@@ -18,6 +18,7 @@
 //#include <Catalog/MetastoreByteKVImpl.h>
 #include <Catalog/MetastoreFDBImpl.h>
 #include <Catalog/StringHelper.h>
+#include <Catalog/CatalogUtils.h>
 #include <Protos/data_models.pb.h>
 #include <Protos/data_models_mv.pb.h>
 
@@ -447,6 +448,12 @@ public:
     static std::string tablePartitionInfoPrefix(const std::string & name_space, const std::string & uuid)
     {
         return escapeString(name_space) + '_' + TABLE_PARTITION_INFO_PREFIX + uuid + '_';
+    }
+
+    static std::string tablePartitionInfoKey(const std::string & name_space, const std::string & uuid, const std::string & partition_id)
+    {
+        /// To keep the partitions have the same order as data parts in bytekv, we add an extra "_" in the key of partition meta
+        return tablePartitionInfoPrefix(name_space, uuid) + partition_id + "_";
     }
 
     static std::string tableMutationPrefix(const std::string & name_space)
@@ -995,9 +1002,15 @@ public:
     IMetaStore::IteratorPtr getAllDictionaryMeta(const String & name_space);
     std::vector<std::shared_ptr<DB::Protos::DataModelDictionary>> getDictionariesFromTrash(const String & name_space, const String & database);
 
-    void prepareAddDataParts(const String & name_space, const String & table_uuid, const Strings & current_partitions,
-                             const google::protobuf::RepeatedPtrField<Protos::DataModelPart> & parts, BatchCommitRequest & batch_write,
-                             const std::vector<String> & expected_parts, bool update_sync_list = false);
+    void prepareAddDataParts(
+        const String & name_space,
+        const String & table_uuid,
+        const Strings & current_partitions,
+        std::unordered_set<String> & deleting_partitions,
+        const google::protobuf::RepeatedPtrField<Protos::DataModelPart> & parts,
+        BatchCommitRequest & batch_write,
+        const std::vector<String> & expected_parts,
+        bool update_sync_list = false);
     void prepareAddStagedParts(
         const String & name_space,
         const String & table_uuid,
@@ -1224,6 +1237,8 @@ public:
 
     String getByKey(const String & key);
 
+    IMetaStore::IteratorPtr getByPrefix(const String & prefix, size_t limit = 0);
+
     /**
      * @brief Get all items in the trash state. This is a GC related function.
      *
@@ -1252,6 +1267,9 @@ public:
     void updateObjectPartialSchemaStatus(const String &name_space, const TxnTimestamp & txn_id, const ObjectPartialSchemaStatus & status);
 
     IMetaStore::IteratorPtr getAllDeleteBitmaps(const String & name_space, const String & table_uuid);
+
+    // return successfully removed partitions
+    Strings removePartitions(const String & name_space, const String & table_uuid, const PartitionWithGCStatus & partitions);
 
     /**
      * @brief Get parts partition metrics snapshots in table level.

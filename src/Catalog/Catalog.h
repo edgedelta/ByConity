@@ -278,6 +278,8 @@ public:
 
     ServerDataPartsVector getTrashedPartsInPartitions(const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts, VisibilityLevel visibility = VisibilityLevel::Visible);
 
+    bool hasTrashedPartsInPartition(const ConstStoragePtr & storage, const String & partition);
+
     ServerDataPartsVector getAllServerDataParts(const ConstStoragePtr & storage, const TxnTimestamp & ts, const Context * session_context, VisibilityLevel visibility = VisibilityLevel::Visible);
     DataPartsVector getDataPartsByNames(const NameSet & names, const StoragePtr & table, const TxnTimestamp & ts);
     DataPartsVector getStagedDataPartsByNames(const NameSet & names, const StoragePtr & table, const TxnTimestamp & ts);
@@ -332,6 +334,8 @@ public:
     void dropAllPart(const StoragePtr & storage, const TxnTimestamp & txnID, const TxnTimestamp & ts);
 
     std::vector<std::shared_ptr<MergeTreePartition>> getPartitionList(const ConstStoragePtr & table, const Context * session_context);
+    PartitionWithGCStatus getPartitionsWithGCStatus(const StoragePtr & table, const Strings & required_partitions);
+
     std::vector<Protos::LastModificationTimeHint> getLastModificationTimeHints(const ConstStoragePtr & table);
 
     template<typename Map>
@@ -605,6 +609,8 @@ public:
      */
     TrashItems getDataItemsInTrash(const StoragePtr & storage, const size_t & limit = 0, String * start_key = nullptr);
 
+    void markPartitionDeleted(const StoragePtr & table, const Strings & partitions);
+    void deletePartitionsMetadata(const StoragePtr & table, const PartitionWithGCStatus & partitions);
 
     /// APIs to sync data parts for preallocate mode
     std::vector<TxnTimestamp> getSyncList(const StoragePtr & table);
