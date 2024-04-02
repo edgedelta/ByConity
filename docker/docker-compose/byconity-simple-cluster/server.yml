@@ -311,3 +311,7 @@ catalog_service:
 hdfs_addr: hdfs://hdfs-namenode:9000
 custom_settings_prefixes: SQL_
 cnch_config: "/config/cnch-config.yml"
+hdfs_addr: hdfs://hdfs-namenode:9000
+custom_settings_prefixes: SQL_
+restrict_tenanted_users_to_system_tables: false
+restrict_tenanted_users_to_whitelist_settings: false
