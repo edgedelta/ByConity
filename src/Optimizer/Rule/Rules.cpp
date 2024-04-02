@@ -39,6 +39,7 @@
 #include <Optimizer/Rule/Rewrite/SingleDistinctAggregationToGroupBy.h>
 #include <Optimizer/Rule/Rewrite/SwapAdjacentRules.h>
 #include <Optimizer/Rule/Rewrite/TopNRules.h>
+#include <Optimizer/Rule/Rewrite/EagerAggregation.h>
 
 namespace DB
 {
@@ -117,7 +118,9 @@ std::vector<RulePtr> Rules::removeRedundantRules()
 
 std::vector<RulePtr> Rules::pushAggRules()
 {
-    return {std::make_shared<PushAggThroughOuterJoin>()};
+    return {
+        std::make_shared<PushAggThroughOuterJoin>(),
+        std::make_shared<EagerAggregation>()};
 }
 
 std::vector<RulePtr> Rules::pushDownLimitRules()
