@@ -364,7 +364,7 @@ int checkShortCircuitArguments(const ColumnsWithTypeAndName & arguments)
             return -1; // Skip short-circuit evaluation for low cardinality columns
         }
 
-        DB::ColumnFunction *f = checkAndGetShortCircuitArgument(arguments[i].column);
+        DB::ColumnFunction f = checkAndGetShortCircuitArgument(arguments[i].column);
 
         for (size_t j = 0; j < f.columns_to_capture.size(); j++) {
             LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Checking short-circuit function argument index: {}, column name: {}, family name: {}, data type: {}", j, f.columns_to_capture[j].column->getName(), f.columns_to_capture[j].column->getFamilyName(), f.columns_to_capture[j].column->getDataType());
