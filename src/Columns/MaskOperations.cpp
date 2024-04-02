@@ -243,15 +243,16 @@ MaskInfo extractMaskImpl(
 
     MaskInfo mask_info;
 
-    if (column->getName() == "ColumnLowCardinality") {
-        // Force forward logic evaluation for low cardinality columns. Fill the mask with zeros as the functions logic passes
-        // masked execution if the mask contains only zeros: https://github.com/edgedelta/ByConity/blob/577fe977b94187a0d5ec753f30aee21824f36bca/src/Functions/FunctionsLogical.cpp#L586
-        LOG_DEBUG(&Poco::Logger::get("mask-operations-test"), "Force forward logic evaluation for low cardinality column name: {}, family name: {}, data type: {}", column->getName(), column->getFamilyName(), column->getDataType());
-        mask_info.has_ones = false;
-        mask_info.has_zeros = true;
-        std::fill(mask.begin(), mask.end(), 0);
-        return mask_info;
-    }
+    // if (column->getName() == "ColumnLowCardinality") {
+    //     // Force forward logic evaluation for low cardinality columns. Fill the mask with zeros as the functions logic passes
+    //     // masked execution if the mask contains only zeros: https://github.com/edgedelta/ByConity/blob/577fe977b94187a0d5ec753f30aee21824f36bca/src/Functions/FunctionsLogical.cpp#L586
+    //     LOG_INFO(&Poco::Logger::get("LowcardSkip"), "Force forward logic evaluation for low cardinality column name: {}, family name: {}, data type: {}", column->getName(), column->getFamilyName(), column->getDataType());
+    //     mask_info.skip_mask = true;
+    //     // mask_info.has_ones = false;
+    //     // mask_info.has_zeros = true;
+    //     // std::fill(mask.begin(), mask.end(), 0);
+    //     return mask_info;
+    // }
 
     if (!(extractMaskNumeric<inverted, UInt8>(mask, column, null_value, null_bytemap, nulls, mask_info)
           || extractMaskNumeric<inverted, UInt16>(mask, column, null_value, null_bytemap, nulls, mask_info)
@@ -354,6 +355,11 @@ int checkShortCircuitArguments(const ColumnsWithTypeAndName & arguments)
     int last_short_circuit_argument_index = -1;
     for (size_t i = 0; i != arguments.size(); ++i)
     {
+        if (arguments[i].column->getName() == "ColumnLowCardinality") {
+            LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Skip short-circuit evaluation for low cardinality column name: {}, family name: {}, data type: {}", arguments[i].column->getName(), arguments[i].column->getFamilyName(), arguments[i].column->getDataType());
+            return -1; // Skip short-circuit evaluation for low cardinality columns
+        }
+
         if (checkAndGetShortCircuitArgument(arguments[i].column))
             last_short_circuit_argument_index = i;
     }

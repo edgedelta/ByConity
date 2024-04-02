@@ -581,6 +581,11 @@ ColumnPtr FunctionAnyArityLogical<Impl, Name>::executeShortCircuit(ColumnsWithTy
         else
             mask_info = extractMask(mask, arguments[i - 1].column, nulls.get(), null_value);
 
+        // if (mask_info.skip_mask) {
+        //     LOG_INFO(&Poco::Logger::get("FunctionAnyArityLogical"), "Skip mask for argument #{}: {} (inverted: {})", i, arguments[i - 1].name, inverted);
+        //     continue;
+        // }
+
         /// If mask doesn't have ones, we don't need to execute the rest arguments,
         /// because the result won't change.
         if (!mask_info.has_ones || i == arguments.size())

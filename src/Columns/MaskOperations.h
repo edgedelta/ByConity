@@ -21,6 +21,7 @@ struct MaskInfo
 {
     bool has_ones;
     bool has_zeros;
+    // bool skip_mask;
 };
 
 /// The next functions are used to extract UInt8 mask from a column,

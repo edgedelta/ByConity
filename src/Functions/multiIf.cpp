@@ -312,6 +312,11 @@ private:
                 maskedExecute(arguments[i], condition_mask, condition_mask_info);
             }
 
+            // if (condition_mask_info.skip_mask) {
+            //     LOG_INFO(&Poco::Logger::get("FunctionMultiIf"), "condition_mask_info.skip_mask is true");
+            //     continue;
+            // }
+
             /// Check if the condition is always true and we don't need to execute the rest arguments.
             if (!condition_mask_info.has_zeros)
                 break;
