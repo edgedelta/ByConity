@@ -366,10 +366,10 @@ int checkShortCircuitArguments(const ColumnsWithTypeAndName & arguments)
 
         DB::ColumnFunction *f = checkAndGetShortCircuitArgument(arguments[i].column);
 
-        for (size_t j = 0; j < f->columns_to_capture.size(); j++) {
-            LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Checking short-circuit function argument index: {}, column name: {}, family name: {}, data type: {}", j, f->columns_to_capture[j].column->getName(), f->columns_to_capture[j].column->getFamilyName(), f->columns_to_capture[j].column->getDataType());
-            if (f->columns_to_capture[i].column->getName() == "ColumnLowCardinality") {
-                LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Skip short-circuit evaluation for low cardinality column in function, name: {}, family name: {}, data type: {}", f->columns_to_capture[i].column->getName(), f->columns_to_capture[i].column->getFamilyName(), f->columns_to_capture[i].column->getDataType());
+        for (size_t j = 0; j < f->getColumnsToCapture().size(); j++) {
+            LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Checking short-circuit function argument index: {}, column name: {}, family name: {}, data type: {}", j, f->getColumnsToCapture()[j].column->getName(), f->getColumnsToCapture()[j].column->getFamilyName(), f->getColumnsToCapture()[j].column->getDataType());
+            if (f->getColumnsToCapture()[i].column->getName() == "ColumnLowCardinality") {
+                LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Skip short-circuit evaluation for low cardinality column in function, name: {}, family name: {}, data type: {}", f->getColumnsToCapture()[i].column->getName(), f->getColumnsToCapture()[i].column->getFamilyName(), f->getColumnsToCapture()[i].column->getDataType());
                 return -1; // Skip short-circuit evaluation for low cardinality columns
             }
         }
