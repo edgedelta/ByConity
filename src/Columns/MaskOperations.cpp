@@ -352,9 +352,13 @@ void executeColumnIfNeeded(ColumnWithTypeAndName & column, bool empty)
 
 int checkShortCircuitArguments(const ColumnsWithTypeAndName & arguments)
 {
+    LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Checking short-circuit arguments");
+
+
     int last_short_circuit_argument_index = -1;
     for (size_t i = 0; i != arguments.size(); ++i)
     {
+        LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Checking short-circuit argument index: {}, column name: {}, family name: {}, data type: {}", i, arguments[i].column->getName(), arguments[i].column->getFamilyName(), arguments[i].column->getDataType());
         if (arguments[i].column->getName() == "ColumnLowCardinality") {
             LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Skip short-circuit evaluation for low cardinality column name: {}, family name: {}, data type: {}", arguments[i].column->getName(), arguments[i].column->getFamilyName(), arguments[i].column->getDataType());
             return -1; // Skip short-circuit evaluation for low cardinality columns
