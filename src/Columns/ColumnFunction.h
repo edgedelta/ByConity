@@ -184,7 +184,7 @@ public:
 
     bool isShortCircuitArgument() const { return is_short_circuit_argument; }
 
-    const ColumnsWithTypeAndName getColumnsToCapture() { return captured_columns; }
+    const ColumnsWithTypeAndName getColumnsToCapture() const { return captured_columns; }
 
 private:
     size_t size_;
