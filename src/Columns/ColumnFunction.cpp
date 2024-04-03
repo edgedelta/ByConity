@@ -217,7 +217,15 @@ DataTypePtr ColumnFunction::getResultType() const
 }
 
 bool ColumnFunction::hasLowCardColumn() const {
+    if (captured_columns == nullptr) {
+        LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "No columns captured");
+        return false;
+    }
     for (const DB::ColumnWithTypeAndName & column : captured_columns) {
+        if (column.column == nullptr) {
+            LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "Column is null");
+            continue;
+        }
         LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "Checking column: {}, family: {}, data type: {}", column.column->getName(), column.column->getFamilyName(), column.column->getDataType());
         if (column.column->getName() == "ColumnLowCardinality") {
             LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "Column is low card column: {}, family: {}, data type: {}", column.column->getName(), column.column->getFamilyName(), column.column->getDataType());
