@@ -3,7 +3,6 @@
 
 #include <Common/escapeForFileName.h>
 #include <DataTypes/ObjectUtils.h>
-#include <DataTypes/DataTypeMap.h>
 #include <Storages/MergeTree/MarkRange.h>
 #include <Storages/MergeTree/MergeTreeDataPartCNCH.h>
 #include <Storages/MergeTree/MergeTreeIOSettings.h>
