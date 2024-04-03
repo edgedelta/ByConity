@@ -6,6 +6,8 @@
 #include <IO/WriteHelpers.h>
 #include <Functions/IFunction.h>
 
+#include <common/logger_useful.h>
+
 namespace ProfileEvents
 {
     extern const Event FunctionExecute;
@@ -212,6 +214,18 @@ DataTypePtr ColumnFunction::getResultType() const
     //     return recursiveRemoveLowCardinality(function->getResultType());
 
     return function->getResultType();
+}
+
+bool ColumnFunction::hasLowCardColumn() const {
+    for (const DB::ColumnWithTypeAndName & column : captured_columns) {
+        LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "Checking column: {}, family: {}, data type: {}", column.column->getName(), column.column->getFamilyName(), column.column->getDataType());
+        if (column.column->getName() == "ColumnLowCardinality") {
+            LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "Column is low card column: {}, family: {}, data type: {}", column.column->getName(), column.column->getFamilyName(), column.column->getDataType());
+            return true;
+        }
+    }
+    LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "No low card column found");
+    return false;
 }
 
 ColumnWithTypeAndName ColumnFunction::reduce() const

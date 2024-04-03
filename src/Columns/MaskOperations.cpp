@@ -365,14 +365,19 @@ int checkShortCircuitArguments(const ColumnsWithTypeAndName & arguments)
         }
 
         const DB::ColumnFunction *f = checkAndGetShortCircuitArgument(arguments[i].column);
-
-        for (size_t j = 0; j < f->getColumnsToCapture().size(); j++) {
-            LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Checking short-circuit function argument index: {}, column name: {}, family name: {}, data type: {}", j, f->getColumnsToCapture()[j].column->getName(), f->getColumnsToCapture()[j].column->getFamilyName(), f->getColumnsToCapture()[j].column->getDataType());
-            if (f->getColumnsToCapture()[i].column->getName() == "ColumnLowCardinality") {
-                LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Skip short-circuit evaluation for low cardinality column in function, name: {}, family name: {}, data type: {}", f->getColumnsToCapture()[i].column->getName(), f->getColumnsToCapture()[i].column->getFamilyName(), f->getColumnsToCapture()[i].column->getDataType());
-                return -1; // Skip short-circuit evaluation for low cardinality columns
-            }
+        if (f->hasLowCardColumn()) {
+            LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Skip short-circuit evaluation for low cardinality column in function, name: {}, family name: {}, data type: {}", arguments[i].column->getName(), arguments[i].column->getFamilyName(), arguments[i].column->getDataType());
+            return -1; // Skip short-circuit evaluation for low cardinality columns
         }
+        // const DB::ColumnsWithTypeAndName cols = f->getColumnsToCapture();
+
+        // for (size_t j = 0; j < cols.size(); j++) {
+        //     LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Checking short-circuit function argument index: {}, column name: {}, family name: {}, data type: {}", j, cols[j].column->getName(), cols[j].column->getFamilyName(), cols[j].column->getDataType());
+        //     if (cols[i].column->getName() == "ColumnLowCardinality") {
+        //         LOG_INFO(&Poco::Logger::get("checkShortCircuitArguments"), "Skip short-circuit evaluation for low cardinality column in function, name: {}, family name: {}, data type: {}", cols[i].column->getName(), cols[i].column->getFamilyName(), cols[i].column->getDataType());
+        //         return -1; // Skip short-circuit evaluation for low cardinality columns
+        //     }
+        // }
 
         if (f)
             last_short_circuit_argument_index = i;

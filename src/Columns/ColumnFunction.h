@@ -184,7 +184,7 @@ public:
 
     bool isShortCircuitArgument() const { return is_short_circuit_argument; }
 
-    const ColumnsWithTypeAndName getColumnsToCapture() const { return captured_columns; }
+    bool hasLowCardColumn() const;
 
 private:
     size_t size_;
