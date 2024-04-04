@@ -32,5 +32,3 @@ do
 done
 git co $BRANCH
 echo $ALL_SUB_BRANCHES | xargs git br -D
-
-
