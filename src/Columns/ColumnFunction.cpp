@@ -217,11 +217,11 @@ DataTypePtr ColumnFunction::getResultType() const
 }
 
 bool ColumnFunction::hasLowCardColumn() const {
-    LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "Will check {}: {}", function->getName(), captured_columns);
-    if (!captured_columns) {
-        LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "No columns captured");
-        return false;
-    }
+    // LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "Will check {}: {}", function->getName(), captured_columns);
+    // if (!captured_columns) {
+    //     LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "No columns captured");
+    //     return false;
+    // }
     for (const auto & column : captured_columns) {
         if (!column.column) {
             LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "Column is null");
