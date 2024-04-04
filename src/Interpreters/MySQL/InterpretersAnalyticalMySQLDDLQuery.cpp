@@ -134,18 +134,7 @@ static void setNotNullModifier(ASTExpressionList * columns_definition, const Nam
         {
             auto declare_column = declare_column_ast->as<ASTColumnDeclaration>();
             if (declare_column->name == primary_key.name)
-            {
-               declare_column->null_modifier = false;
-               if (!declare_column->default_specifier.empty() && declare_column->default_expression)
-               {
-                auto expr = declare_column->default_expression->as<ASTLiteral>();
-                if (expr && expr->value.isNull())
-                {
-                    declare_column->default_expression = nullptr;
-                    declare_column->default_specifier = "";
-                }
-               }
-            }
+                declare_column->null_modifier = false;
         }
 
     }
@@ -191,9 +180,10 @@ static NamesAndTypesList modifyPrimaryKeysToNonNullable(const NamesAndTypesList 
     return non_nullable_primary_keys;
 }
 
-static std::tuple<NamesAndTypesList, NamesAndTypesList, NamesAndTypesList, NamesAndTypesList> getKeys(
+static std::tuple<NamesAndTypesList, NamesAndTypesList, NamesAndTypesList, NameSet, NamesAndTypesList> getKeys(
     ASTExpressionList * columns_definition, ASTExpressionList * indices_define, ContextPtr context, NamesAndTypesList & columns)
 {
+    NameSet increment_columns;
     auto keys = makeASTFunction("tuple");
     auto unique_keys = makeASTFunction("tuple");
     auto primary_keys = makeASTFunction("tuple");
@@ -266,21 +256,14 @@ static std::tuple<NamesAndTypesList, NamesAndTypesList, NamesAndTypesList, Names
             auto default_id = column->default_expression->as<ASTIdentifier>();
             if (default_id && Poco::toUpper(default_id->name()) == "CURRENT_TIMESTAMP")
             {
-                column->default_expression = makeASTFunction("now64");
-            }
-
-            auto default_function = column->default_expression->as<ASTFunction>();
-            if (default_function && Poco::toUpper(default_function->name) == "CURRENT_TIMESTAMP")
-            {
-                default_function->name = "now64";
+                column->default_expression = makeASTFunction("now");
             }
         }
     }
 
     const auto & primary_keys_names_and_types = getNames(*primary_keys, context, columns);
     const auto & non_nullable_primary_keys_names_and_types = modifyPrimaryKeysToNonNullable(primary_keys_names_and_types, columns);
-
-    return std::make_tuple(non_nullable_primary_keys_names_and_types, getNames(*unique_keys, context, columns), getNames(*keys, context, columns), getNames(*cluster_keys, context, columns));
+    return std::make_tuple(non_nullable_primary_keys_names_and_types, getNames(*unique_keys, context, columns), getNames(*keys, context, columns), increment_columns, getNames(*cluster_keys, context, columns));
 }
 
 static ASTPtr getPartitionPolicy(const NamesAndTypesList & primary_keys)
@@ -339,13 +322,14 @@ static ASTPtr getPartitionPolicy(const NamesAndTypesList & primary_keys)
 }
 
 static ASTPtr getOrderByPolicy(
-    const NamesAndTypesList & primary_keys,  const NamesAndTypesList & keys = NamesAndTypesList(), const NamesAndTypesList & cluster_keys = NamesAndTypesList())
+    const NamesAndTypesList & primary_keys, const NamesAndTypesList & unique_keys, const NamesAndTypesList & keys, const NameSet & increment_columns, const NamesAndTypesList & cluster_keys = NamesAndTypesList())
 {
     NameSet order_by_columns_set;
     std::deque<NamesAndTypesList> order_by_columns_list;
 
     const auto & add_order_by_expression = [&](const NamesAndTypesList & names_and_types)
     {
+        NamesAndTypesList increment_keys;
         NamesAndTypesList non_increment_keys;
 
         for (const auto & [name, type] : names_and_types)
@@ -353,15 +337,26 @@ static ASTPtr getOrderByPolicy(
             if (order_by_columns_set.count(name))
                 continue;
 
-            order_by_columns_set.emplace(name);
-            non_increment_keys.emplace_back(NameAndTypePair(name, type));
+            if (increment_columns.count(name))
+            {
+                order_by_columns_set.emplace(name);
+                increment_keys.emplace_back(NameAndTypePair(name, type));
+            }
+            else
+            {
+                order_by_columns_set.emplace(name);
+                non_increment_keys.emplace_back(NameAndTypePair(name, type));
+            }
         }
 
+        order_by_columns_list.emplace_back(increment_keys);
         order_by_columns_list.emplace_front(non_increment_keys);
     };
 
-    /// primary_key[not increment], key[not increment], unique[not increment]
+    /// primary_key[not increment], key[not increment], unique[not increment], unique[increment], key[increment], primary_key[increment]
+    /// cluster keys in the begining
     add_order_by_expression(cluster_keys);
+    add_order_by_expression(unique_keys);
     add_order_by_expression(keys);
     add_order_by_expression(primary_keys);
 
@@ -549,6 +544,7 @@ ASTs InterpreterCreateAnalyticMySQLImpl::getRewrittenQueries( const TQuery & cre
     auto & storage = rewritten_query->storage;
     bool has_table_definition = create_defines && create_defines->columns && !create_defines->columns->children.empty();
     bool create_as = !create_query.as_table.empty() || create_query.as_table_function;
+    bool has_unique_key = false;
     const std::unordered_set<String> engine_names
         = {"XUANWU",
            "PERFORMANCE_SCHEMA",
@@ -594,7 +590,7 @@ ASTs InterpreterCreateAnalyticMySQLImpl::getRewrittenQueries( const TQuery & cre
     if (has_table_definition)
     {
         NamesAndTypesList columns_name_and_type = getColumnsList(create_defines->columns);
-        const auto & [primary_keys, unique_keys, keys, cluster_keys] = getKeys(create_defines->columns, create_defines->mysql_indices, context, columns_name_and_type);
+        const auto & [primary_keys, unique_keys, keys, increment_columns, cluster_keys] = getKeys(create_defines->columns, create_defines->mysql_indices, context, columns_name_and_type);
 
         setNotNullModifier(create_defines->columns, primary_keys);
 
@@ -605,7 +601,7 @@ ASTs InterpreterCreateAnalyticMySQLImpl::getRewrittenQueries( const TQuery & cre
             storage->set(storage->partition_by, mysql_storage->mysql_partition_by->clone());
 
         /// The `order by` expression must use primary keys, otherwise the primary keys will not be merge.
-        if (ASTPtr order_by_expression = getOrderByPolicy(primary_keys, keys, cluster_keys))
+        if (ASTPtr order_by_expression = getOrderByPolicy(primary_keys, unique_keys, keys, increment_columns, cluster_keys))
         {
             auto & list = order_by_expression->as<ASTFunction>()->arguments;
             if (!list->children.empty())
@@ -614,9 +610,10 @@ ASTs InterpreterCreateAnalyticMySQLImpl::getRewrittenQueries( const TQuery & cre
             }
         }
 
-        if (ASTPtr unique_key_expression = getOrderByPolicy(primary_keys))
+        if (ASTPtr unique_key_expression = getOrderByPolicy(primary_keys, unique_keys, keys, increment_columns))
         {
             storage->set(storage->unique_key, unique_key_expression);
+            has_unique_key = true;
         }
 
         rewritten_query->set(rewritten_query->columns_list, create_query.columns_list->clone());
@@ -628,43 +625,33 @@ ASTs InterpreterCreateAnalyticMySQLImpl::getRewrittenQueries( const TQuery & cre
     if (!storage->order_by)
         storage->set(storage->order_by, makeASTFunction("tuple"));
 
-    if (mysql_storage->distributed_by)
     {
-        // distributed by hash(col) -> cluster by col
-        const String vw_name = "vw_default";
-        auto vw = context->getVirtualWarehousePool().get(vw_name);
-        // context->setCurrentVW(std::move(vw_handle));
-        // auto vw = context->tryGetCurrentVW();
-        int total_bucket_number = vw ? vw->getNumWorkers() : 1;
-        auto cluster_by_ast = std::make_shared<ASTClusterByElement>(mysql_storage->distributed_by->clone(), std::make_shared<ASTLiteral>(total_bucket_number), 0, false, false);
-        storage->set(storage->cluster_by, cluster_by_ast);
-    }
-
-    {
-        // settings
         ASTPtr settings = std::make_shared<ASTSetQuery>();
-        auto *settings_ast = settings->as<ASTSetQuery>();
+        auto settings_ast = settings->as<ASTSetQuery>();
         settings_ast->is_standalone = false;
-        bool has_index_granularity_setting = false;
-        bool has_partition_level_unique_keys_setting = false;
-        if (auto *const mysql_settings = mysql_storage->settings->as<ASTSetQuery>())
-        {
-            for (const auto & change: mysql_settings->changes)
-            {
-                if (change.name == "index_granularity")
-                    has_index_granularity_setting = true;
-                if (change.name == "partition_level_unique_keys")
-                    has_partition_level_unique_keys_setting = true;
-            }
-        }
         // It's not recommended to mix mysql and clickhosue dialects
         // but we have to provide this in case of fall back
-        if (mysql_storage->block_size && !has_index_granularity_setting)
+        if (mysql_storage->block_size)
+        {
             // block_size -> index_granularity
             settings_ast->changes.push_back({"index_granularity", mysql_storage->block_size->as<ASTLiteral>()->value.get<Int64>()});
-        if (!has_partition_level_unique_keys_setting)
+        }
+
+        if (mysql_storage->distributed_by)
+        {
+            // distributed by hash(col) -> cluster by col
+            const String vw_name = "vw_default";
+            auto vw = context->getVirtualWarehousePool().get(vw_name);
+            // context->setCurrentVW(std::move(vw_handle));
+            // auto vw = context->tryGetCurrentVW();
+            int total_bucket_number = vw ? vw->getNumWorkers() : 1;
+            auto cluster_by_ast = std::make_shared<ASTClusterByElement>(mysql_storage->distributed_by->clone(), std::make_shared<ASTLiteral>(total_bucket_number), 0, false, false);
+            storage->set(storage->cluster_by, cluster_by_ast);
+        }
+
+        if (has_unique_key)
             settings_ast->changes.push_back({"partition_level_unique_keys", 0});
-        if (auto *const mysql_settings = mysql_storage->settings->as<ASTSetQuery>())
+        if (const auto mysql_settings = mysql_storage->settings->as<ASTSetQuery>())
             settings_ast->changes.insert(settings_ast->changes.end(), mysql_settings->changes.begin(), mysql_settings->changes.end());
 
         storage->set(storage->settings, settings);

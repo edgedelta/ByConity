@@ -184,8 +184,6 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
     ParserKeyword s_default_charset2("DEFAULT CHARACTER SET");
     ParserKeyword s_collate("COLLATE");
     ParserKeyword s_default_collate("DEFAULT COLLATE");
-    ParserKeyword s_signed("SIGNED");
-    ParserKeyword s_unsigned("UNSIGNED");
 
     /// mandatory column name
     ASTPtr name;
@@ -216,7 +214,6 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
     ASTPtr type;
     String default_specifier;
     std::optional<bool> null_modifier;
-    std::optional<bool> unsigned_modifier;
     ASTPtr default_expression;
     ASTPtr comment_expression;
     ASTPtr codec_expression;
@@ -251,10 +248,18 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
     {
         if (!type_parser.parse(pos, type, expected))
             return false;
-        if (s_signed.ignore(pos, expected))
-            unsigned_modifier = false;
-        if (s_unsigned.ignore(pos, expected))
-            unsigned_modifier = true;
+    }
+
+    if (allow_null_modifiers)
+    {
+        if (s_not.check(pos, expected))
+        {
+            if (!s_null.check(pos, expected))
+                return false;
+            null_modifier.emplace(false);
+        }
+        else if (s_null.check(pos, expected))
+            null_modifier.emplace(true);
     }
 
     if (s_charset1.ignore(pos, expected) || s_default_charset1.ignore(pos, expected) || s_charset2.ignore(pos, expected)
@@ -268,18 +273,6 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
     {
         if (!expression_parser.parse(pos, charset_expression, expected))
             return false;
-    }
-
-    if (allow_null_modifiers)
-    {
-        if (s_not.check(pos, expected))
-        {
-            if (!s_null.check(pos, expected))
-                return false;
-            null_modifier.emplace(false);
-        }
-        else if (s_null.check(pos, expected))
-            null_modifier.emplace(true);
     }
 
     Pos pos_before_specifier = pos;
@@ -386,7 +379,7 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
         column_declaration->children.push_back(std::move(type));
     }
     column_declaration->null_modifier = null_modifier;
-    column_declaration->unsigned_modifier = unsigned_modifier;
+
     if (default_expression)
     {
         column_declaration->default_specifier = default_specifier;

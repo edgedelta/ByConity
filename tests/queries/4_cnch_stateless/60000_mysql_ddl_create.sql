@@ -60,13 +60,12 @@ CREATE TABLE mysql_create_ddl4
 (
     `id` Int32 NULL,
     `val1` timestamp NOT NULL COMMENT '中文',
-    `val2` varchar NOT NULL DEFAULT 'a',
-    UNIQUE KEY(id) USING BTREE
+    `val2` varchar NOT NULL DEFAULT 'a'
 );
 
 CREATE TABLE mysql_create_ddl5
 (
-    `id` Int32 NOT NULL PRIMARY KEY,
+    `id` Int32 NOT NULL,
     `val1` timestamp NOT NULL COMMENT '中文',
     `val2` varchar NOT NULL DEFAULT 'a',
     constraint un1 unique(id)
@@ -201,11 +200,8 @@ DROP TABLE IF EXISTS t4_60000;
 DROP TABLE IF EXISTS t5_60000;
 
 DROP TABLE IF EXISTS users_60000;
-DROP TABLE IF EXISTS users1_60000;
-CREATE TABLE `users_60000` ( `uid` bigint(20) signed NOT NULL,`update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE TABLE `users1_60000` ( `uid` bigint(20) unsigned NOT NULL,`update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT = '';
+CREATE TABLE `users_60000` ( `uid` bigint(20) NOT NULL,`update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 DROP TABLE IF EXISTS users_60000;
-DROP TABLE IF EXISTS users1_60000;
 
 SHOW CREATE TABLE test_create_table_unique2;
 SHOW CREATE TABLE mysql_create_ddl7;
