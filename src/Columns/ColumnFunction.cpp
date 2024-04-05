@@ -217,23 +217,25 @@ DataTypePtr ColumnFunction::getResultType() const
 }
 
 bool ColumnFunction::hasLowCardColumn() const {
-    // LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "Will check {}: {}", function->getName(), captured_columns);
+    auto logger = &Poco::Logger::get("sazak-hasLowCardColumn");
+    LOG_INFO(logger, "Will check {}", function->getName());
     // if (!captured_columns) {
-    //     LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "No columns captured");
+    //     LOG_INFO(logger, "No columns captured");
     //     return false;
     // }
+
     for (const auto & column : captured_columns) {
         if (!column.column) {
-            LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "Column is null");
+            LOG_INFO(logger, "Column is null");
             continue;
         }
-        LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "Checking column: {}, family: {}, data type: {}", column.column->getName(), column.column->getFamilyName(), column.column->getDataType());
+        LOG_INFO(logger, "Checking column: {}, family: {}, data type: {}", column.column->getName(), column.column->getFamilyName(), column.column->getDataType());
         if (column.column->getName() == "ColumnLowCardinality") {
-            LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "Column is low card column: {}, family: {}, data type: {}", column.column->getName(), column.column->getFamilyName(), column.column->getDataType());
+            LOG_INFO(logger, "Column is low card column: {}, family: {}, data type: {}", column.column->getName(), column.column->getFamilyName(), column.column->getDataType());
             return true;
         }
     }
-    LOG_INFO(&Poco::Logger::get("hasLowCardColumn"), "No low card column found");
+    LOG_INFO(logger, "No low card column found");
     return false;
 }
 
