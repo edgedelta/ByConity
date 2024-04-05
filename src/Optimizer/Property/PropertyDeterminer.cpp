@@ -16,14 +16,14 @@
 #include <set>
 #include <Optimizer/Property/PropertyDeterminer.h>
 
-#include <Optimizer/Property/Property.h>
 #include <Optimizer/Utils.h>
 #include <QueryPlan/AggregatingStep.h>
 #include <QueryPlan/DistinctStep.h>
 #include <QueryPlan/JoinStep.h>
-#include <QueryPlan/TotalsHavingStep.h>
 #include <QueryPlan/UnionStep.h>
 #include <QueryPlan/WindowStep.h>
+#include "Optimizer/Property/Property.h"
+#include "QueryPlan/TotalsHavingStep.h"
 #include <Storages/StorageCnchMergeTree.h>
 
 namespace DB
@@ -31,7 +31,7 @@ namespace DB
 PropertySets PropertyDeterminer::determineRequiredProperty(QueryPlanStepPtr step, const Property & property, Context & context)
 {
     DeterminerContext ctx{property, context};
-    DeterminerVisitor visitor{};
+    static DeterminerVisitor visitor{};
     PropertySets input_properties = VisitorUtil::accept(step, visitor, ctx);
     if (!property.getCTEDescriptions().empty() || !property.getTableLayout().empty())
     {
@@ -46,6 +46,7 @@ PropertySets PropertyDeterminer::determineRequiredProperty(QueryPlanStepPtr step
     }
     return input_properties;
 }
+
 
 
 PropertySets DeterminerVisitor::visitStep(const IQueryPlanStep &, DeterminerContext & context)
@@ -70,9 +71,9 @@ PropertySets DeterminerVisitor::visitPartitionTopNStep(const PartitionTopNStep &
     return {{require}};
 }
 
-PropertySets DeterminerVisitor::visitLocalExchangeStep(const LocalExchangeStep & step, DeterminerContext & ctx)
+PropertySets DeterminerVisitor::visitFinalSampleStep(const FinalSampleStep &, DeterminerContext &)
 {
-    return visitStep(step, ctx);
+    throw Exception("Not impl property determiner", ErrorCodes::NOT_IMPLEMENTED);
 }
 
 PropertySets DeterminerVisitor::visitOffsetStep(const OffsetStep &, DeterminerContext &)
@@ -85,14 +86,9 @@ PropertySets DeterminerVisitor::visitFinishSortingStep(const FinishSortingStep &
     return {{Property{Partitioning{Partitioning::Handle::SINGLE}}}};
 }
 
-PropertySets DeterminerVisitor::visitFinalSampleStep(const FinalSampleStep & step, DeterminerContext & ctx)
-{
-    return visitStep(step, ctx);
-}
-
 PropertySets DeterminerVisitor::visitProjectionStep(const ProjectionStep & step, DeterminerContext & ctx)
 {
-    if (step.isFinalProject() && (ctx.getRequired().getNodePartitioning().getComponent() != Partitioning::Component::WORKER))
+    if (step.isFinalProject() && ctx.getRequired().getNodePartitioning().getComponent() != Partitioning::Component::WORKER)
         return {{Property{Partitioning{Partitioning::Handle::SINGLE}}}};
     auto assignments = step.getAssignments();
     std::unordered_map<String, String> identities = Utils::computeIdentityTranslations(assignments);
@@ -103,11 +99,9 @@ PropertySets DeterminerVisitor::visitProjectionStep(const ProjectionStep & step,
     return {{translated}};
 }
 
-PropertySets DeterminerVisitor::visitArrayJoinStep(const ArrayJoinStep &, DeterminerContext & context)
+PropertySets DeterminerVisitor::visitArrayJoinStep(const ArrayJoinStep &, DeterminerContext &)
 {
-    auto require = context.getRequired();
-    require.setPreferred(true);
-    return {{require}};
+    return {{Property{Partitioning{Partitioning::Handle::SINGLE}}}};
 }
 
 PropertySets DeterminerVisitor::visitFilterStep(const FilterStep &, DeterminerContext & context)
@@ -123,7 +117,6 @@ PropertySets DeterminerVisitor::visitJoinStep(const JoinStep & step, DeterminerC
     Names left_keys = step.getLeftKeys();
     Names right_keys = step.getRightKeys();
 
-    auto enforce_round_robine = context.getContext().getSettingsRef().enforce_round_robin;
     // process ASOF join, it is different with normal join.
     if (step.getStrictness() == ASTTableJoin::Strictness::Asof)
     {
@@ -135,11 +128,8 @@ PropertySets DeterminerVisitor::visitJoinStep(const JoinStep & step, DeterminerC
             right_keys_asof.emplace_back(right_keys[i]);
         }
 
-        Partitioning left_stream{Partitioning::Handle::FIXED_HASH, left_keys_asof};
-        Partitioning right_stream{Partitioning::Handle::FIXED_HASH, right_keys_asof};
-
-        Property left{Partitioning{Partitioning::Handle::FIXED_HASH, left_keys_asof, false, 0, enforce_round_robine}, left_stream};
-        Property right{Partitioning{Partitioning::Handle::FIXED_HASH, right_keys_asof, false, 0, false}, right_stream};
+        Property left{Partitioning{Partitioning::Handle::FIXED_HASH, left_keys_asof, false, 0, true}};
+        Property right{Partitioning{Partitioning::Handle::FIXED_HASH, right_keys_asof, false, 0, false}};
         PropertySet set;
         set.emplace_back(left);
         set.emplace_back(right);
@@ -148,9 +138,7 @@ PropertySets DeterminerVisitor::visitJoinStep(const JoinStep & step, DeterminerC
 
     if (step.getDistributionType() == DistributionType::BROADCAST)
     {
-        auto left_require = context.getRequired();
-        left_require.setPreferred(true);
-        return {{left_require, Property{Partitioning{Partitioning::Handle::FIXED_BROADCAST}}}};
+        return {{Property{Partitioning{Partitioning::Handle::ARBITRARY}}, Property{Partitioning{Partitioning::Handle::FIXED_BROADCAST}}}};
     }
 
     if (left_keys.empty() && right_keys.empty())
@@ -181,11 +169,8 @@ PropertySets DeterminerVisitor::visitJoinStep(const JoinStep & step, DeterminerC
                 sub_left_keys.emplace_back(std::get<0>(item));
                 sub_right_keys.emplace_back(std::get<1>(item));
             }
-
-            Partitioning left_stream{Partitioning::Handle::FIXED_HASH, sub_left_keys};
-            Partitioning right_stream{Partitioning::Handle::FIXED_HASH, sub_right_keys};
-            Property left{Partitioning{Partitioning::Handle::FIXED_HASH, sub_left_keys, false, 0, enforce_round_robine}, left_stream};
-            Property right{Partitioning{Partitioning::Handle::FIXED_HASH, sub_right_keys, false, 0, false}, right_stream};
+            Property left{Partitioning{Partitioning::Handle::FIXED_HASH, sub_left_keys, false, 0, true}};
+            Property right{Partitioning{Partitioning::Handle::FIXED_HASH, sub_right_keys, false, 0, false}};
             PropertySet prop_set;
             prop_set.emplace_back(left);
             prop_set.emplace_back(right);
@@ -194,10 +179,8 @@ PropertySets DeterminerVisitor::visitJoinStep(const JoinStep & step, DeterminerC
     }
     else
     {
-        Partitioning left_stream{Partitioning::Handle::FIXED_HASH, left_keys};
-        Partitioning right_stream{Partitioning::Handle::FIXED_HASH, right_keys};
-        Property left{Partitioning{Partitioning::Handle::FIXED_HASH, left_keys, false, 0, enforce_round_robine}, left_stream};
-        Property right{Partitioning{Partitioning::Handle::FIXED_HASH, right_keys, false, 0, false}, right_stream};
+        Property left{Partitioning{Partitioning::Handle::FIXED_HASH, left_keys, false, 0, true}};
+        Property right{Partitioning{Partitioning::Handle::FIXED_HASH, right_keys, false, 0, false}};
         PropertySet prop_set;
         prop_set.emplace_back(left);
         prop_set.emplace_back(right);
@@ -246,7 +229,7 @@ PropertySets DeterminerVisitor::visitAggregatingStep(const AggregatingStep & ste
     }
 
     PropertySets sets;
-    auto required_keys = context.getRequired().getNodePartitioning().getColumns();
+    auto required_keys = context.getRequired().getNodePartitioning().getPartitioningColumns();
     if (context.getContext().getSettingsRef().enable_merge_require_property && !required_keys.empty() && keys.size() > required_keys.size())
     {
         std::set<String> keys_set(keys.begin(), keys.end());
@@ -269,15 +252,14 @@ PropertySets DeterminerVisitor::visitAggregatingStep(const AggregatingStep & ste
     {
         for (const auto & sub_keys : Utils::powerSet(keys))
         {
-            Property prop{
-                Partitioning{Partitioning::Handle::FIXED_HASH, sub_keys}, Partitioning{Partitioning::Handle::FIXED_HASH, sub_keys}};
+            Property prop{Partitioning{Partitioning::Handle::FIXED_HASH, sub_keys}};
             sets.emplace_back(PropertySet{prop});
         }
     }
     else
     {
-        sets.emplace_back(PropertySet{
-            Property{Partitioning{Partitioning::Handle::FIXED_HASH, keys}, Partitioning{Partitioning::Handle::FIXED_HASH, keys}}});
+        sets.emplace_back(
+            PropertySet{Property{Partitioning{Partitioning::Handle::FIXED_HASH, keys}}});
     }
 
     if (step.isGroupingSet())
@@ -290,7 +272,7 @@ PropertySets DeterminerVisitor::visitAggregatingStep(const AggregatingStep & ste
     return sets;
 }
 
-PropertySets DeterminerVisitor::visitTotalsHavingStep(const TotalsHavingStep &, DeterminerContext &)
+PropertySets DeterminerVisitor::visitTotalsHavingStep(const TotalsHavingStep & , DeterminerContext & )
 {
     return {{Property{Partitioning{Partitioning::Handle::SINGLE}}}};
 }
@@ -325,23 +307,15 @@ PropertySets DeterminerVisitor::visitMergingAggregatedStep(const MergingAggregat
         return {set};
     }
     std::vector<String> group_bys;
-    group_bys.reserve(keys.size());
     for (const auto & key : keys)
     {
         group_bys.emplace_back(key);
     }
     PropertySet set;
-    set.emplace_back(Property{
-        Partitioning{
-            Partitioning::Handle::FIXED_HASH,
-            group_bys,
-        },
-        Partitioning{
-            Partitioning::Handle::FIXED_HASH,
-            group_bys,
-        }
-
-    });
+    set.emplace_back(Property{Partitioning{
+        Partitioning::Handle::FIXED_HASH,
+        group_bys,
+    }});
     return {set};
 }
 
@@ -503,7 +477,8 @@ PropertySets DeterminerVisitor::visitWindowStep(const WindowStep & step, Determi
     else
     {
         PropertySet set;
-        set.emplace_back(Property{Partitioning{Partitioning::Handle::FIXED_HASH, group_bys, false}});
+        set.emplace_back(Property{
+            Partitioning{Partitioning::Handle::FIXED_HASH, group_bys, false}});
         sets.emplace_back(set);
     }
     return sets;
@@ -567,26 +542,4 @@ PropertySets DeterminerVisitor::visitTableFinishStep(const TableFinishStep &, De
     node.setComponent(Partitioning::Component::WORKER);
     return {{Property{node}}};
 }
-
-PropertySets DeterminerVisitor::visitOutfileWriteStep(const OutfileWriteStep &, DeterminerContext &)
-{
-    auto node = Partitioning{Partitioning::Handle::FIXED_ARBITRARY};
-    node.setComponent(Partitioning::Component::WORKER);
-    return {{Property{node}}};
-}
-
-PropertySets DeterminerVisitor::visitOutfileFinishStep(const OutfileFinishStep &, DeterminerContext &)
-{
-    auto node = Partitioning{Partitioning::Handle::SINGLE};
-    node.setComponent(Partitioning::Component::WORKER);
-    return {{Property{node}}};
-}
-
-PropertySets DeterminerVisitor::visitExpandStep(const ExpandStep &, DeterminerContext & context)
-{
-    auto require = context.getRequired();
-    require.setPreferred(true);
-    return {{require}};
-}
-
 }
