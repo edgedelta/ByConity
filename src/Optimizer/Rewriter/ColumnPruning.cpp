@@ -46,7 +46,10 @@
 #include <QueryPlan/ProjectionStep.h>
 #include <QueryPlan/UnionStep.h>
 #include <QueryPlan/WindowStep.h>
+<<<<<<< HEAD
 #include <QueryPlan/OutfileWriteStep.h>
+=======
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
 
 namespace DB
 {
@@ -56,9 +59,14 @@ void ColumnPruning::rewrite(QueryPlan & plan, ContextMutablePtr context) const
         context,
         plan.getCTEInfo(),
         plan.getPlanNode(),
+<<<<<<< HEAD
         false,
         false,
         false};
+=======
+        add_projection && context->getSettingsRef().enable_add_projection_to_pruning,
+        distinct_to_aggregate && context->getSettingsRef().enable_distinct_to_aggregate};
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
     NameSet require;
     for (const auto & item : plan.getPlanNode()->getStep()->getOutputStream().header)
         require.insert(item.name);
@@ -101,6 +109,7 @@ void DistinctToAggregatePruning::rewrite(QueryPlan & plan, ContextMutablePtr con
     plan.update(result);
 }
 
+<<<<<<< HEAD
 void WindowToSortPruning::rewrite(QueryPlan & plan, ContextMutablePtr context) const
 {
     ColumnPruningVisitor visitor{
@@ -116,6 +125,42 @@ void WindowToSortPruning::rewrite(QueryPlan & plan, ContextMutablePtr context) c
     ColumnPruningContext column_pruning_context{.name_set = require};
     auto result = VisitorUtil::accept(plan.getPlanNode(), visitor, column_pruning_context);
     plan.update(result);
+=======
+    std::vector<ColumnSizeTuple> columns;
+    if (storage)
+    {
+        auto column_sizes = storage->getColumnSizes();
+        for (auto & source_column : source_columns)
+        {
+            auto c = column_sizes.find(source_column.name);
+            if (c == column_sizes.end())
+                continue;
+            size_t type_size = source_column.type->haveMaximumSizeOfValue() ? source_column.type->getMaximumSizeOfValueInMemory() : 100;
+            columns.emplace_back(ColumnSizeTuple{c->second.data_compressed, type_size, c->second.data_uncompressed, source_column.name});
+        }
+    }
+
+    if (!columns.empty())
+        return std::min_element(columns.begin(), columns.end())->name;
+    else if (!source_columns.empty())
+    {
+        if (storage)
+        {
+            // DO NOT choose Virtuals column, when try get smallest column.
+            for (const auto & column : storage->getVirtuals())
+            {
+                source_columns.remove(column);
+            }
+        }
+        /// If we have no information about columns sizes, choose a column of minimum size of its data type.
+        return ExpressionActions::getSmallestColumn(source_columns);
+    }
+    else
+    {
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "unexpected branch of selectColumnWithMinSize");
+        __builtin_unreachable();
+    }
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
 }
 
 template <bool require_all>
@@ -156,17 +201,30 @@ PlanNodePtr ColumnPruningVisitor::visitFinishSortingNode(FinishSortingNode & nod
     return visitPlanNode(node, column_pruning_context);
 }
 
+<<<<<<< HEAD
 PlanNodePtr ColumnPruningVisitor::visitOffsetNode(OffsetNode & node, ColumnPruningContext & column_pruning_context)
+=======
+PlanNodePtr ColumnPruningVisitor::visitFinalSampleNode(FinalSampleNode &, ColumnPruningContext &)
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
 {
     return visitDefault<false>(node, column_pruning_context);
 }
 
+<<<<<<< HEAD
 PlanNodePtr ColumnPruningVisitor::visitTableFinishNode(TableFinishNode & node, ColumnPruningContext & column_pruning_context)
 {
     return visitPlanNode(node, column_pruning_context);
 }
 
 PlanNodePtr ColumnPruningVisitor::visitOutfileFinishNode(OutfileFinishNode & node, ColumnPruningContext & column_pruning_context)
+=======
+PlanNodePtr ColumnPruningVisitor::visitOffsetNode(OffsetNode & node, ColumnPruningContext & column_pruning_context)
+{
+    return visitDefault<false>(node, column_pruning_context);
+}
+
+PlanNodePtr ColumnPruningVisitor::visitTableFinishNode(TableFinishNode & node, ColumnPruningContext & column_pruning_context)
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
 {
     return visitPlanNode(node, column_pruning_context);
 }
@@ -221,16 +279,25 @@ PlanNodePtr ColumnPruningVisitor::visitIntersectOrExceptNode(IntersectOrExceptNo
     return intersect_except_node;
 }
 
+<<<<<<< HEAD
 PlanNodePtr ColumnPruningVisitor::visitMultiJoinNode(MultiJoinNode & node, ColumnPruningContext & column_pruning_context)
+=======
+PlanNodePtr ColumnPruningVisitor::visitMultiJoinNode(MultiJoinNode &, ColumnPruningContext &)
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
 {
     return visitDefault<false>(node, column_pruning_context);
 }
 
+<<<<<<< HEAD
 PlanNodePtr ColumnPruningVisitor::visitFinalSampleNode(FinalSampleNode & node, ColumnPruningContext & column_pruning_context)
+=======
+PlanNodePtr ColumnPruningVisitor::visitEnforceSingleRowNode(EnforceSingleRowNode & node, ColumnPruningContext & column_pruning_context)
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
 {
     return visitDefault<false>(node, column_pruning_context);
 }
 
+<<<<<<< HEAD
 PlanNodePtr ColumnPruningVisitor::visitEnforceSingleRowNode(EnforceSingleRowNode & node, ColumnPruningContext & column_pruning_context)
 {
     return visitDefault<false>(node, column_pruning_context);
@@ -241,6 +308,8 @@ PlanNodePtr ColumnPruningVisitor::visitLocalExchangeNode(LocalExchangeNode & nod
     return visitDefault<false>(node, column_pruning_context);
 }
 
+=======
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
 PlanNodePtr ColumnPruningVisitor::visitValuesNode(ValuesNode & node, ColumnPruningContext & column_pruning_context)
 {
     const auto * step = node.getStep().get();
@@ -380,8 +449,12 @@ PlanNodePtr ColumnPruningVisitor::visitFilterNode(FilterNode & node, ColumnPruni
     auto expr_step = std::make_shared<FilterStep>(child->getStep()->getOutputStream(), step->getFilter(), remove);
     PlanNodes children{child};
     auto expr_node = FilterNode::createPlanNode(context->nextNodeId(), std::move(expr_step), children, node.getStatistics());
+<<<<<<< HEAD
     if (remove && filter_window_to_sort_limit)
         return convertFilterWindowToSortingLimit(expr_node, require);
+=======
+
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
     if (!column_pruning_context.is_parent_from_projection)
     {
         return addProjection(expr_node, require);
@@ -445,6 +518,7 @@ PlanNodePtr ColumnPruningVisitor::visitProjectionNode(ProjectionNode & node, Col
     return expr_node;
 }
 
+<<<<<<< HEAD
 PlanNodePtr ColumnPruningVisitor::visitExpandNode(ExpandNode & node, ColumnPruningContext & column_pruning_context)
 {
     const auto * step = node.getStep().get();
@@ -474,6 +548,8 @@ PlanNodePtr ColumnPruningVisitor::visitExpandNode(ExpandNode & node, ColumnPruni
     return expr_node;
 }
 
+=======
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
 PlanNodePtr ColumnPruningVisitor::visitApplyNode(ApplyNode & node, ColumnPruningContext & column_pruning_context)
 {
     NameSet right_require;
@@ -516,6 +592,7 @@ PlanNodePtr ColumnPruningVisitor::visitApplyNode(ApplyNode & node, ColumnPruning
     DataStreams input{left->getStep()->getOutputStream(), right->getStep()->getOutputStream()};
 
     auto apply_step = std::make_shared<ApplyStep>(
+<<<<<<< HEAD
         input,
         correlation,
         step->getApplyType(),
@@ -523,6 +600,9 @@ PlanNodePtr ColumnPruningVisitor::visitApplyNode(ApplyNode & node, ColumnPruning
         step->getAssignment(),
         step->getOuterColumns(),
         step->supportSemiAnti());
+=======
+        input, correlation, step->getApplyType(), step->getSubqueryType(), step->getAssignment(), step->getOuterColumns());
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
     PlanNodes children{left, right};
     auto apply_node = ApplyNode::createPlanNode(context->nextNodeId(), std::move(apply_step), children, node.getStatistics());
     return apply_node;
@@ -866,9 +946,21 @@ PlanNodePtr ColumnPruningVisitor::visitDistinctNode(DistinctNode & node, ColumnP
             distinct_requrie_set.emplace(name_type.first);
     }
     bool can_convert_group_by = true;
-    if (distinct_requrie_set.size() > columns.size())
-        can_convert_group_by = false;
+    NameSet distinct_set{columns.begin(), columns.end()};
+    for (const auto & require_column : distinct_requrie_set)
+    {
+        if (!distinct_set.contains(require_column))
+        {
+            can_convert_group_by = false;
+            break;
+        }
+    }
 
+<<<<<<< HEAD
+    child_require.insert(columns.begin(), columns.end());
+
+=======
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
     ColumnPruningContext child_column_pruning_context{.name_set = child_require};
     auto child = VisitorUtil::accept(node.getChildren()[0], *this, child_column_pruning_context);
 
@@ -1063,7 +1155,11 @@ PlanNodePtr ColumnPruningVisitor::visitCTERefNode(CTERefNode & node, ColumnPruni
     auto & cte_require = cte_require_columns[with_step->getId()];
     for (const auto & item : required)
         cte_require.name_set.emplace(with_step->getOutputColumns().at(item));
+<<<<<<< HEAD
     post_order_cte_helper.acceptAndUpdate(with_step->getId(), node.getId(), *this, cte_require);
+=======
+    post_order_cte_helper.acceptAndUpdate(with_step->getId(), *this, cte_require);
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
 
     NamesAndTypes result_columns;
     std::unordered_map<String, String> output_columns;
@@ -1136,6 +1232,7 @@ PlanNodePtr ColumnPruningVisitor::visitTableWriteNode(TableWriteNode & node, Col
     return node.shared_from_this();
 }
 
+<<<<<<< HEAD
 PlanNodePtr ColumnPruningVisitor::visitOutfileWriteNode(OutfileWriteNode & node, ColumnPruningContext &)
 {
     const auto * outfile_write = dynamic_cast<const OutfileWriteStep *>(node.getStep().get());
@@ -1150,6 +1247,8 @@ PlanNodePtr ColumnPruningVisitor::visitOutfileWriteNode(OutfileWriteNode & node,
     return node.shared_from_this();
 }
 
+=======
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
 PlanNodePtr ColumnPruningVisitor::visitTotalsHavingNode(TotalsHavingNode & node, ColumnPruningContext & column_pruning_context)
 {
     const auto * step = node.getStep().get();
@@ -1313,8 +1412,14 @@ PlanNodePtr ColumnPruningVisitor::convertDistinctToGroupBy(PlanNodePtr node)
 
     return node;
 }
+<<<<<<< HEAD
 
 PlanNodePtr ColumnPruningVisitor::convertFilterWindowToSortingLimit(PlanNodePtr node, NameSet & require)
+=======
+/*
+PlanNodePtr ColumnPruningVisitor::convertFilterWindowToSortingLimit(PlanNodePtr node, NameSet & require)
+>>>>>>> ca67864d333 (add enable_add_projection_to_pruning setting)
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
 {
     const auto & filter_step = dynamic_cast<FilterStep &>(*node->getStep());
     auto * window_node = dynamic_cast<WindowNode *>(node->getChildren()[0].get());

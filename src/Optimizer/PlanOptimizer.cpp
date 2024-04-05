@@ -99,7 +99,11 @@ const Rewriters & PlanOptimizer::getSimpleRewriters()
         // push down limit and aggregate
         std::make_shared<IterativeRewriter>(Rules::pushDownLimitRules(), "PushDownLimit"),
         std::make_shared<IterativeRewriter>(Rules::distinctToAggregateRules(), "DistinctToAggregate"),
+<<<<<<< HEAD
         std::make_shared<DistinctToAggregatePruning>(),
+=======
+        std::make_shared<ColumnPruning>(false, true),
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
 
         std::make_shared<ImplementJoinOrderHints>(),
 
@@ -129,7 +133,11 @@ const Rewriters & PlanOptimizer::getSimpleRewriters()
         std::make_shared<IterativeRewriter>(Rules::removeRedundantRules(), "RemoveRedundant"),
         std::make_shared<IterativeRewriter>(Rules::inlineProjectionRules(), "InlineProjection"),
         // column pruned by add extra projection, DO NOT ADD RemoveRedundant rule after this rule !!!
+<<<<<<< HEAD
         std::make_shared<AddProjectionPruning>(),
+=======
+        std::make_shared<ColumnPruning>(true),
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
         std::make_shared<UnifyNullableType>(), /* some rules generates incorrect column ptr for DataStream,
                                                   e.g. use a non-nullable column ptr for a nullable column */
         std::make_shared<AddBufferForDeadlockCTE>(),
@@ -227,7 +235,11 @@ const Rewriters & PlanOptimizer::getFullRewriters()
         // push down limit & aggregate
         std::make_shared<IterativeRewriter>(Rules::pushDownLimitRules(), "PushDownLimit"),
         std::make_shared<IterativeRewriter>(Rules::distinctToAggregateRules(), "DistinctToAggregate"),
+<<<<<<< HEAD
         std::make_shared<DistinctToAggregatePruning>(),
+=======
+        std::make_shared<ColumnPruning>(false, true),
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
         std::make_shared<IterativeRewriter>(Rules::pushAggRules(), "PushAggregateThroughJoin"),
 
 
@@ -303,8 +315,13 @@ const Rewriters & PlanOptimizer::getFullRewriters()
         // TODO cost-based projection push down
         std::make_shared<IterativeRewriter>(Rules::removeRedundantRules(), "RemoveRedundant"),
         std::make_shared<IterativeRewriter>(Rules::inlineProjectionRules(), "InlineProjection"),
+<<<<<<< HEAD
         // column pruned by add extra projection, DO NOT ADD RemoveRedundant rule after this rule !!!
         std::make_shared<AddProjectionPruning>(),
+=======
+        // column pruned by add extra projection, DO NOT ADD RemoveRedundant rule after this rule !!!        
+        std::make_shared<ColumnPruning>(true),
+>>>>>>> ded7d96483 (Merge branch '3001048881_cnch_2.1' into 'cnch-2.1')
         std::make_shared<UnifyNullableType>(), /* some rules generates incorrect column ptr for DataStream,
                                                   e.g. use a non-nullable column ptr for a nullable column */
         std::make_shared<AddBufferForDeadlockCTE>(),
