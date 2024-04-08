@@ -33,20 +33,21 @@
 #include <Databases/DatabaseCnch.h>
 #include <common/logger_useful.h>
 // #include <ext/range.h>
-#include <Common/Exception.h>
-#include <Common/ProfileEvents.h>
-#include <Common/Status.h>
-#include <Common/RpcClientPool.h>
-#include <Common/serverLocality.h>
-#include <Common/ScanWaitFreeMap.h>
+#include <Catalog/DataModelPartWrapper_fwd.h>
 #include <Catalog/MetastoreCommon.h>
+#include <Core/Types.h>
 #include <DataTypes/ObjectUtils.h>
 #include <Storages/ColumnsDescription.h>
 #include <Storages/IStorage_fwd.h>
 #include <Storages/StorageSnapshot.h>
-#include <Catalog/DataModelPartWrapper_fwd.h>
 #include <Transaction/TransactionCommon.h>
-#include <Core/Types.h>
+#include <Common/Exception.h>
+#include <Common/ProfileEvents.h>
+#include <Common/RpcClientPool.h>
+#include <Common/ScanWaitFreeMap.h>
+#include <Common/Status.h>
+#include <Common/serverLocality.h>
+#include "Interpreters/DistributedStages/PlanSegmentInstance.h"
 // #include <Access/MaskingPolicyDataModel.h>
 // #include <Access/MaskingPolicyCommon.h>
 #include <Catalog/CatalogMetricHelper.h>
@@ -62,6 +63,7 @@
 #include <Statistics/ExportSymbols.h>
 #include <Statistics/StatisticsBase.h>
 #include <Storages/CnchStorageCache.h>
+#include <Storages/Hive/StorageCnchHive.h>
 #include <Storages/MergeTree/CnchAttachProcessor.h>
 #include <Storages/MergeTree/DeleteBitmapMeta.h>
 #include <Storages/MergeTree/MergeTreeDataPartCNCH_fwd.h>
@@ -69,10 +71,12 @@
 #include <Storages/PartCacheManager.h>
 #include <Storages/StorageCnchMergeTree.h>
 #include <Storages/StorageDictionary.h>
-#include <Storages/Hive/StorageCnchHive.h>
+#include <Transaction/Actions/S3AttachMetaAction.h>
+#include <Transaction/Actions/S3DetachMetaAction.h>
 #include <Transaction/TxnTimestamp.h>
 #include <Transaction/getCommitted.h>
 #include <brpc/server.h>
+
 
 /// TODO: put all global gflags together in somewhere.
 namespace brpc::policy { DECLARE_string(consul_agent_addr); }
@@ -517,6 +521,13 @@ namespace Catalog
         return parseQuery(parser, begin, end, "", 0, 0);
     }
 
+    void Catalog::loadFromConfig(const String & config_elem, const Poco::Util::AbstractConfiguration & config)
+    {
+        if (!config.has(config_elem))
+            return;
+        settings.loadFromConfig(config_elem + ".settings", config);
+    }
+
     Catalog::Catalog(Context & _context, const MetastoreConfig & config, String _name_space) : context(_context), name_space(_name_space)
     {
         runWithMetricSupport(
@@ -535,7 +546,6 @@ namespace Catalog
                 }
 
                 meta_proxy = std::make_shared<MetastoreProxy>(config);
-                max_commit_size_one_batch = context.getSettingsRef().catalog_max_commit_size;
                 /// Support set a custom topology key
                 if (config.topology_key.empty())
                     topology_key = name_space;
@@ -2298,7 +2308,7 @@ namespace Catalog
             assertLocalServerThrowIfNot(storage);
 
         // commit parts and delete bitmaps in one batch if the size is small.
-        if (total_parts_number + delete_bitmaps.size() + total_staged_parts_num < max_commit_size_one_batch)
+        if (total_parts_number + delete_bitmaps.size() + total_staged_parts_num < settings.max_commit_size_one_batch)
         {
             commit_in_batch(
                 {0,
@@ -2318,49 +2328,49 @@ namespace Catalog
         {
             // commit data parts first
             size_t batch_count{0};
-            while (batch_count + max_commit_size_one_batch < total_parts_number)
+            while (batch_count + settings.max_commit_size_one_batch < total_parts_number)
             {
                 commit_in_batch(
                     {batch_count,
-                     batch_count + max_commit_size_one_batch,
+                     batch_count + settings.max_commit_size_one_batch,
                      0,
                      0,
                      0,
                      0,
                      batch_count,
-                     batch_count + max_commit_size_one_batch,
+                     batch_count + settings.max_commit_size_one_batch,
                      0,
                      0,
                      0,
                      0});
-                batch_count += max_commit_size_one_batch;
+                batch_count += settings.max_commit_size_one_batch;
             }
             commit_in_batch({batch_count, total_parts_number, 0, 0, 0, 0, batch_count, total_parts_number, 0, 0, 0, 0});
 
             // then commit delete bitmap
             batch_count = 0;
-            while (batch_count + max_commit_size_one_batch < delete_bitmaps.size())
+            while (batch_count + settings.max_commit_size_one_batch < delete_bitmaps.size())
             {
                 commit_in_batch(
                     {0,
                      0,
                      batch_count,
-                     batch_count + max_commit_size_one_batch,
+                     batch_count + settings.max_commit_size_one_batch,
                      0,
                      0,
                      0,
                      0,
                      batch_count,
-                     batch_count + max_commit_size_one_batch,
+                     batch_count + settings.max_commit_size_one_batch,
                      0,
                      0});
-                batch_count += max_commit_size_one_batch;
+                batch_count += settings.max_commit_size_one_batch;
             }
             commit_in_batch({0, 0, batch_count, total_deleted_bitmaps_number, 0, 0, 0, 0, batch_count, total_deleted_bitmaps_number, 0, 0});
 
             // then commit staged parts
             batch_count = 0;
-            while (batch_count + max_commit_size_one_batch < total_staged_parts_num)
+            while (batch_count + settings.max_commit_size_one_batch < total_staged_parts_num)
             {
                 commit_in_batch(
                     {0,
@@ -2368,14 +2378,14 @@ namespace Catalog
                      0,
                      0,
                      batch_count,
-                     batch_count + max_commit_size_one_batch,
+                     batch_count + settings.max_commit_size_one_batch,
                      0,
                      0,
                      0,
                      0,
                      batch_count,
-                     batch_count + max_commit_size_one_batch});
-                batch_count += max_commit_size_one_batch;
+                     batch_count + settings.max_commit_size_one_batch});
+                batch_count += settings.max_commit_size_one_batch;
             }
             commit_in_batch({0, 0, 0, 0, batch_count, total_staged_parts_num, 0, 0, 0, 0, batch_count, total_staged_parts_num});
         }
@@ -3480,6 +3490,31 @@ namespace Catalog
                     ,commit_data.staged_parts.size()
                     ,storage->getStorageID().getNameForLogs());
 
+                const auto host_ports = context.getCnchTopologyMaster()->getTargetServer(
+                    UUIDHelpers::UUIDToString(storage->getStorageUUID()), storage->getServerVwName(), false);
+
+                if (!isLocalServer(host_ports.getRPCAddress(), std::to_string(context.getRPCPort())))
+                {
+                    try
+                    {
+                        LOG_DEBUG(
+                            log,
+                            "Redirect clearParts request to remote host : {} for table {}",
+                            host_ports.toDebugString(),
+                            storage->getStorageID().getNameForLogs());
+                        context.getCnchServerClientPool().get(host_ports)->redirectClearParts(storage, commit_data);
+                        return;
+                    }
+                    catch (Exception & e)
+                    {
+                        /// if remote quest got exception and cannot fallback to commit to current node, throw exception directly
+                        throw Exception(
+                            "Fail to redirect clearParts request to remote host : " + host_ports.toDebugString()
+                                + ". Error message : " + e.what(),
+                            ErrorCodes::CATALOG_COMMIT_PART_ERROR);
+                    }
+                }
+
                 Strings drop_keys;
                 drop_keys.reserve(commit_data.data_parts.size() + commit_data.delete_bitmaps.size() + commit_data.staged_parts.size());
                 String table_uuid = UUIDHelpers::UUIDToString(storage->getStorageID().uuid);
@@ -3505,7 +3540,7 @@ namespace Catalog
                 bool need_invalid_part_cache = context.getPartCacheManager() && !commit_data.data_parts.empty();
                 bool need_invalid_bitmap_cache = context.getPartCacheManager() && !commit_data.delete_bitmaps.empty();
                 /// drop in batch if the number of drop keys greater than max_drop_size_one_batch
-                if (drop_keys.size() > max_drop_size_one_batch)
+                if (drop_keys.size() > settings.max_drop_size_one_batch)
                 {
                     size_t batch_count{0};
                     const size_t mark1 = commit_data.data_parts.size();
@@ -3515,9 +3550,9 @@ namespace Catalog
                     {
                         meta_proxy->multiDrop(Strings{
                             drop_keys.begin() + batch_count,
-                            drop_keys.begin() + std::min(batch_count + max_drop_size_one_batch, drop_keys.size())});
+                            drop_keys.begin() + std::min(batch_count + settings.max_drop_size_one_batch, drop_keys.size())});
 
-                        const size_t batch_count_end = batch_count + max_drop_size_one_batch;
+                        const size_t batch_count_end = batch_count + settings.max_drop_size_one_batch;
                         /// clear part cache immediately after drop from metastore
                         if (need_invalid_part_cache)
                         {
@@ -3554,7 +3589,7 @@ namespace Catalog
                                         commit_data.delete_bitmaps.begin() + right_bound - mark1});
                             }
                         }
-                        batch_count += max_drop_size_one_batch;
+                        batch_count += settings.max_drop_size_one_batch;
                     }
                 }
                 else
@@ -3579,7 +3614,8 @@ namespace Catalog
     }
 
     // write undo buffer before write vfs
-    void Catalog::writeUndoBuffer(const StorageID & storage_id, const TxnTimestamp & txnID, const UndoResources & resources)
+    void Catalog::writeUndoBuffer(
+        const StorageID & storage_id, const TxnTimestamp & txnID, const UndoResources & resources, PlanSegmentInstanceId instance_id)
     {
         runWithMetricSupport(
             [&] {
@@ -3588,20 +3624,22 @@ namespace Catalog
                 String uuid_str = UUIDHelpers::UUIDToString(storage_id.uuid);
 
                 /// write resources in batch, max batch size is max_commit_size_one_batch
-                auto begin = resources.begin(), end = std::min(resources.end(), begin + max_commit_size_one_batch);
+                auto begin = resources.begin(), end = std::min(resources.end(), begin + settings.max_commit_size_one_batch);
                 while (begin < end)
                 {
                     UndoResources tmp{begin, end};
-                    meta_proxy->writeUndoBuffer(name_space, txnID.toUInt64(), context.getHostWithPorts().getRPCAddress(), uuid_str, tmp);
+                    meta_proxy->writeUndoBuffer(
+                        name_space, txnID.toUInt64(), context.getHostWithPorts().getRPCAddress(), uuid_str, tmp, instance_id, settings.write_undo_buffer_new_key);
                     begin = end;
-                    end = std::min(resources.end(), begin + max_commit_size_one_batch);
+                    end = std::min(resources.end(), begin + settings.max_commit_size_one_batch);
                 }
             },
             ProfileEvents::WriteUndoBufferConstResourceSuccess,
             ProfileEvents::WriteUndoBufferConstResourceFailed);
     }
 
-    void Catalog::writeUndoBuffer(const StorageID & storage_id, const TxnTimestamp & txnID, UndoResources && resources)
+    void Catalog::writeUndoBuffer(
+        const StorageID & storage_id, const TxnTimestamp & txnID, UndoResources && resources, PlanSegmentInstanceId instance_id)
     {
         runWithMetricSupport(
             [&] {
@@ -3609,13 +3647,14 @@ namespace Catalog
                     throw Exception(ErrorCodes::BAD_ARGUMENTS, "Storage uuid of table {} can't be empty", storage_id.getNameForLogs());
                 String uuid_str = UUIDHelpers::UUIDToString(storage_id.uuid);
 
-                auto begin = resources.begin(), end = std::min(resources.end(), begin + max_commit_size_one_batch);
+                auto begin = resources.begin(), end = std::min(resources.end(), begin + settings.max_commit_size_one_batch);
                 while (begin < end)
                 {
                     UndoResources tmp{std::make_move_iterator(begin), std::make_move_iterator(end)};
-                    meta_proxy->writeUndoBuffer(name_space, txnID.toUInt64(), context.getHostWithPorts().getRPCAddress(), uuid_str, tmp);
+                    meta_proxy->writeUndoBuffer(
+                        name_space, txnID.toUInt64(), context.getHostWithPorts().getRPCAddress(), uuid_str, tmp, instance_id, settings.write_undo_buffer_new_key);
                     begin = end;
-                    end = std::min(resources.end(), begin + max_commit_size_one_batch);
+                    end = std::min(resources.end(), begin + settings.max_commit_size_one_batch);
                 }
             },
             ProfileEvents::WriteUndoBufferNoConstResourceSuccess,
@@ -3634,22 +3673,97 @@ namespace Catalog
             ProfileEvents::ClearUndoBufferFailed);
     }
 
+    // clear undo buffer by segment instance
+    void Catalog::clearUndoBuffer(const TxnTimestamp & txnID, const String & rpc_address, PlanSegmentInstanceId instance_id)
+    {
+        runWithMetricSupport(
+            [&] {
+                /// clear by prefix (txnID) for undo buffer.
+                meta_proxy->clearUndoBuffer(name_space, txnID.toUInt64(), rpc_address, instance_id);
+            },
+            ProfileEvents::ClearUndoBufferSuccess,
+            ProfileEvents::ClearUndoBufferFailed);
+    }
+
     std::unordered_map<String, UndoResources> Catalog::getUndoBuffer(const TxnTimestamp & txnID)
     {
         std::unordered_map<String, UndoResources> res;
         runWithMetricSupport(
             [&] {
-                auto it = meta_proxy->getUndoBuffer(name_space, txnID.toUInt64());
-                while (it->next())
-                {
-                    UndoResource resource = UndoResource::deserialize(it->value());
-                    resource.txn_id = txnID;
-                    res[resource.uuid()].emplace_back(std::move(resource));
-                }
+                auto get_func = [&](bool write_undo_buffer_new_key) {
+                    auto it = meta_proxy->getUndoBuffer(name_space, txnID.toUInt64(), write_undo_buffer_new_key);
+                    while (it->next())
+                    {
+                        UndoResource resource = UndoResource::deserialize(it->value());
+                        resource.txn_id = txnID;
+                        res[resource.uuid()].emplace_back(std::move(resource));
+                    }
+                };
+                /// Get both old and new undo buffer keys;
+                get_func(true);
+                get_func(false);
             },
             ProfileEvents::GetUndoBufferSuccess,
             ProfileEvents::GetUndoBufferFailed);
         return res;
+    }
+
+    std::unordered_map<String, UndoResources>
+    Catalog::getUndoBuffer(const TxnTimestamp & txnID, const String & rpc_address, PlanSegmentInstanceId instance_id)
+    {
+        std::unordered_map<String, UndoResources> res;
+        runWithMetricSupport(
+            [&] {
+                auto get_func = [&](bool write_undo_buffer_new_key) {
+                    auto it = meta_proxy->getUndoBuffer(name_space, txnID.toUInt64(), rpc_address, instance_id, write_undo_buffer_new_key);
+                    while (it->next())
+                    {
+                        UndoResource resource = UndoResource::deserialize(it->value());
+                        resource.txn_id = txnID;
+                        res[resource.uuid()].emplace_back(std::move(resource));
+                    }
+                };
+                /// Get both old and new undo buffer keys;
+                get_func(true);
+                get_func(false);
+            },
+            ProfileEvents::GetUndoBufferSuccess,
+            ProfileEvents::GetUndoBufferFailed);
+        return res;
+    }
+
+    uint32_t Catalog::applyUndos(
+        const TransactionRecord & txn_record, const StoragePtr & table, const UndoResources & resources, bool & clean_fs_lock_by_scan)
+    {
+        auto * storage = dynamic_cast<MergeTreeMetaBase *>(table.get());
+        if (!storage)
+            throw Exception("Table is not of MergeTree class", ErrorCodes::LOGICAL_ERROR);
+
+        // clean vfs
+        for (const auto & resource : resources)
+        {
+            resource.clean(*this, storage);
+        }
+
+        UndoResourceNames names = integrateResources(resources);
+        /// Release directory lock if any
+        if (!names.kvfs_lock_keys.empty())
+        {
+            clearFilesysLocks({names.kvfs_lock_keys.begin(), names.kvfs_lock_keys.end()}, txn_record.txnID());
+            clean_fs_lock_by_scan = false;
+        }
+
+        // Clean attach parts for s3 aborted
+        S3AttachMetaAction::abortByUndoBuffer(context, table, resources);
+        // Clean detach parts for s3 aborted
+        S3DetachMetaAction::abortByUndoBuffer(context, table, resources);
+
+        auto intermediate_parts = getDataPartsByNames(names.parts, table, 0);
+        auto undo_bitmaps = getDeleteBitmapByKeys(table, names.bitmaps);
+        auto staged_parts = getStagedDataPartsByNames(names.staged_parts, table, 0);
+        clearParts(table, CommitItems{intermediate_parts, undo_bitmaps, staged_parts});
+
+        return intermediate_parts.size() + undo_bitmaps.size();
     }
 
     std::unordered_map<UInt64, UndoResources> Catalog::getAllUndoBuffer()
@@ -4450,9 +4564,9 @@ namespace Catalog
                 String table_uuid = UUIDHelpers::UUIDToString(storage->getStorageUUID());
                 String key_prefix = MetastoreProxy::stagedDataPartPrefix(name_space, table_uuid);
 
-                for (size_t beg = 0; beg < parts.size(); beg += max_drop_size_one_batch)
+                for (size_t beg = 0; beg < parts.size(); beg += settings.max_drop_size_one_batch)
                 {
-                    size_t end = std::min(beg + max_drop_size_one_batch, parts.size());
+                    size_t end = std::min(beg + settings.max_drop_size_one_batch, parts.size());
 
                     Strings drop_keys;
                     for (auto it = parts.begin() + beg; it != parts.begin() + end; ++it)
@@ -5171,9 +5285,9 @@ namespace Catalog
     {
         std::vector<std::shared_ptr<Protos::VersionedPartitions>> res;
         runWithMetricSupport(
-            [&] { 
+            [&] {
                     meta_proxy->getMvMetaVersion(name_space, uuid);
-                    res = meta_proxy->getMvBaseTables(name_space, uuid); 
+                    res = meta_proxy->getMvBaseTables(name_space, uuid);
                 },
             ProfileEvents::GetMvBaseTableIDSuccess,
             ProfileEvents::GetMvBaseTableIDFailed);
@@ -5184,7 +5298,7 @@ namespace Catalog
     {
         String res;
         runWithMetricSupport(
-            [&] { 
+            [&] {
                     res = meta_proxy->getMvMetaVersion(name_space, uuid);
                 },
             ProfileEvents::GetMvBaseTableVersionSuccess,
@@ -6397,8 +6511,8 @@ namespace Catalog
             getPartitionIDs(to_tbl, nullptr),
             detached_bitmaps,
             bitmaps,
-            max_commit_size_one_batch,
-            max_drop_size_one_batch);
+            settings.max_commit_size_one_batch,
+            settings.max_drop_size_one_batch);
 
         if (context.getPartCacheManager())
         {
@@ -6507,8 +6621,8 @@ namespace Catalog
             commit_parts,
             attached_bitmaps,
             bitmaps,
-            max_commit_size_one_batch,
-            max_drop_size_one_batch);
+            settings.max_commit_size_one_batch,
+            settings.max_drop_size_one_batch);
 
         if (context.getPartCacheManager())
         {
@@ -6585,8 +6699,8 @@ namespace Catalog
             detached_visible_part_size,
             detached_staged_part_size,
             bitmap_names,
-            max_commit_size_one_batch,
-            max_drop_size_one_batch);
+            settings.max_commit_size_one_batch,
+            settings.max_drop_size_one_batch);
 
         Protos::DataModelPartVector attached_parts;
         for (const auto& [meta, version] : attached_metas)
@@ -6666,8 +6780,8 @@ namespace Catalog
             detached_part_metas,
             attached_bitmap_names,
             detached_bitmap_metas,
-            max_commit_size_one_batch,
-            max_drop_size_one_batch);
+            settings.max_commit_size_one_batch,
+            settings.max_drop_size_one_batch);
 
         if (context.getPartCacheManager())
         {
@@ -6809,8 +6923,8 @@ namespace Catalog
                     notifyOtherServersOnAccessEntityChange(*ctx, type, old_name, RPCHelpers::createUUID(old_uuid));
                 notifyOtherServersOnAccessEntityChange(*ctx, type, new_name, RPCHelpers::createUUID(new_uuid));
             }).detach();
-        }         
-    }   
+        }
+    }
 
     void notifyOtherServersOnAccessEntityChange(const Context & context, EntityType type, const String & name, const UUID & uuid)
     {

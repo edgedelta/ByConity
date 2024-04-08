@@ -28,29 +28,25 @@
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <Access/IAccessEntity.h>
 #include <Catalog/IMetastore.h>
 #include <CloudServices/CnchBGThreadCommon.h>
 #include <Core/UUID.h>
+#include <Interpreters/DistributedStages/PlanSegmentInstance.h>
+#include <Interpreters/SQLBinding/SQLBinding.h>
 #include <MergeTreeCommon/InsertionLabel.h>
+#include <Parsers/formatTenantDatabaseName.h>
 #include <Protos/RPCHelpers.h>
 #include <ResourceManagement/CommonData.h>
 #include <Statistics/ExportSymbols.h>
 #include <Statistics/StatisticsBase.h>
+#include <Storages/StorageSnapshot.h>
 #include <Transaction/TransactionCommon.h>
 #include <Transaction/TxnTimestamp.h>
 #include <cppkafka/cppkafka.h>
 #include <google/protobuf/repeated_field.h>
-#include <common/types.h>
-#include <Storages/StorageSnapshot.h>
-#include <Access/IAccessEntity.h>
-#include <Parsers/formatTenantDatabaseName.h>
-#include <Interpreters/SQLBinding/SQLBinding.h>
 #include <Common/Config/MetastoreConfig.h>
-
-namespace DB::ErrorCodes
-{
-    extern const int METASTORE_ACCESS_ENTITY_NOT_IMPLEMENTED;
-}
+#include <common/types.h>
 
 namespace DB::ErrorCodes
 {
@@ -163,7 +159,7 @@ using SerializedObjectSchema = String;
 
 static std::shared_ptr<MetastoreFDBImpl> getFDBInstance(const String & cluster_config_path)
 {
-    /// Notice: A single process can only have one fdb instance
+    /// Notice: A single process can only have fdb instance
     static std::shared_ptr<MetastoreFDBImpl> metastore_fdb(new MetastoreFDBImpl(cluster_config_path));
     return metastore_fdb;
 }
@@ -173,7 +169,7 @@ inline std::shared_ptr<IMetaStore> getMetastorePtr(const MetastoreConfig & confi
     if (config.type == MetaStoreType::FDB)
         return getFDBInstance(config.fdb_conf.cluster_conf_path);
 
-    throw Exception("Catalog must be correctly configured. Only foundationdb and bytekv is supported for now.", ErrorCodes::METASTORE_EXCEPTION);
+    throw Exception("Catalog must be correctly configured. Only support foundationdb and bytekv now.", ErrorCodes::METASTORE_EXCEPTION);
 }
 
 class MetastoreProxy
@@ -354,9 +350,9 @@ public:
         return tableMetaPrefix(name_space) + uuid + '_';
     }
 
-    static std::string udfStoreKey(const std::string & name_space, const std::string & prefix_name, const std::string & function_name)
+    static std::string udfStoreKey(const std::string & name_space, const std::string & db, const std::string & function_name)
     {
-        return udfMetaPrefix(name_space) + prefix_name + '.' + function_name;
+        return udfMetaPrefix(name_space) + db + '.' + function_name;
     }
 
     static std::string udfStoreKey(const std::string & name_space, const std::string & name)
@@ -556,15 +552,28 @@ public:
         return escapeString(name_space) + '_' + UNDO_BUFFER_PREFIX + toString(txn);
     }
 
-    /// Make sure only touch wanted transaction id's undo buffer keys
-    static std::string undoBufferKeyPrefix(const std::string & name_space, const UInt64 & txn, bool write_undo_buffer_new_key)
+    static std::string undoBufferStoreKey(
+        const std::string & name_space,
+        const UInt64 & txn,
+        const String & rpc_address,
+        const UndoResource & resource,
+        PlanSegmentInstanceId instance_id,
+        bool write_undo_buffer_new_key)
     {
-        return undoBufferKey(name_space, txn, write_undo_buffer_new_key) + "_";
+        return fmt::format(
+            "{}_{}_{}_{}_{}",
+            undoBufferKey(name_space, txn, write_undo_buffer_new_key),
+            escapeString(rpc_address),
+            instance_id.segment_id,
+            instance_id.parallel_id,
+            escapeString(toString(resource.id)));
     }
 
-    static std::string undoBufferStoreKey(const std::string & name_space, const UInt64 & txn, const String & rpc_address, const UndoResource & resource, bool write_undo_buffer_new_key)
+    static std::string undoBufferSegmentInstanceKey(
+        const std::string & name_space, const UInt64 & txn, const String & rpc_address, PlanSegmentInstanceId instance_id, bool write_undo_buffer_new_key)
     {
-        return undoBufferKey(name_space, txn, write_undo_buffer_new_key) + '_' + escapeString(rpc_address) + '_' + escapeString(toString(resource.id));
+        return fmt::format(
+            "{}_{}_{}_{}", undoBufferKey(name_space, txn, write_undo_buffer_new_key), escapeString(rpc_address), instance_id.segment_id, instance_id.parallel_id);
     }
 
     static std::string kvLockKey(const std::string & name_space, const std::string & uuid, const std::string & part_name)
@@ -968,7 +977,7 @@ public:
     String getTrashTableUUID(const String & name_space, const String & database, const String & name, const UInt64 & ts);
     void createTable(const String & name_space, const UUID & db_uuid, const DB::Protos::DataModelTable & table_data, const Strings & dependencies, const Strings & masking_policy_mapping);
     void createUDF(const String & name_space, const DB::Protos::DataModelUDF & udf_data);
-    void dropUDF(const String & name_space, const String &resolved_function_name);
+    void dropUDF(const String & name_space, const String &db_name, const String &function_name);
     void updateTable(const String & name_space, const String & table_uuid, const String & table_info_new, const UInt64 & ts);
     void updateTableWithID(const String & name_space, const Protos::TableIdentifier & table_id, const DB::Protos::DataModelTable & table_data);
     void getTableByUUID(const String & name_space, const String & table_uuid, Strings & tables_info);
@@ -1056,10 +1065,24 @@ public:
     Strings getAllMutations(const String & name_space, const String & uuid);
     std::multimap<String, String> getAllMutations(const String & name_space);
 
-    void writeUndoBuffer(const String & name_space, const UInt64 & txnID, const String & rpc_address, const String & uuid, UndoResources & resources, bool write_undo_buffer_new_key);
+    void writeUndoBuffer(
+        const String & name_space,
+        const UInt64 & txnID,
+        const String & rpc_address,
+        const String & uuid,
+        UndoResources & resources,
+        PlanSegmentInstanceId instance_id,
+        bool write_undo_buffer_new_key);
 
     void clearUndoBuffer(const String & name_space, const UInt64 & txnID);
+    void clearUndoBuffer(const String & name_space, const UInt64 & txnID, const String & rpc_address, PlanSegmentInstanceId instance_id);
     IMetaStore::IteratorPtr getUndoBuffer(const String & name_space, UInt64 txnID, bool write_undo_buffer_new_key);
+    IMetaStore::IteratorPtr getUndoBuffer(
+        const String & name_space,
+        UInt64 txnID,
+        const String & rpc_address,
+        PlanSegmentInstanceId instance_id,
+        bool write_undo_buffer_new_key);
     IMetaStore::IteratorPtr getAllUndoBuffer(const String & name_space);
 
     void multiDrop(const Strings & keys);
@@ -1243,10 +1266,8 @@ public:
      * @brief Get all items in the trash state. This is a GC related function.
      *
      * @param limit Limit the results, disabled by passing 0.
-     * @param start_key KV Scan will begin from `start_key` if it's not empty.
      */
-    IMetaStore::IteratorPtr
-    getItemsInTrash(const String & name_space, const String & table_uuid, const size_t & limit, const String & start_key = "");
+    IMetaStore::IteratorPtr getItemsInTrash(const String & name_space, const String & table_uuid, const size_t & limit);
 
     //Object column schema related API
     static String extractTxnIDFromPartialSchemaKey(const String & partial_schema_key);
