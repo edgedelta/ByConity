@@ -291,7 +291,7 @@ void SelectStreamFactory::createForShard(
 
     /**
         prefer_localhost_replica in cnch is useless and is buggy.
-        and in worker we query from remote to reuse send WorkerResource flow to send/load data part
+        and in worker we query from remote to reuse send WorkerResource flow to send/load datapart
     */
     if (main_table && settings.prefer_localhost_replica && shard_info.isLocal() && (context->getServerType() != ServerType::cnch_worker))
     {

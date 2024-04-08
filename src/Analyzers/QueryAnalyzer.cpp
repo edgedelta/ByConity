@@ -50,7 +50,6 @@
 #include <Parsers/ASTSelectQuery.h>
 #include <Parsers/ASTTablesInSelectQuery.h>
 #include <Parsers/ASTVisitor.h>
-#include <Parsers/formatAST.h>
 #include <Parsers/queryToString.h>
 #include <QueryPlan/Void.h>
 #include <Storages/IStorage.h>
@@ -61,14 +60,11 @@
 #if USE_HIVE
 #    include <Storages/Hive/StorageCnchHive.h>
 #endif
-#include <sstream>
-#include <unordered_map>
-#include <Access/ContextAccess.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeTuple.h>
-#include <Interpreters/join_common.h>
-#include <MergeTreeCommon/MergeTreeMetaBase.h>
 #include <Optimizer/Utils.h>
+#include <Storages/Hive/StorageCnchHive.h>
+#include <Storages/IStorage.h>
 #include <Storages/MergeTree/MergeTreeMeta.h>
 #include <Storages/RemoteFile/IStorageCnchFile.h>
 #include <Storages/StorageCnchMergeTree.h>
@@ -121,8 +117,7 @@ public:
     }
 
     QueryAnalyzerVisitor(ContextPtr context_, Analysis & analysis_, ScopePtr outer_query_scope_)
-        : ASTVisitor(context_->getSettingsRef().max_ast_depth)
-        , context(std::move(context_))
+        : context(std::move(context_))
         , analysis(analysis_)
         , outer_query_scope(outer_query_scope_)
         , use_ansi_semantic(context->getSettingsRef().dialect_type != DialectType::CLICKHOUSE)
@@ -142,8 +137,6 @@ private:
     const bool enable_implicit_type_conversion;
     const bool allow_extended_conversion;
     const bool enable_subcolumn_optimization_through_union;
-
-    Poco::Logger * logger = &Poco::Logger::get("QueryAnalyzer");
 
     void analyzeSetOperation(ASTPtr & node, ASTs & selects);
 
@@ -532,6 +525,7 @@ QueryAnalyzerVisitor::analyzeFrom(ASTTablesInSelectQuery & tables_in_select, AST
     for (size_t idx = 1; idx < tables_in_select.children.size(); ++idx)
     {
         auto & table_element = tables_in_select.children[idx]->as<ASTTablesInSelectQueryElement &>();
+
         if (table_element.table_expression)
         {
             auto * table_expression = table_element.table_expression->as<ASTTableExpression>();
@@ -585,7 +579,6 @@ ScopePtr QueryAnalyzerVisitor::analyzeTable(
     // get storage information
     StoragePtr storage;
     String full_table_name;
-
     {
         auto storage_id = context->tryResolveStorageID(db_and_table.getTableId());
         storage = DatabaseCatalog::instance().getTable(storage_id, context);
@@ -596,8 +589,11 @@ ScopePtr QueryAnalyzerVisitor::analyzeTable(
         storage->renameInMemory(storage_id);
         full_table_name = storage_id.getFullTableName();
 
-        if (storage_id.getDatabaseName() != "system" && !storage->supportsOptimizer())
-            throw Exception("table is not supported in optimizer", ErrorCodes::NOT_IMPLEMENTED);
+        if (storage_id.getDatabaseName() != "system"
+            && !(
+                dynamic_cast<const MergeTreeMetaBase *>(storage.get()) || dynamic_cast<const StorageMemory *>(storage.get())
+                || dynamic_cast<const StorageCnchHive *>(storage.get()) || dynamic_cast<const IStorageCnchFile *>(storage.get())))
+            throw Exception("Only cnch tables & system tables are supported", ErrorCodes::NOT_IMPLEMENTED);
 
         analysis.storage_results[&db_and_table] = StorageAnalysis{storage_id.getDatabaseName(), storage_id.getTableName(), storage};
     }
@@ -631,19 +627,16 @@ ScopePtr QueryAnalyzerVisitor::analyzeTable(
     {
         for (const auto & column : columns_description.getOrdinary())
         {
-            LOG_TRACE(logger, "analyze table {}, add ordinary field {}", full_table_name, column.name);
             add_field(column.name, column.type, true);
         }
 
         for (const auto & column : columns_description.getMaterialized())
         {
-            LOG_TRACE(logger, "analyze table {}, add materialized field {}", full_table_name, column.name);
             add_field(column.name, column.type, false);
         }
 
         for (const auto & column : storage->getVirtuals())
         {
-            LOG_TRACE(logger, "analyze table {}, add virtual field {}", full_table_name, column.name);
             add_field(column.name, column.type, false);
         }
 
@@ -651,7 +644,6 @@ ScopePtr QueryAnalyzerVisitor::analyzeTable(
         {
             for (const auto & column : columns_description.getSubcolumnsOfAllPhysical())
             {
-                LOG_TRACE(logger, "analyze table {}, add subcolumn field {}", full_table_name, column.name);
                 add_field(column.name, column.type, false);
             }
         }
@@ -688,7 +680,6 @@ ScopePtr QueryAnalyzerVisitor::analyzeTable(
         {
             auto col_type = ExprAnalyzer::analyze(alias_col, scope, context, analysis, options);
             auto col_name = alias_col->tryGetAlias();
-            LOG_TRACE(logger, "analyze table {}, add alias field {}", full_table_name, col_name);
             add_field(col_name, col_type, false);
         }
 
@@ -1370,7 +1361,7 @@ void QueryAnalyzerVisitor::analyzeWhere(ASTSelectQuery & select_query, ScopePtr 
         return;
 
     ExprAnalyzerOptions expr_options{"WHERE expression"};
-    expr_options.selectQuery(select_query).subquerySupport(ExprAnalyzerOptions::SubquerySupport::CORRELATED).subqueryToSemiAnti(true);
+    expr_options.selectQuery(select_query).subquerySupport(ExprAnalyzerOptions::SubquerySupport::CORRELATED);
     auto filter_type = ExprAnalyzer::analyze(select_query.where(), source_scope, context, analysis, expr_options);
 
     if (auto inner_type = removeNullable(removeLowCardinality(filter_type)))

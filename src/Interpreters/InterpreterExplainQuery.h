@@ -70,17 +70,15 @@ private:
 
     std::optional<String> getActivePartCondition(StoragePtr & storage);
 
-    BlockInputStreamPtr explain();
-
-    BlockInputStreamPtr explainUsingOptimizer();
-
-    BlockInputStreamPtr explainMetaData();
+    void explainUsingOptimizer(const ASTPtr & ast, WriteBuffer & buffer, bool & single_line);
 
     void explainPlanWithOptimizer(const ASTExplainQuery & explain_ast, QueryPlan & plan, WriteBuffer & buffer, ContextMutablePtr & context_ptr, bool & single_line);
 
     void explainDistributedWithOptimizer(const ASTExplainQuery & explain_ast, QueryPlan & plan, WriteBuffer & buffer, ContextMutablePtr & context_ptr);
 
     BlockIO explainAnalyze();
+
+    BlockInputStreamPtr explainMetaData(const ASTPtr & ast);
 
     void explainPipelineWithOptimizer(const ASTExplainQuery & explain_ast, QueryPlan & plan, WriteBuffer & buffer, ContextMutablePtr & context_ptr);
 };

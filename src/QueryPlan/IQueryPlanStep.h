@@ -99,11 +99,6 @@ public:
 
     NameToType getNamesToTypes() const { return header.getNamesToTypes(); }
 
-    Names getNames() const
-    {
-        return header.getNames();
-    }
-
     void toProto(Protos::DataStream & proto) const;
     void fillFromProto(const Protos::DataStream & proto);
 };
@@ -149,7 +144,6 @@ public:
     MM(PartialSorting, partial_sorting) \
     MM(PartitionTopN, partition_top_n) \
     MM(Projection, projection) \
-    MM(Expand, expand) \
     MM(ReadNothing, read_nothing) \
     MM(ReadStorageRowCount, read_storage_row_count) \
     MM(RemoteExchangeSource, remote_exchange_source) \
@@ -171,7 +165,6 @@ public:
     MM(TotalsHaving, totals_having) \
     MM(OutfileWrite, outfile_write) \
     MM(OutfileFinish, outfile_finish) \
-    MM(LocalExchange, local_exchange) \
     MM(MultiJoin, multi_join)
 
 // macro helpers to convert MM(x, y) to M(x)

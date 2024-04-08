@@ -31,7 +31,6 @@
 #include <Parsers/ASTWindowDefinition.h>
 #include <Storages/IStorage_fwd.h>
 #include <Common/LinkedHashSet.h>
-#include <common/logger_useful.h>
 
 #include <utility>
 #include <vector>
@@ -189,6 +188,18 @@ struct SubColumnReference
     }
 };
 
+struct ColumnWithType
+{
+    DataTypePtr type;
+    ColumnPtr column;
+
+    ColumnWithType() { }
+    ColumnWithType(const DataTypePtr & type_, const ColumnPtr & column_)
+        : type(type_), column(column_)
+    {}
+    ColumnWithType(const DataTypePtr & type_) : type(type_){}
+};
+
 struct HintAnalysis
 {
     size_t leading_hint_count = 0;
@@ -221,25 +232,12 @@ struct OutfileAnalysis
     size_t compression_level;
 };
 
-struct ColumnWithType
-{
-    DataTypePtr type;
-    ColumnPtr column;
-
-    ColumnWithType() { }
-    ColumnWithType(const DataTypePtr & type_, const ColumnPtr & column_)
-        : type(type_), column(column_)
-    {}
-    ColumnWithType(const DataTypePtr & type_) : type(type_){}
-};
-
 template<typename Key, typename Val>
 using ListMultimap = std::unordered_map<Key, std::vector<Val>>;
 
 struct Analysis
 {
     ScopeFactory scope_factory;
-    Poco::Logger * logger = &Poco::Logger::get("Analysis");
 
     /// Scopes
     // Regular scopes in an ASTSelectQuery, kept by below convention:
@@ -324,7 +322,6 @@ struct Analysis
     std::vector<WindowAnalysisPtr> & getWindowAnalysisOfSelectQuery(ASTSelectQuery & select_query);
 
     /// Subqueries
-    std::unordered_map<ASTPtr, bool> subquery_support_semi_anti;
     ListMultimap<ASTSelectQuery * , ASTPtr> scalar_subqueries;
     std::vector<ASTPtr> & getScalarSubqueries(ASTSelectQuery & select_query);
 
@@ -440,7 +437,10 @@ struct Analysis
 
     /// Insert
     std::optional<InsertAnalysis> insert_analysis;
-    std::optional<InsertAnalysis> & getInsert() { return insert_analysis; }
+    std::optional<InsertAnalysis> & getInsert()
+    {
+        return insert_analysis;
+    }
 
     // Which columns are used in query, used for EXPLAIN ANALYSIS reporting.
     // A difference with read_columns is, columns used in alias columns are not included.
