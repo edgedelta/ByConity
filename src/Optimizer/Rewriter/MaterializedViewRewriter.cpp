@@ -52,6 +52,7 @@
 #include <QueryPlan/Assignment.h>
 #include <QueryPlan/CTEInfo.h>
 #include <QueryPlan/FilterStep.h>
+#include <QueryPlan/GraphvizPrinter.h>
 #include <QueryPlan/IQueryPlanStep.h>
 #include <QueryPlan/PlanNode.h>
 #include <QueryPlan/PlanSymbolReallocator.h>
@@ -336,7 +337,9 @@ protected:
         skip_nodes.emplace(IQueryPlanStep::Type::Aggregating);
         skip_nodes.emplace(IQueryPlanStep::Type::Sorting);
         JoinHyperGraph query_join_hyper_graph = JoinHyperGraph::build(query, *query_map, context, skip_nodes);
-        PlanNodes query_inner_sources = InnerJoinCollector::collect(query);
+        InnerJoinCollector inner_join_collector;
+        inner_join_collector.collect(query);
+        PlanNodes query_inner_sources = inner_join_collector.getInnerSources();
         // get all predicates from join graph
         auto query_predicates = extractPredicates(query_join_hyper_graph, query_join_hyper_graph.getNodeSet(query_inner_sources));
 
@@ -651,10 +654,9 @@ protected:
 
             // 3. check need rollup
             // Note: aggregate always need rollup for aggregating merge tree in clickhouse,
-            if (view_aggregate && !view_aggregate)
-                continue;
-            bool need_rollup
-                = query_aggregate && (!async_materialized_view || query_aggregate->getKeys().size() < view_aggregate->getKeys().size());
+            bool need_rollup = query_aggregate
+                && (!async_materialized_view || !view_aggregate || query_aggregate->getKeys().size() < view_aggregate->getKeys().size()
+                    || !PredicateUtils::isFalsePredicate(union_predicate));
 
             // 3-1. query aggregate has default result if group by has empty set. not supported yet.
             bool empty_groupings = query_aggregate && query_aggregate->getKeys().empty() &&
@@ -1292,7 +1294,7 @@ protected:
             if (!PredicateUtils::isFalsePredicate(candidate.union_predicate))
                 plan = planUnion(plan, query, candidate.union_predicate);
 
-            // reallocate symbols
+                        // reallocate symbols
             PlanNodeAndMappings plan_node_and_mappings = PlanSymbolReallocator::reallocate(plan, context);
             plan = plan_node_and_mappings.plan_node;
 
@@ -1740,7 +1742,7 @@ void MaterializedViewRewriter::rewrite(QueryPlan & plan, ContextMutablePtr conte
     plan.update(res.plan_node);
 }
 
-LinkedHashMap<MaterializedViewStructurePtr, PartitionCheckResult> MaterializedViewRewriter::getRelatedMaterializedViews(QueryPlan & plan, ContextMutablePtr context)
+LinkedHashMap<MaterializedViewStructurePtr, PartitionCheckResult> MaterializedViewRewriter::getRelatedMaterializedViews(QueryPlan & plan, ContextMutablePtr context) const
 {
     std::vector<MaterializedViewStructurePtr> materialized_views;
     auto & cache = MaterializedViewMemoryCache::instance();
@@ -1758,11 +1760,22 @@ LinkedHashMap<MaterializedViewStructurePtr, PartitionCheckResult> MaterializedVi
             materialized_views.push_back(*structure);
     }
 
+    if (log->debug())
+    {
+        std::stringstream ss;
+        for (const auto & materialized_view : materialized_views)
+            ss << materialized_view->view_storage_id.getFullTableName() << ", ";
+        LOG_DEBUG(log, "related {} materialized views: {}", materialized_views.size(), ss.str());
+    }
+
+
     LinkedHashMap<MaterializedViewStructurePtr, PartitionCheckResult> res;
     for (const auto & materialized_view : materialized_views)
     {
         if (auto partition_check_result = checkMaterializedViewPartitionConsistency(materialized_view, context))
             res.emplace(materialized_view, *partition_check_result);
+        else
+            LOG_DEBUG(log, "skip materialized view {}: check consistency failed", materialized_view->view_storage_id.getFullTableName());
     }
     return res;
 }

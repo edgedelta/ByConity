@@ -79,48 +79,15 @@ enum PreloadLevelSettings : UInt64
       "The maximum size of blocks of uncompressed data before compressing for writing to a table.", \
       0) \
     M(UInt64, max_block_size, DEFAULT_BLOCK_SIZE, "Maximum block size for reading", 0) \
-    M(UInt64, \
-      max_insert_block_size, \
-      DEFAULT_INSERT_BLOCK_SIZE, \
-      "The maximum block size for insertion, if we control the creation of blocks for insertion.", \
-      0) \
-    M(UInt64, \
-      max_insert_block_size_bytes, \
-      DEFAULT_BLOCK_SIZE_BYTES, \
-      "The maximum block bytes for insertion, if we control the creation of blocks for insertion.", \
-      0) \
-    M(UInt64, \
-      min_insert_block_size_rows, \
-      DEFAULT_INSERT_BLOCK_SIZE, \
-      "Squash blocks passed to INSERT query to specified size in rows, if blocks are not big enough.", \
-      0) \
-    M(UInt64, \
-      min_insert_block_size_bytes, \
-      (DEFAULT_INSERT_BLOCK_SIZE * 256), \
-      "Squash blocks passed to INSERT query to specified size in bytes, if blocks are not big enough.", \
-      0) \
-    M(UInt64, \
-      min_insert_block_size_rows_for_materialized_views, \
-      0, \
-      "Like min_insert_block_size_rows, but applied only during pushing to MATERIALIZED VIEW (default: min_insert_block_size_rows)", \
-      0) \
-    M(UInt64, \
-      min_insert_block_size_bytes_for_materialized_views, \
-      0, \
-      "Like min_insert_block_size_bytes, but applied only during pushing to MATERIALIZED VIEW (default: min_insert_block_size_bytes)", \
-      0) \
-    M(UInt64, \
-      max_joined_block_size_rows, \
-      DEFAULT_BLOCK_SIZE, \
-      "Maximum block size for JOIN result (if join algorithm supports it). 0 means unlimited.", \
-      0) \
-    M(UInt64, \
-      max_insert_threads, \
-      0, \
-      "The maximum number of threads to execute the INSERT SELECT query. Values 0 or 1 means that INSERT SELECT is not run in parallel. " \
-      "Higher values will lead to higher memory usage. Parallel INSERT SELECT has effect only if the SELECT part is run on parallel, see " \
-      "'max_threads' setting.", \
-      0) \
+    M(UInt64, max_insert_block_size, DEFAULT_INSERT_BLOCK_SIZE, "The maximum block size for insertion, if we control the creation of blocks for insertion.", 0) \
+    M(UInt64, max_insert_block_size_bytes, DEFAULT_BLOCK_SIZE_BYTES, "The maximum block bytes for insertion, if we control the creation of blocks for insertion.", 0) \
+    M(UInt64, min_insert_block_size_rows, DEFAULT_INSERT_BLOCK_SIZE, "Squash blocks passed to INSERT query to specified size in rows, if blocks are not big enough.", 0) \
+    M(UInt64, min_insert_block_size_bytes, (DEFAULT_INSERT_BLOCK_SIZE * 256), "Squash blocks passed to INSERT query to specified size in bytes, if blocks are not big enough.", 0) \
+    M(UInt64, min_insert_block_size_rows_for_materialized_views, 0, "Like min_insert_block_size_rows, but applied only during pushing to MATERIALIZED VIEW (default: min_insert_block_size_rows)", 0) \
+    M(UInt64, min_insert_block_size_bytes_for_materialized_views, 0, "Like min_insert_block_size_bytes, but applied only during pushing to MATERIALIZED VIEW (default: min_insert_block_size_bytes)", 0) \
+    M(UInt64, max_joined_block_size_rows, DEFAULT_BLOCK_SIZE, "Maximum block size for JOIN result (if join algorithm supports it). 0 means unlimited.", 0) \
+    M(UInt64, max_insert_threads, 0, "The maximum number of threads to execute the INSERT SELECT query. Values 0 or 1 means that INSERT SELECT is not run in parallel. Higher values will lead to higher memory usage. Parallel INSERT SELECT has effect only if the SELECT part is run on parallel, see 'max_threads' setting.", 0) \
+    M(Bool, enable_insert_squashing, true, "Squashing when insert", 0) \
     M(UInt64, max_final_threads, 16, "The maximum number of threads to read from table with FINAL.", 0) \
     M(MaxThreads, max_threads, 0, "The maximum number of threads to execute the request. By default, it is determined automatically.", 0) \
     M(MaxThreads, \
@@ -1388,7 +1355,7 @@ enum PreloadLevelSettings : UInt64
     M(Milliseconds, topology_retry_interval_ms, 100, "Interval of topology background task to retry.", 0) \
     M(Milliseconds, topology_lease_life_ms, 12000, "Expiration time of topology lease.", 0) \
     M(Milliseconds, topology_session_restart_check_ms, 120, "Check and try to restart leader election for server master", 0) \
-    M(UInt64, catalog_max_commit_size, 2000, "Max record number to be committed in one batch.", 0) \
+    M(UInt64, catalog_max_commit_size, 500, "Max record number to be committed in one batch.", 0) \
     M(Bool, catalog_enable_multiple_threads, false, "Whether leverage multiple threads to handle metadata.", 0) \
     M(UInt64, catalog_multiple_threads_min_parts, 10000, "Minimum parts number to enable multi-thread in calc visible parts.", 0) \
     M(Bool, server_write_ha, false, "Whether to enable write on non-host server if host server is not available. Directly commit from non-host server.", 0) \
@@ -1584,6 +1551,7 @@ enum PreloadLevelSettings : UInt64
     M(Bool, enable_unwrap_cast_in, true, "Whether enable unwrap cast function", 0) \
     M(Bool, enable_windows_reorder, true, "Reorder adjacent windows to decrease exchange", 0) \
     M(Bool, enable_push_partial_agg, true, "Whether enable push partial agg", 0) \
+    M(Bool, enable_shuffle_before_state_func, true, "Whether shuffle when agg func is state func.", 0) \
     M(Bool, enable_redundant_sort_removal, true, "Whether enable ignore redundant sort in subquery", 0) \
     M(Bool, enable_remove_unused_cte, true, "Whether enable remove unused cte", 0) \
     M(Bool, enable_filter_window_to_partition_topn, true, "Filter window to partition topn", 0) \
@@ -1738,6 +1706,7 @@ enum PreloadLevelSettings : UInt64
     M(Bool, enable_cte_property_enum, false, "Whether enumerate all possible properties for cte", 0) \
     M(Bool, enable_cte_common_property, true, "Whether search common property for cte", 0) \
     M(Bool, enable_windows_parallel, false, "Whether run windows in parallel", 0) \
+    M(Bool, enable_view_based_query_rewrite, false, "Whether enable materialized view based rewriter for query, compatible for  enable_materialized_view_rewrite", 0) \
     M(Bool, enable_materialized_view_rewrite, true, "Whether enable materialized view based rewriter for query", 0) \
     M(Bool, enable_sync_materialized_view_rewrite, true, "Whether enable materialized view based rewriter for sync materialized view", 0) \
     M(Bool, enforce_materialized_view_rewrite, false, "Whether throw exception if materialized view is not applied", 0) \
@@ -1859,6 +1828,7 @@ enum PreloadLevelSettings : UInt64
     M(String, use_snapshot, "", "If not empty, specify the name of the snapshot to use for query", 0) \
     M(Seconds, snapshot_clean_interval, 300, "How often to remove ttl expired snapshots", 0) \
     /* Outfile related Settings */ \
+    M(UInt64, split_file_size_in_mb, 0, "Threshold to split the out data in 'INTO OUTFILE' clause", 0) \
     M(Bool, outfile_in_server_with_tcp, false, "Out file in sever with tcp and return client empty block", 0) \
     M(UInt64, outfile_buffer_size_in_mb, 1, "Out file buffer size in 'OUT FILE'", 0) \
     M(UInt64, fuzzy_max_files, 100, "The max number of files when insert with fuzzy names.", 0) \
@@ -1893,7 +1863,7 @@ enum PreloadLevelSettings : UInt64
     M(Bool, bsp_mode, false, "If enabled, query will execute in bsp mode", 0) \
     M(Bool, bsp_shuffle_reduce_locality_enabled, true, "Whether to compute locality preferences for reduce tasks", 0) \
     M(Float, bsp_shuffle_reduce_locality_fraction, 0.2, "Fraction of total map output that must be at a location for it to considered as a preferred location for a reduce task", 0) \
-    M(UInt64, bsp_max_retry_num, 0, "max retry number for a query in bsp mode",0) \
+    M(UInt64, bsp_max_retry_num, 5, "max retry number for a query in bsp mode",0) \
     /*end of bulk synchronous parallel section*/ \
     M(Bool, enable_io_scheduler, false, "Enable io scheduler", 0) \
     M(Bool, enable_io_pfra, false, "Enable prefetch and read ahead for remote read", 0) \
@@ -1904,13 +1874,14 @@ enum PreloadLevelSettings : UInt64
     M(UInt64, skip_inverted_index_term_size, 512, "If term size bigger than size, do not filter with inverted index", 0) \
     M(Bool, disable_str_to_array_cast, false, "disable String to Array(XXX) CAST", 0) \
     /** materialized view async refresh related settings */ \
-    M(Bool, enable_mv_async_insert_overwrite, false, "whether async refresh use insert overwrite instead of drop partition and insert select mode", 0) \
+    M(Bool, enable_mv_async_insert_overwrite, true, "whether async refresh use insert overwrite instead of drop partition and insert select mode", 0) \
     M(Bool, enable_non_partitioned_base_refresh_throw_exception, false, "Whether when async refresh non-partitioned base table, throw exception", 0) \
     M(Bool, async_mv_refresh_offload_mode, false, "offload async mv refresh task to worker.", 0) \
     M(Bool, async_mv_refresh_task_submit_to_bg_thread, true, "submit async mv refresh task to bg thread.", 0) \
     M(Bool, async_mv_refresh_task_bsp_mode, true, "whether to execute async mv refresh task in bsp mode.", 0) \
     M(UInt64, max_server_refresh_materialized_view_task_num, 10, "refresh materialized async max thread num in server.", 0) \
     M(Bool, enable_async_mv_debug, false, "whether show async debug information", 0) \
+    M(Bool, async_mv_enable_mv_meta_cache, true, "whether enable read from mv meta cache.", 0) \
     \
 
 // End of COMMON_SETTINGS
@@ -1945,22 +1916,10 @@ enum PreloadLevelSettings : UInt64
     M(Bool, output_format_csv_crlf_end_of_line, false, "If it is set true, end of line in CSV format will be \\r\\n instead of \\n.", 0) \
     M(Bool, input_format_csv_unquoted_null_literal_as_null, false, "Consider unquoted NULL literal as \\N", 0) \
     M(Bool, input_format_csv_enum_as_number, false, "Treat inserted enum values in CSV formats as enum indices \\N", 0) \
-    M(Bool, \
-      input_format_csv_arrays_as_nested_csv, \
-      false, \
-      R"(When reading Array from CSV, expect that its elements were serialized in nested CSV and then put into string. Example: "[""Hello"", ""world"", ""42"""" TV""]". Braces around array can be omitted.)", \
-      0) \
-    M(Bool, \
-      input_format_skip_unknown_fields, \
-      false, \
-      "Skip columns with unknown names from input data (it works for JSONEachRow, CSVWithNames, TSVWithNames and TSKV formats).", \
-      0) \
-    M(Bool, \
-      input_format_with_names_use_header, \
-      true, \
-      "For TSVWithNames and CSVWithNames input formats this controls whether format parser is to assume that column data appear in the " \
-      "input exactly as they are specified in the header.", \
-      0) \
+    M(Bool, input_format_csv_arrays_as_nested_csv, false, R"(When reading Array from CSV, expect that its elements were serialized in nested CSV and then put into string. Example: "[""Hello"", ""world"", ""42"""" TV""]". Braces around array can be omitted.)", 0) \
+    M(Bool, input_format_json_read_objects_as_strings, false, "Allow to parse JSON objects as strings in JSON input formats; Do NOT set it true by default as it breaks the logic of parsing JSON", 0) \
+    M(Bool, input_format_skip_unknown_fields, false, "Skip columns with unknown names from input data (it works for JSONEachRow, CSVWithNames, TSVWithNames and TSKV formats).", 0) \
+    M(Bool, input_format_with_names_use_header, true, "For TSVWithNames and CSVWithNames input formats this controls whether format parser is to assume that column data appear in the input exactly as they are specified in the header.", 0) \
     M(Bool, input_format_import_nested_json, false, "Map nested JSON data to nested tables (it works for JSONEachRow format).", 0) \
     M(Bool, \
       input_format_defaults_for_omitted_fields, \
