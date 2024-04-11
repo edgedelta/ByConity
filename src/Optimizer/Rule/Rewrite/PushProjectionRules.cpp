@@ -26,11 +26,9 @@ TransformResult PushProjectionThroughFilter::transformImpl(PlanNodePtr node, con
     auto * projection = dynamic_cast<const ProjectionStep *>(node->getStep().get());
 
     size_t func_count = 0;
-    
-    auto tname_to_type = node->getChildren()[0]->getCurrentDataStream().getNamesToTypes();
     for (const auto & item : projection->getAssignments())
     {
-        func_count += CollectFuncs::collect(item.second, tname_to_type, rule_context.context).size();
+        func_count += CollectFuncs::collect(item.second, node->getChildren()[0]->getCurrentDataStream().getNamesToTypes(), rule_context.context).size();
     }
 
     if (!func_count)
@@ -117,11 +115,10 @@ TransformResult PushProjectionThroughProjection::transformImpl(PlanNodePtr node,
     auto * projection = dynamic_cast<const ProjectionStep *>(node->getStep().get());
     auto * bottom_projection = dynamic_cast<const ProjectionStep *>(node->getChildren()[0]->getStep().get());
 
-    auto tname_to_type = node->getChildren()[0]->getCurrentDataStream().getNamesToTypes();
     size_t func_count = 0;
     for (const auto & item : projection->getAssignments())
     {
-        func_count += CollectFuncs::collect(item.second, tname_to_type, rule_context.context).size();
+        func_count += CollectFuncs::collect(item.second, node->getChildren()[0]->getCurrentDataStream().getNamesToTypes(), rule_context.context).size();
     }
 
     if (!func_count)
@@ -143,16 +140,13 @@ TransformResult PushProjectionThroughProjection::transformImpl(PlanNodePtr node,
         }
     }
 
-    NameToNameMap transform_map;
     for (const auto & item : require_symbols)
     {
-        const auto * id = bottom_projection->getAssignments().at(item)->as<ASTIdentifier>();
-        if (!id)
+        if (!bottom_projection->getAssignments().at(item)->as<ASTIdentifier>())
+        {
             return {};
-        if (id->name() != item)
-            transform_map.emplace(item, id->name());
+        }
     }
-    SymbolMapper mapper = SymbolMapper::simpleMapper(transform_map);
 
     auto bottom_projection_node = [&] {
         auto new_ass = projection->getAssignments();
@@ -173,7 +167,7 @@ TransformResult PushProjectionThroughProjection::transformImpl(PlanNodePtr node,
                 new_ass.emplace_back(item.name, std::make_shared<ASTIdentifier>(item.name));
             }
         }
-        auto step = std::make_shared<ProjectionStep>(bottom_projection->getInputStreams()[0], mapper.map(new_ass), mapper.map(name_to_type), projection->isFinalProject(), projection->isIndexProject());
+        auto step = std::make_shared<ProjectionStep>(bottom_projection->getInputStreams()[0], new_ass, name_to_type);
         return PlanNodeBase::createPlanNode(rule_context.context->nextNodeId(), step, node->getChildren()[0]->getChildren());
     }();
 
