@@ -69,7 +69,6 @@ enum class RemoteFSReadMethod
 };
 
 class MMappedFileCache;
-class RemoteReadLog;
 
 struct ReadSettings
 {
@@ -85,16 +84,6 @@ struct ReadSettings
     bool remote_fs_prefetch = false;
     bool local_fs_prefetch = false;
 
-    /// Bandwidth throttler to use during reading
-    ThrottlerPtr remote_throttler;
-    ThrottlerPtr local_throttler;
-
-    /// For trace all read requests in system table
-    RemoteReadLog * remote_read_log = nullptr;
-    /// Allow reader to provide additional context (e.g., stream name) for the request,
-    /// which will get logged into remote_read_log when enabled
-    String remote_read_context;
-
     /// For 'read', 'pread' and 'pread_threadpool' methods.
     size_t aio_threshold = 0;
 
@@ -102,24 +91,25 @@ struct ReadSettings
     size_t mmap_threshold = 0;
     MMappedFileCache * mmap_cache = nullptr;
 
+    /// Bandwidth throttler to use during reading
+    ThrottlerPtr remote_throttler;
+    ThrottlerPtr local_throttler;
+
     bool enable_io_scheduler = false;
     bool enable_io_pfra = false;
 
     size_t estimated_size = 0;
-
-    bool zero_copy_read_from_cache = false;
-
     bool byte_hdfs_pread = true;
     size_t filesystem_cache_max_download_size = (128UL * 1024 * 1024 * 1024);
     bool skip_download_if_exceeds_query_cache = true;
+    ThrottlerPtr throttler = nullptr;
     size_t remote_read_min_bytes_for_seek = 3 * DBMS_DEFAULT_BUFFER_SIZE;
     DiskCacheMode disk_cache_mode {DiskCacheMode::AUTO};
 
+    bool parquet_parallel_read = false;
     size_t parquet_decode_threads = 48;
 
     size_t filtered_ratio_to_use_skip_read = 0;
-    /// Monitoring
-    bool for_disk_s3 = false; // to choose which profile events should be incremented
 
     void adjustBufferSize(size_t size)
     {

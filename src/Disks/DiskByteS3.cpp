@@ -139,11 +139,10 @@ private:
 };
 
 DiskByteS3::DiskByteS3(const String& name_, const String& root_prefix_, const String& bucket_,
-    const std::shared_ptr<Aws::S3::S3Client>& client_, const UInt64 min_upload_part_size_, const UInt64 max_single_part_upload_size_):
+    const std::shared_ptr<Aws::S3::S3Client>& client_):
         disk_id(next_disk_id.fetch_add(1)), name(name_), root_prefix(root_prefix_),
-        s3_util(client_, bucket_, true), reader_opts(std::make_shared<S3RemoteFSReaderOpts>(client_, bucket_)),
-        reserved_bytes(0), reservation_count(0),
-        min_upload_part_size(min_upload_part_size_), max_single_part_upload_size(max_single_part_upload_size_)
+        s3_util(client_, bucket_), reader_opts(std::make_shared<S3RemoteFSReaderOpts>(client_, bucket_)),
+        reserved_bytes(0), reservation_count(0)
 {
 }
 
@@ -163,11 +162,6 @@ bool DiskByteS3::exists(const String& path) const
     auto res = s3_util.listObjectsWithPrefix(
         std::filesystem::path(root_prefix) / path, std::nullopt, 1);
     return !res.object_names.empty();
-}
-
-bool DiskByteS3::fileExists(const String & file_path) const
-{
-    return s3_util.exists(std::filesystem::path(root_prefix) / file_path);
 }
 
 size_t DiskByteS3::getFileSize(const String& path) const
@@ -205,7 +199,7 @@ std::unique_ptr<ReadBufferFromFileBase> DiskByteS3::readFile(const String & path
                 IO::Scheduler::IOSchedulerSet::instance().schedulerForPath(object_key),
                 PFRAWSReadBufferFromFS::Options{
                     .min_buffer_size_ = settings.remote_fs_buffer_size,
-                    .throttler_ = settings.remote_throttler,
+                    .throttler_ = settings.throttler,
                 });
         } else {
             return std::make_unique<WSReadBufferFromFS>(
@@ -215,35 +209,34 @@ std::unique_ptr<ReadBufferFromFileBase> DiskByteS3::readFile(const String & path
                 settings.remote_fs_buffer_size,
                 nullptr,
                 0,
-                settings.remote_throttler);
+                settings.throttler);
         }
     }
     else
     {
-        ReadSettings modified_settings{settings};
-        modified_settings.for_disk_s3 = true;
         if (settings.remote_fs_prefetch)
         {
             auto impl = std::make_unique<ReadBufferFromS3>(s3_util.getClient(),
-                s3_util.getBucket(), object_key, modified_settings, 3, false, /* use_external_buffer */true);
+                s3_util.getBucket(), object_key, settings, 3, false, /* use_external_buffer */true);
 
             auto global_context = Context::getGlobalContextInstance();
             auto reader = global_context->getThreadPoolReader();
-            return std::make_unique<AsynchronousBoundedReadBuffer>(std::move(impl), *reader, modified_settings);
+            return std::make_unique<AsynchronousBoundedReadBuffer>(std::move(impl), *reader, settings);
         }
         else
         {
             return std::make_unique<ReadBufferFromS3>(s3_util.getClient(),
-                s3_util.getBucket(), object_key, modified_settings, 3, false);
+                s3_util.getBucket(), object_key, settings, 3, false);
         }
     }
 }
 
-std::unique_ptr<WriteBufferFromFileBase> DiskByteS3::writeFile(const String & path, const WriteSettings & settings)
+std::unique_ptr<WriteBufferFromFileBase> DiskByteS3::writeFile(const String& path,
+    const WriteSettings& settings)
 {
     return std::make_unique<WriteBufferFromByteS3>(s3_util.getClient(), s3_util.getBucket(),
-        std::filesystem::path(root_prefix) / path, max_single_part_upload_size,
-        min_upload_part_size, settings.file_meta, settings.buffer_size, false, nullptr, 0, true);
+        std::filesystem::path(root_prefix) / path, 16 * 1024 * 1024,
+        16 * 1024 * 1024, settings.file_meta, settings.buffer_size, false);
 }
 
 void DiskByteS3::removeFile(const String& path)
@@ -298,8 +291,7 @@ void registerDiskByteS3(DiskFactory& factory)
         S3::S3Config s3_cfg(config, config_prefix);
         std::shared_ptr<Aws::S3::S3Client> client = s3_cfg.create();
 
-        auto s3disk = std::make_shared<DiskByteS3>(name, s3_cfg.root_prefix, s3_cfg.bucket, client,
-                                                   s3_cfg.min_upload_part_size, s3_cfg.max_single_part_upload_size);
+        auto s3disk = std::make_shared<DiskByteS3>(name, s3_cfg.root_prefix, s3_cfg.bucket, client);
 
         if (!config.getBool(config_prefix + ".skip_access_check", true))
         {

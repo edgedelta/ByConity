@@ -25,12 +25,12 @@
 #include <DataTypes/DataTypeMap.h>
 #include <DataTypes/MapHelpers.h>
 #include <Interpreters/StorageID.h>
-#include <Interpreters/CnchSystemLog.h>
 #include <IO/LimitReadBuffer.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/FileDiskCacheSegment.h>
 #include <Storages/DiskCache/MetaFileDiskCacheSegment.h>
 #include <Storages/DiskCache/PartFileDiskCacheSegment.h>
+#include <Storages/HDFS/ReadBufferFromByteHDFS.h>
 #include <Storages/MergeTree/DeleteBitmapCache.h>
 #include <Storages/MergeTree/DeleteBitmapMeta.h>
 #include <Storages/MergeTree/MergeTreeIOSettings.h>
@@ -47,11 +47,6 @@ namespace ProfileEvents
     extern const Event LoadPrimaryIndexMicroseconds;
     extern const Event PrimaryIndexDiskCacheHits;
     extern const Event PrimaryIndexDiskCacheMisses;
-
-    extern const Event LoadDataPartFooter;
-    extern const Event LoadChecksums;
-    extern const Event LoadRemoteChecksums;
-    extern const Event LoadChecksumsMicroseconds;
 }
 
 namespace DB
@@ -197,7 +192,6 @@ void MergeTreeDataPartCNCH::fromLocalPart(const IMergeTreeDataPart & local_part)
     }
     minmax_idx = local_part.minmax_idx;
     rows_count = local_part.rows_count;
-    row_exists_count = local_part.row_exists_count;
     loadIndexGranularity(local_part.getMarksCount(), local_part.index_granularity.getIndexGranularities());
     setColumns(local_part.getColumns());
     index = local_part.index;
@@ -221,8 +215,6 @@ void MergeTreeDataPartCNCH::fromLocalPart(const IMergeTreeDataPart & local_part)
     low_priority = local_part.low_priority;
     projection_parts = local_part.getProjectionParts();
     projection_parts_names = local_part.getProjectionPartsNames();
-    ttl_infos = local_part.ttl_infos;
-    ttl_infos.evalPartFinished();
 }
 
 String MergeTreeDataPartCNCH::getFileNameForColumn(const NameAndTypePair & column) const
@@ -367,7 +359,7 @@ void MergeTreeDataPartCNCH::loadFromFileSystem(bool load_hint_mutation)
 
     String data_rel_path = fs::path(getFullRelativePath()) / DATA_FILE;
     DiskPtr disk = volume->getDisk();
-    auto reader = openForReading(disk, data_rel_path, meta_info_pos.file_size, "metainfo.txt");
+    auto reader = openForReading(disk, data_rel_path, meta_info_pos.file_size);
     LimitReadBuffer limit_reader = readPartFile(*reader, meta_info_pos.file_offset, meta_info_pos.file_size);
     loadMetaInfoFromBuffer(limit_reader, load_hint_mutation);
 
@@ -479,15 +471,8 @@ ImmutableDeleteBitmapPtr MergeTreeDataPartCNCH::getCombinedDeleteBitmapForUnique
                         }
                         else
                         {
-                            if (auto unique_table_log = storage.getContext()->getCloudUniqueTableLog())
-                            {
-                                auto current_log = UniqueTable::createUniqueTableLog(UniqueTableLogElement::ERROR, storage.getCnchStorageID());
-                                current_log.metric = ErrorCodes::LOGICAL_ERROR;
-                                current_log.event_msg = "Part " + name + " doesn't contain delete bitmap meta at " + toString(cached_version) + ", request bitmap meta at " + toString(meta->commit_time());
-                                unique_table_log->add(current_log);
-                            }
                             throw Exception(
-                                "Part " + name + " doesn't contain delete bitmap meta at " + toString(cached_version) + ", request bitmap meta at " + toString(meta->commit_time()),
+                                "Part " + name + " doesn't contain delete bitmap meta at " + toString(cached_version),
                                 ErrorCodes::LOGICAL_ERROR);
                         }
                     }
@@ -606,7 +591,7 @@ void MergeTreeDataPartCNCH::combineWithRowExists(DeleteBitmapPtr & bitmap) const
         /* index_executor */ {},
         /*avg_value_size_hints*/ {},
         /*profile_callback*/ {},
-        /*progress_callback*/ {}
+        /*internal_progress_callback*/ {}
     );
 
     size_t deleted_count = 0;
@@ -642,22 +627,19 @@ ImmutableDeleteBitmapPtr MergeTreeDataPartCNCH::getDeleteBitmap(bool allow_null)
 
 MergeTreeDataPartChecksums::FileChecksums MergeTreeDataPartCNCH::loadPartDataFooter() const
 {
-    ProfileEvents::increment(ProfileEvents::LoadDataPartFooter);
     const String data_file_path = fs::path(getFullRelativePath()) / DATA_FILE;
     size_t data_file_size = volume->getDisk()->getFileSize(data_file_path);
+    if (!volume->getDisk()->exists(data_file_path))
+        throw Exception(ErrorCodes::NO_FILE_IN_DATA_PART, "No data file of part {} under path {}", name, data_file_path);
 
-    auto data_file = openForReading(volume->getDisk(), data_file_path, MERGE_TREE_STORAGE_CNCH_DATA_FOOTER_SIZE, "footer");
+    auto data_file = openForReading(volume->getDisk(), data_file_path, MERGE_TREE_STORAGE_CNCH_DATA_FOOTER_SIZE);
 
     if (!parent_part)
-    {
-        data_file->setReadUntilPosition(data_file_size);
         data_file->seek(data_file_size - MERGE_TREE_STORAGE_CNCH_DATA_FOOTER_SIZE);
-    }
     else
     {
         // for projection part
         auto [projection_offset, projection_size] = getFileOffsetAndSize(*parent_part, name + ".proj");
-        data_file->setReadUntilPosition(projection_offset + projection_size);
         data_file->seek(projection_offset + projection_size - MERGE_TREE_STORAGE_CNCH_DATA_FOOTER_SIZE);
     }
 
@@ -765,7 +747,7 @@ IMergeTreeDataPart::IndexPtr MergeTreeDataPartCNCH::loadIndexFromStorage() const
     auto checksums = getChecksums();
     auto [file_offset, file_size] = getFileOffsetAndSize(*this, "primary.idx");
     String data_rel_path = fs::path(getFullRelativePath()) / DATA_FILE;
-    auto data_file = openForReading(volume->getDisk(), data_rel_path, file_size, "primary.idx");
+    auto data_file = openForReading(volume->getDisk(), data_rel_path, file_size);
     LimitReadBuffer buf = readPartFile(*data_file, file_offset, file_size);
     res = loadIndexFromBuffer(buf, primary_key);
     if (enableDiskCache())
@@ -779,8 +761,6 @@ IMergeTreeDataPart::IndexPtr MergeTreeDataPartCNCH::loadIndexFromStorage() const
 
 IMergeTreeDataPart::ChecksumsPtr MergeTreeDataPartCNCH::loadChecksums([[maybe_unused]] bool require)
 {
-    ProfileEvents::increment(ProfileEvents::LoadChecksums);
-    ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::LoadChecksumsMicroseconds);
     ChecksumsPtr checksums = std::make_shared<Checksums>();
     checksums->storage_type = StorageType::ByteHDFS;
     if ((!parent_part && deleted) || (parent_part && parent_part->deleted))
@@ -820,7 +800,6 @@ IMergeTreeDataPart::ChecksumsPtr MergeTreeDataPartCNCH::loadChecksums([[maybe_un
 
 IMergeTreeDataPart::ChecksumsPtr MergeTreeDataPartCNCH::loadChecksumsFromRemote(bool follow_part_chain)
 {
-    ProfileEvents::increment(ProfileEvents::LoadRemoteChecksums);
     ChecksumsPtr checksums = std::make_shared<Checksums>();
     checksums->storage_type = StorageType::ByteHDFS;
     if ((!parent_part && deleted) || (parent_part && parent_part->deleted))
@@ -839,7 +818,7 @@ IMergeTreeDataPart::ChecksumsPtr MergeTreeDataPartCNCH::loadChecksumsFromRemote(
     if (checksum_file.file_size == 0 /* && isDeleted() */)
         throw Exception(ErrorCodes::NO_FILE_IN_DATA_PART, "The size of checksums in part {} under path {} is zero", name, data_rel_path);
 
-    auto data_file = openForReading(volume->getDisk(), data_rel_path, checksum_file.file_size, "checksums.txt");
+    auto data_file = openForReading(volume->getDisk(), data_rel_path, checksum_file.file_size);
     LimitReadBuffer buf = readPartFile(*data_file, checksum_file.file_offset, checksum_file.file_size);
 
     if (checksums->read(buf))
@@ -949,7 +928,7 @@ void MergeTreeDataPartCNCH::getUniqueKeyIndexFilePosAndSize(const IMergeTreeData
     String data_rel_path = fs::path(part->getFullRelativePath()) / "data";
     String data_full_path = fs::path(part->getFullPath()) / "data";
 
-    auto reader = openForReading(volume->getDisk(), data_rel_path, MERGE_TREE_STORAGE_CNCH_DATA_FOOTER_SIZE, "footer");
+    auto reader = openForReading(volume->getDisk(), data_rel_path, MERGE_TREE_STORAGE_CNCH_DATA_FOOTER_SIZE);
     size_t data_file_size = volume->getDisk()->getFileSize(data_rel_path);
     reader->seek(data_file_size - MERGE_TREE_STORAGE_CNCH_DATA_FOOTER_SIZE + 3 * (2 * sizeof(size_t) + sizeof(CityHash_v1_0_2::uint128)));
     readIntBinary(off, *reader);
@@ -989,7 +968,7 @@ void MergeTreeDataPartCNCH::loadIndexGranularity()
         /// TODO: use cache
         auto [file_off, file_size] = getFileOffsetAndSize(*this, marks_file_name);
         String data_path = fs::path(getFullRelativePath()) / DATA_FILE;
-        auto reader = openForReading(volume->getDisk(), data_path, file_size, marks_file_name + "[index granularity]");
+        auto reader = openForReading(volume->getDisk(), data_path, file_size);
         LimitReadBuffer buffer = readPartFile(*reader, file_off, file_size);
         while (!buffer.eof())
         {
@@ -1071,9 +1050,7 @@ void MergeTreeDataPartCNCH::calculateEachColumnSizes(
         if (rows_count != 0 && column.type->isValueRepresentedByNumber() && !column.type->haveSubtypes())
         {
             size_t rows_in_column = size.data_uncompressed / column.type->getSizeOfValueInMemory();
-            /// rows_in_column = 0 may indicate that the part don't contains the column 
-            /// (like running mutation task involved new columns on old parts).
-            if (rows_in_column != 0 && rows_in_column != rows_count)
+            if (rows_in_column != rows_count)
             {
                 throw Exception(
                     ErrorCodes::LOGICAL_ERROR,
@@ -1143,13 +1120,6 @@ String MergeTreeDataPartCNCH::getFullPath() const
         / "";
 }
 
-String MergeTreeDataPartCNCH::getRelativePathForDetachedPart(const String & prefix) const
-{
-    /// no need to check file name conflict here because part name in CNCH is unique
-    String part_dir = (prefix.empty() ? "" : prefix + "_") + info.getPartNameWithHintMutation();
-    return fs::path("detached") / part_dir;
-}
-
 void MergeTreeDataPartCNCH::updateCommitTimeForProjection()
 {
     if (parent_part)
@@ -1169,11 +1139,11 @@ void MergeTreeDataPartCNCH::removeImpl(bool /*keep_shared_data*/) const
     try
     {
         disk->removeFile(path_on_disk / "data");
-        if (disk->getType() != DiskType::Type::ByteS3) disk->removeDirectory(path_on_disk);
+        disk->removeDirectory(path_on_disk);
     }
     catch (...)
     {
-        if (!disk->fileExists(path_on_disk / "data")) {
+        if (!disk->exists(path_on_disk)) {
             /// Early exit if the part has already been deleted.
             LOG_TRACE(storage.log, "the Part {} has already been removed.", fullPath(disk, path_on_disk));
             return;
@@ -1195,7 +1165,7 @@ void MergeTreeDataPartCNCH::fillProjectionNamesFromChecksums(const MergeTreeData
     if (checksum_file.file_size == 0 /* && isDeleted() */)
         throw Exception(ErrorCodes::NO_FILE_IN_DATA_PART, "The size of checksums in part {} under path {} is zero", name, data_rel_path);
 
-    auto data_file = openForReading(volume->getDisk(), data_rel_path, checksum_file.file_size, "checksums.txt");
+    auto data_file = openForReading(volume->getDisk(), data_rel_path, checksum_file.file_size);
     LimitReadBuffer buf = readPartFile(*data_file, checksum_file.file_offset, checksum_file.file_size);
 
     ChecksumsPtr checksums = std::make_shared<Checksums>();
@@ -1229,7 +1199,7 @@ void MergeTreeDataPartCNCH::preload(UInt64 preload_level, ThreadPool & pool, UIn
     }
 
     String part_path = fs::path(getFullRelativePath()) / DATA_FILE;
-    if (!volume->getDisk()->fileExists(part_path))
+    if (!volume->getDisk()->exists(part_path))
     {
         LOG_WARNING(storage.log, "Can't find {} when preload level: {} before caching", full_path + DATA_FILE, preload_level);
         return;
@@ -1324,6 +1294,14 @@ void MergeTreeDataPartCNCH::preload(UInt64 preload_level, ThreadPool & pool, UIn
     }
 
     pool.scheduleOrThrowOnError([this, part_path, full_path, level = preload_level, segments = std::move(segments), cb = std::move(callback), disk_cache = cache] {
+        if (!volume->getDisk()->exists(part_path))
+        {
+            LOG_WARNING(storage.log, "Can't find {} when preload level: {} on caching", full_path + DATA_FILE, level);
+            if (cb)
+                cb("Can't find part file!", 0);
+            return;
+        }
+
         String last_exception{};
         int real_cache_segments_count = 0;
 
@@ -1427,13 +1405,10 @@ void MergeTreeDataPartCNCH::dropDiskCache(ThreadPool & pool, bool drop_vw_disk_c
     pool.scheduleOrThrowOnError(impl);
 }
 
-std::unique_ptr<ReadBufferFromFileBase> MergeTreeDataPartCNCH::openForReading(
-    const DiskPtr & disk, const String & path, size_t file_size, const String & remote_read_context) const
+std::unique_ptr<ReadBufferFromFileBase> MergeTreeDataPartCNCH::openForReading(const DiskPtr & disk, const String & path, size_t file_size) const
 {
     ReadSettings settings = storage.getContext()->getReadSettings();
     settings.adjustBufferSize(file_size);
-    if (settings.remote_read_log)
-        settings.remote_read_context = remote_read_context;
     return disk->readFile(path, settings);
 }
 

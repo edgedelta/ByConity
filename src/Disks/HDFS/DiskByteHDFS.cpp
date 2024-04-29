@@ -196,7 +196,7 @@ std::unique_ptr<ReadBufferFromFileBase> DiskByteHDFS::readFile(const String & pa
                 IO::Scheduler::IOSchedulerSet::instance().schedulerForPath(file_path),
                 PFRAWSReadBufferFromFS::Options{
                     .min_buffer_size_ = settings.remote_fs_buffer_size,
-                    .throttler_ = settings.remote_throttler,
+                    .throttler_ = settings.throttler,
                 });
         } else {
             return std::make_unique<WSReadBufferFromFS>(
@@ -206,30 +206,32 @@ std::unique_ptr<ReadBufferFromFileBase> DiskByteHDFS::readFile(const String & pa
                 settings.remote_fs_buffer_size,
                 nullptr,
                 0,
-                settings.remote_throttler);
+                settings.throttler);
         }
     }
     else
     {
-        std::unique_ptr<ReadBufferFromFileBase> impl;
-
-        impl = std::make_unique<ReadBufferFromByteHDFS>(file_path, hdfs_params, settings,
-                nullptr, 0, /* use_external_buffer */ settings.remote_fs_prefetch);
-
         if (settings.remote_fs_prefetch)
         {
+            auto impl = std::make_unique<ReadBufferFromByteHDFS>(file_path, hdfs_params,
+                settings.byte_hdfs_pread, settings.remote_fs_buffer_size, nullptr, 0, nullptr,
+                /* use_external_buffer */true);
+
             auto global_context = Context::getGlobalContextInstance();
             auto reader = global_context->getThreadPoolReader();
             return std::make_unique<AsynchronousBoundedReadBuffer>(std::move(impl), *reader, settings);
         }
-
-        return impl;
+        else
+        {
+            return std::make_unique<ReadBufferFromByteHDFS>(file_path, hdfs_params,
+                settings.byte_hdfs_pread, settings.remote_fs_buffer_size);
+        }
     }
 }
 
 std::unique_ptr<WriteBufferFromFileBase> DiskByteHDFS::writeFile(const String & path, const WriteSettings & settings)
 {
-    int write_mode = settings.mode == WriteMode::Append ? (O_APPEND | O_WRONLY) : O_WRONLY;
+    int write_mode = settings.mode == WriteMode::Append ? O_APPEND : O_WRONLY;
     return std::make_unique<WriteBufferFromHDFS>(absolutePath(path), hdfs_params, settings.buffer_size, write_mode);
 }
 
