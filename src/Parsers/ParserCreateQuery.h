@@ -186,7 +186,6 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
     ParserKeyword s_default_collate("DEFAULT COLLATE");
     ParserKeyword s_signed("SIGNED");
     ParserKeyword s_unsigned("UNSIGNED");
-    ParserKeyword s_zerofill("ZEROFILL");
 
     /// mandatory column name
     ASTPtr name;
@@ -257,8 +256,6 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
         if (s_unsigned.ignore(pos, expected))
             unsigned_modifier = true;
     }
-
-    s_zerofill.ignore(pos, expected);
 
     if (s_charset1.ignore(pos, expected) || s_default_charset1.ignore(pos, expected) || s_charset2.ignore(pos, expected)
         || s_default_charset2.ignore(pos, expected))
