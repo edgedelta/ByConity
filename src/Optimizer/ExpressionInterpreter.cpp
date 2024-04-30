@@ -51,7 +51,7 @@ using InterpretResult = ExpressionInterpreter::InterpretResult;
 using InterpretIMResult = ExpressionInterpreter::InterpretIMResult;
 using InterpretIMResults = ExpressionInterpreter::InterpretIMResults;
 
-static ASTPtr makeFunction(const String & name, const InterpretIMResults & arguments, const ContextPtr & context)
+static ASTPtr makeFunction(const String & name, const InterpretIMResults & arguments, const ContextMutablePtr & context)
 {
     ASTs argument_asts;
     std::transform(arguments.begin(), arguments.end(), std::back_inserter(argument_asts),
@@ -142,7 +142,7 @@ struct LogicalFunctionRewriter
         const ASTPtr & node,
         InterpretIMResults argument_results,
         InterpretIMResult & rewrite_result,
-        const ContextPtr & context)
+        const ContextMutablePtr & context)
     {
         if (function.name != FunctionName::name)
             return false;
@@ -299,7 +299,7 @@ bool simplifyMultiIf(
     const ASTPtr &,
     const InterpretIMResults & argument_results,
     InterpretIMResult & simplify_result,
-    const ContextPtr & context)
+    const ContextMutablePtr & context)
 {
     if (function.name != "multiIf" || argument_results.size() < 3 || argument_results.size() % 2 == 0)
         return false;
@@ -348,30 +348,13 @@ bool simplifyMultiIf(
     simplify_result = {function_base->getResultType(), makeFunction(function.name, new_argument_results, context)};
     return true;
 }
-
-bool simplifyAssumeNotNull(
-    const ASTFunction & function,
-    const ASTPtr &,
-    const InterpretIMResults & argument_results,
-    InterpretIMResult & simplify_result,
-    const ContextPtr & context)
-{
-    if (!context->getSettingsRef().enable_simplify_assume_not_null || function.name != "assumeNotNull" || argument_results.size() != 1)
-        return false;
-
-    if (isNullableOrLowCardinalityNullable(argument_results[0].type))
-        return false;
-
-    simplify_result = argument_results[0];
-    return true;
-}
 }
 
-ExpressionInterpreter::ExpressionInterpreter(InterpretSetting setting_, ContextPtr context_)
+ExpressionInterpreter::ExpressionInterpreter(InterpretSetting setting_, ContextMutablePtr context_)
     : context(std::move(context_)), setting(std::move(setting_)), type_analyzer(TypeAnalyzer::create(context, setting.identifier_types))
 {}
 
-ExpressionInterpreter ExpressionInterpreter::basicInterpreter(ExpressionInterpreter::IdentifierTypes types, ContextPtr context)
+ExpressionInterpreter ExpressionInterpreter::basicInterpreter(ExpressionInterpreter::IdentifierTypes types, ContextMutablePtr context)
 {
     ExpressionInterpreter::InterpretSetting setting
         {
@@ -380,7 +363,7 @@ ExpressionInterpreter ExpressionInterpreter::basicInterpreter(ExpressionInterpre
     return {std::move(setting), std::move(context)};
 }
 
-ExpressionInterpreter ExpressionInterpreter::optimizedInterpreter(ExpressionInterpreter::IdentifierTypes types, ExpressionInterpreter::IdentifierValues values, ContextPtr context)
+ExpressionInterpreter ExpressionInterpreter::optimizedInterpreter(ExpressionInterpreter::IdentifierTypes types, ExpressionInterpreter::IdentifierValues values, ContextMutablePtr context)
 {
     ExpressionInterpreter::InterpretSetting setting
         {
@@ -428,7 +411,7 @@ InterpretResult ExpressionInterpreter::evaluate(const ConstASTPtr & expression) 
         return {im_result.type, im_result.getField()};
 }
 
-ASTPtr InterpretResult::convertToAST(const ContextPtr & ctx) const
+ASTPtr InterpretResult::convertToAST(const ContextMutablePtr & ctx) const
 {
     if (isAST())
         return ast;
@@ -524,7 +507,7 @@ bool InterpretIMResult::isSuitablyRepresentedByValue() const
     return isColumnSuitablyRepresentedByValue(value, 0, max_byte_size);
 }
 
-ASTPtr InterpretIMResult::convertToAST(const ContextPtr & ctx) const
+ASTPtr InterpretIMResult::convertToAST(const ContextMutablePtr & ctx) const
 {
     assert(ast != nullptr);
 
@@ -645,8 +628,7 @@ InterpretIMResult ExpressionInterpreter::visitOrdinaryFunction(const ASTFunction
     //   In cnch, constant folding requires `function_base->isDeterministic() == true` and `function_base->isSuitableForConstantFolding() == true`
     // This is because some functions do not satisfy `isColumnConst(*res_col)` in cnch, which cause constant folding not work and
     // furthermore block other optimizations(e.g. outer join to inner join)
-    if (function_base->isSuitableForConstantFolding() && !has_lambda_argument
-        && (context->getSettingsRef().enable_evaluate_constant_for_nondeterministic || function_base->isDeterministic()))
+    if (function_base->isSuitableForConstantFolding() && !has_lambda_argument)
     {
         ColumnPtr res_col;
 
@@ -684,8 +666,7 @@ InterpretIMResult ExpressionInterpreter::visitOrdinaryFunction(const ASTFunction
             || simplifyNullPrediction(function, simplified_node, argument_results, simplify_result)
             || simplifyTrivialEquals(function, simplified_node, argument_results, simplify_result)
             || simplifyIf(function, simplified_node, argument_results, simplify_result, reevaluate)
-            || simplifyMultiIf(function, simplified_node, argument_results, simplify_result, context)
-            || simplifyAssumeNotNull(function, simplified_node, argument_results, simplify_result, context);
+            || simplifyMultiIf(function, simplified_node, argument_results, simplify_result, context);
     }
 
     if (!simplified)
@@ -778,14 +759,7 @@ InterpretIMResult ExpressionInterpreter::visitInFunction(const ASTFunction & fun
 
     auto tuple_func = makeASTFunction("tuple", set_values);
     auto simplified_in_func = makeASTFunction(function.name, rewritten_left_arg, tuple_func);
-
-    auto column_set = ColumnSet::create(1, set);
-    ColumnPtr const_column_set = ColumnConst::create(std::move(column_set), 1);
-    ColumnsWithTypeAndName columns_with_types;
-    columns_with_types.emplace_back(left_arg_result.type, "");
-    columns_with_types.emplace_back(const_column_set, std::make_shared<DataTypeSet>(), "");
-    auto overload_resolver = FunctionFactory::instance().tryGet(function.name, context);
-    return {overload_resolver->getReturnType(columns_with_types), simplified_in_func};
+    return {getType(simplified_in_func), simplified_in_func};
 }
 
 }
