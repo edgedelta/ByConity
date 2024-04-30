@@ -22,7 +22,6 @@
 #include <Interpreters/PartLog.h>
 #include <Interpreters/ExpressionAnalyzer.h>
 #include <Interpreters/TreeRewriter.h>
-#include <Interpreters/CnchSystemLog.h>
 #include <MergeTreeCommon/MergeTreeDataDeduper.h>
 #include <Parsers/ASTPartition.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
@@ -132,16 +131,13 @@ void CloudMergeTreeBlockOutputStream::write(const Block & block)
                     throw Exception(ErrorCodes::BAD_ARGUMENTS, "Delete flag can not used in APPEND dedup key mode.");
 
                 bitmaps.emplace_back(LocalDeleteBitmap::createBase(
-                    part->info,
-                    std::const_pointer_cast<Roaring>(delete_bitmap),
-                    txn->getPrimaryTransactionID().toUInt64(),
-                    part->bucket_number));
+                    part->info, std::const_pointer_cast<Roaring>(delete_bitmap), txn->getPrimaryTransactionID().toUInt64()));
                 part->delete_flag = true;
             }
             else if (dedup_parameters.enable_append_mode)
             {
-                bitmaps.emplace_back(LocalDeleteBitmap::createBase(
-                    part->info, std::make_shared<Roaring>(), txn->getPrimaryTransactionID().toUInt64(), part->bucket_number));
+                bitmaps.emplace_back(
+                    LocalDeleteBitmap::createBase(part->info, std::make_shared<Roaring>(), txn->getPrimaryTransactionID().toUInt64()));
             }
         }
     }
@@ -217,8 +213,7 @@ MergeTreeMutableDataPartsVector CloudMergeTreeBlockOutputStream::convertBlockInt
 
     size_t thread_num = storage.getSettings()->cnch_write_part_threads;
     bool use_thread_pool = thread_num > 1;
-    /// Set queue size to unlimited to avoid dead lock
-    ThreadPool write_pool(thread_num, thread_num, /*queue_size=*/ 0);
+    ThreadPool write_pool(thread_num);
     Stopwatch write_pool_watch;
     auto thread_group = CurrentThread::getGroup();
     auto processBlockWithPartition = [&](BlockWithPartition & block_with_partition) {
@@ -475,17 +470,7 @@ void CloudMergeTreeBlockOutputStream::writeSuffixForUpsert()
         lock_watch.restart();
         cnch_lock = txn->createLockHolder(std::move(locks_to_acquire));
         if (!cnch_lock->tryLock())
-        {
-            if (auto unique_table_log = context->getCloudUniqueTableLog())
-            {
-                auto current_log = UniqueTable::createUniqueTableLog(UniqueTableLogElement::ERROR, cnch_table->getCnchStorageID());
-                current_log.txn_id = txn->getTransactionID();
-                current_log.metric = ErrorCodes::CNCH_LOCK_ACQUIRE_FAILED;
-                current_log.event_msg = "Failed to acquire lock for txn " + txn->getTransactionID().toString();
-                unique_table_log->add(current_log);
-            }
             throw Exception("Failed to acquire lock for txn " + txn->getTransactionID().toString(), ErrorCodes::CNCH_LOCK_ACQUIRE_FAILED);
-        }
 
         lock_watch.restart();
         ts = context->getTimestamp(); /// must get a new ts after locks are acquired
@@ -509,12 +494,6 @@ void CloudMergeTreeBlockOutputStream::writeSuffixForUpsert()
             break;
         }
     } while (true);
-
-    if (unlikely(context->getSettingsRef().unique_sleep_seconds_after_acquire_lock.totalSeconds()))
-    {
-        /// Test purpose only
-        std::this_thread::sleep_for(std::chrono::seconds(context->getSettingsRef().unique_sleep_seconds_after_acquire_lock.totalSeconds()));
-    }
 
     MergeTreeDataDeduper deduper(*cnch_table, context);
     LocalDeleteBitmaps bitmaps_to_dump = deduper.dedupParts(
