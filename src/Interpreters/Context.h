@@ -36,6 +36,7 @@
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/DatabaseCatalog.h>
 #include <Interpreters/DistributedStages/ExchangeDataTracker.h>
+#include <Interpreters/DistributedStages/PlanSegmentProcessList.h>
 #include <Optimizer/OptimizerProfile.h>
 #include <Parsers/IAST_fwd.h>
 #include <Processors/Exchange/DataTrans/DataTrans_fwd.h>
@@ -145,9 +146,7 @@ class MutationLog;
 class KafkaLog;
 class CloudKafkaLog;
 class CloudMaterializedMySQLLog;
-class CloudUniqueTableLog;
 class ProcessorsProfileLog;
-class RemoteReadLog;
 class ZooKeeperLog;
 class QueryMetricLog;
 class QueryWorkerMetricLog;
@@ -304,9 +303,6 @@ using WorkerGroupStatusPtr = std::shared_ptr<WorkerGroupStatus>;
 struct QeueueThrottlerDeleter;
 using QueueThrottlerDeleterPtr = std::shared_ptr<QeueueThrottlerDeleter>;
 
-struct DequeueRelease;
-using DequeueReleasePtr = std::shared_ptr<DequeueRelease>;
-
 class BindingCacheManager;
 using BindingCacheManagerPtr = std::shared_ptr<BindingCacheManager>;
 
@@ -365,9 +361,6 @@ using ExcludedRulesMap = std::unordered_map<PlanNodeId, ExcludedRules>;
 
 class PlanCacheManager;
 class PreparedStatementManager;
-
-class PlanSegmentProcessList;
-class PlanSegmentProcessListEntry;
 
 /// An empty interface for an arbitrary object that may be attached by a shared pointer
 /// to query context, when using ClickHouse as a library.
@@ -446,6 +439,7 @@ private:
 
     using ProgressCallback = std::function<void(const Progress & progress)>;
     ProgressCallback progress_callback; /// Callback for tracking progress of query execution.
+    ProgressCallback internal_progress_callback;
 
     using FileProgressCallback = std::function<void(const FileProgress & progress)>;
     FileProgressCallback file_progress_callback; /// Callback for tracking progress of file loading.
@@ -560,13 +554,11 @@ private:
     mutable std::shared_ptr<BindingCacheManager> session_binding_cache_manager = nullptr;
 
     // make sure a context not be passed to ExprAnalyzer::analyze concurrently
-    mutable std::unordered_set<std::string> nondeterministic_functions_within_query_scope;
-    mutable std::unordered_set<std::string> nondeterministic_functions_out_of_query_scope;
-
+    mutable std::unordered_map<std::string, bool> function_deterministic;
     // worker status
     WorkerGroupStatusPtr worker_group_status;
 
-    std::shared_ptr<OptimizerProfile> optimizer_profile = nullptr;
+    std::shared_ptr<OptimizerProfile> optimizer_profile =  nullptr;
     /// Temporary data for query execution accounting.
     TemporaryDataOnDiskScopePtr temp_data_on_disk;
 
@@ -609,7 +601,6 @@ private:
     mutable WorkerGroupHandle current_worker_group;
     mutable WorkerGroupHandle health_worker_group;
 
-    DequeueReleasePtr dequeue_ptr;
     /// Transaction for each query, query level
     TransactionCnchPtr current_cnch_txn;
 
@@ -620,9 +611,7 @@ private:
 
     String async_query_id;
 
-    AddressInfo coordinator_address;
     PlanSegmentInstanceId plan_segment_instance_id;
-    ExceptionHandlerPtr plan_segment_ex_handler = nullptr;
 
     bool read_from_client_finished = false;
 
@@ -899,15 +888,8 @@ public:
     /// Id of initiating query for distributed queries; or current query id if it's not a distributed query.
     String getInitialQueryId() const;
 
-    void setCoordinatorAddress(const Protos::AddressInfo & address);
-    void setCoordinatorAddress(const AddressInfo & address);
-    AddressInfo getCoordinatorAddress() const;
-
     void setPlanSegmentInstanceId(const PlanSegmentInstanceId & instance_id);
     PlanSegmentInstanceId getPlanSegmentInstanceId() const;
-
-    void initPlanSegmentExHandler();
-    ExceptionHandlerPtr getPlanSegmentExHandler() const;
 
     void setCurrentDatabase(const String & name);
     void setCurrentDatabase(const String & name, ContextPtr local_context);
@@ -939,7 +921,7 @@ public:
     void setSetting(const StringRef & name, const String & value);
     void setSetting(const StringRef & name, const Field & value);
     void applySettingChange(const SettingChange & change);
-    void applySettingsChanges(const SettingsChanges & changes, bool internal = true);
+    void applySettingsChanges(const SettingsChanges & changes);
     void applySettingsChanges(const JSON & changes);
 
     /// Checks the constraints.
@@ -1085,6 +1067,9 @@ public:
     /// Used in InterpreterSelectQuery to pass it to the IBlockInputStream.
     ProgressCallback getProgressCallback() const;
 
+    void setInternalProgressCallback(ProgressCallback callback);
+    ProgressCallback getInternalProgressCallback() const;
+
     void setFileProgressCallback(FileProgressCallback && callback) { file_progress_callback = callback; }
     FileProgressCallback getFileProgressCallback() const { return file_progress_callback; }
 
@@ -1139,17 +1124,6 @@ public:
     {
         queue_throttler_ptr = ptr;
     }
-
-    void setDequeuePtr(DequeueReleasePtr ptr)
-    {
-        dequeue_ptr = ptr;
-    }
-
-    DequeueReleasePtr & getDequeuePtr()
-    {
-        return dequeue_ptr;
-    }
-
     ManipulationList & getManipulationList();
     const ManipulationList & getManipulationList() const;
 
@@ -1196,8 +1170,6 @@ public:
     void setNvmCache(const Poco::Util::AbstractConfiguration & config);
     std::shared_ptr<NvmCache> getNvmCache() const;
     void dropNvmCache() const;
-
-    void setFooterCache(size_t max_size_in_bytes);
 
     /// Create a cache of uncompressed blocks of specified size. This can be done only once.
     void setUncompressedCache(size_t max_size_in_bytes);
@@ -1301,9 +1273,7 @@ public:
     std::shared_ptr<KafkaLog> getKafkaLog() const;
     std::shared_ptr<CloudKafkaLog> getCloudKafkaLog() const;
     std::shared_ptr<CloudMaterializedMySQLLog> getCloudMaterializedMySQLLog() const;
-    std::shared_ptr<CloudUniqueTableLog> getCloudUniqueTableLog() const;
     std::shared_ptr<ProcessorsProfileLog> getProcessorsProfileLog() const;
-    std::shared_ptr<RemoteReadLog> getRemoteReadLog() const;
     std::shared_ptr<ZooKeeperLog> getZooKeeperLog() const;
 
     /// Returns an object used to log operations with parts if it possible.
@@ -1381,8 +1351,8 @@ public:
     void setIsRestrictSettingsToWhitelist(bool is_restrict);
     void addRestrictSettingsToWhitelist(const std::vector<String>& name) const;
 
-    bool getBlockPrivilegedOp() const;
-    void setBlockPrivilegedOp(bool is_restrict);
+    bool getIsRestrictSystemTables() const;
+    void setIsRestrictSystemTables(bool is_restrict);
 
     /// Sets default_profile and system_profile, must be called once during the initialization
     void setDefaultProfiles(const Poco::Util::AbstractConfiguration & config);
@@ -1439,7 +1409,7 @@ public:
 
     PlanNodeIdAllocatorPtr & getPlanNodeIdAllocator() { return id_allocator; }
     UInt32 nextNodeId() { return id_allocator->nextId(); }
-    void createPlanNodeIdAllocator(int max_id = 1);
+    void createPlanNodeIdAllocator();
 
     int step_id = 2000;
     int getStepId() const { return step_id; }
@@ -1465,7 +1435,7 @@ public:
     int sub_query_id = 0;
     int incAndGetSubQueryId() { return ++sub_query_id; }
 
-    const SymbolAllocatorPtr & getSymbolAllocator() { return symbol_allocator; }
+    SymbolAllocatorPtr & getSymbolAllocator() { return symbol_allocator; }
     ExcludedRulesMap & getExcludedRulesMap() { return exclude_rules_map; }
 
     void createSymbolAllocator();
@@ -1476,19 +1446,18 @@ public:
     void createOptimizerMetrics();
     OptimizerMetricsPtr & getOptimizerMetrics() { return optimizer_metrics; }
 
-    void addNonDeterministicFunction(const std::string & fun_name, bool within_query_scope) const
+    void setFunctionDeterministic(const std::string & fun_name, bool deterministic) const
     {
-        nondeterministic_functions_out_of_query_scope.emplace(fun_name);
-        if (within_query_scope)
-            nondeterministic_functions_within_query_scope.emplace(fun_name);
+        function_deterministic[fun_name] = deterministic;
     }
-    bool isNonDeterministicFunction(const std::string & fun_name) const
+
+    bool isFunctionDeterministic(const std::string & fun_name) const
     {
-        return nondeterministic_functions_within_query_scope.contains(fun_name);
-    }
-    bool isNonDeterministicFunctionOutOfQueryScope(const std::string & fun_name) const
-    {
-        return nondeterministic_functions_out_of_query_scope.contains(fun_name);
+        if (function_deterministic.contains(fun_name))
+        {
+            return function_deterministic.at(fun_name);
+        }
+        return true;
     }
 
     void initOptimizerProfile() { optimizer_profile = std::make_unique<OptimizerProfile>(); }
@@ -1508,6 +1477,7 @@ public:
             return settings.tenant_id.toString();
     }
 
+
     void setTenantId(const String & id)
     {
         tenant_id = id;
@@ -1515,7 +1485,7 @@ public:
 
     bool shouldBlockPrivilegedOperations() const
     {
-        return getBlockPrivilegedOp() && !getCurrentTenantId().empty();
+        return getSettingsRef().block_privileged_operations && !getTenantId().empty();
     }
 
     const String & getCurrentCatalog() const
@@ -1686,10 +1656,7 @@ public:
     void setPreparedStatementManager(std::unique_ptr<PreparedStatementManager> && manager);
     PreparedStatementManager * getPreparedStatementManager();
 
-    bool is_tenant_user() const { return has_tenant_id_in_username; }
-
 private:
-    bool has_tenant_id_in_username = false;
     String tenant_id;
     String current_catalog;
 

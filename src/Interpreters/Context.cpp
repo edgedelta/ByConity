@@ -89,7 +89,6 @@
 #include <Interpreters/PreparedStatement/PreparedStatementManager.h>
 #include <Interpreters/ProcessList.h>
 #include <Interpreters/QueueManager.h>
-#include <Interpreters/VirtualWarehouseQueue.h>
 #include <Interpreters/SegmentScheduler.h>
 #include <Interpreters/SynonymsExtensions.h>
 #include <Interpreters/SystemLog.h>
@@ -110,7 +109,6 @@
 #include <QueryPlan/PlanCache.h>
 #include <Processors/Executors/PipelineExecutingBlockInputStream.h>
 #include <Processors/Transforms/AddingDefaultsTransform.h>
-#include <Processors/Formats/Impl/ArrowColumnCache.h>
 #include <ResourceGroup/IResourceGroupManager.h>
 #include <ResourceGroup/InternalResourceGroupManager.h>
 #include <ResourceGroup/VWResourceGroupManager.h>
@@ -458,7 +456,7 @@ struct ContextSharedPart
 
     bool shutdown_called = false;
     bool restrict_tenanted_users_to_whitelist_settings = false;
-    bool restrict_tenanted_users_to_privileged_operations = false;
+    bool restrict_tenanted_users_to_system_tables = true;
 
     Stopwatch uptime_watch;
 
@@ -793,7 +791,6 @@ ReadSettings Context::getReadSettings() const
     ReadSettings res;
     res.remote_fs_prefetch = settings.remote_filesystem_read_prefetch;
     res.local_fs_prefetch = settings.local_filesystem_read_prefetch;
-    res.remote_read_log = settings.enable_remote_read_log ? getRemoteReadLog().get() : nullptr;
     res.enable_io_scheduler = settings.enable_io_scheduler;
     res.enable_io_pfra = settings.enable_io_pfra;
     res.local_fs_buffer_size
@@ -806,10 +803,9 @@ ReadSettings Context::getReadSettings() const
     res.remote_read_min_bytes_for_seek = settings.remote_read_min_bytes_for_seek;
     res.disk_cache_mode = settings.disk_cache_mode;
     res.skip_download_if_exceeds_query_cache = settings.skip_download_if_exceeds_query_cache;
-    res.parquet_decode_threads = settings.max_download_threads;
+    res.parquet_parallel_read= settings.parquet_parallel_read;
+    res.parquet_decode_threads = settings.max_download_thread;
     res.filtered_ratio_to_use_skip_read = settings.filtered_ratio_to_use_skip_read;
-    res.zero_copy_read_from_cache = settings.enable_zero_copy_read;
-
     return res;
 }
 
@@ -1180,7 +1176,7 @@ VolumePtr Context::setTemporaryStorage(const String & path, const String & polic
         if (!shared->tmp_path.ends_with('/'))
             shared->tmp_path += '/';
 
-        auto disk = std::make_shared<DiskLocal>("_tmp_default", shared->tmp_path, DiskStats{});
+        auto disk = std::make_shared<DiskLocal>("_tmp_default", shared->tmp_path, 0);
         shared->tmp_volume = std::make_shared<SingleDiskVolume>("_tmp_default", disk, 0);
     }
     else
@@ -1235,7 +1231,7 @@ catch (...)
 
 static VolumePtr createLocalSingleDiskVolume(const std::string & path)
 {
-    auto disk = std::make_shared<DiskLocal>("_tmp_default", path, DiskStats{});
+    auto disk = std::make_shared<DiskLocal>("_tmp_default", path, 0);
     VolumePtr volume = std::make_shared<SingleDiskVolume>("_tmp_default", disk, 0);
     return volume;
 }
@@ -1452,7 +1448,7 @@ void Context::setUsersConfig(const ConfigurationPtr & config)
     auto lock = getLock();
     shared->users_config = config;
     shared->access_control_manager.setUsersConfig(*shared->users_config);
-    if (getServerType() == ServerType::cnch_server || getServerType() == ServerType::cnch_worker)
+    if (getServerType() == ServerType::cnch_server)
     {
         if (!shared->resource_group_manager)
             initResourceGroupManager(config);
@@ -1491,34 +1487,33 @@ void Context::setVWCustomizedSettings(VWCustomizedSettingsPtr vw_customized_sett
 }
 
 
-void Context::initResourceGroupManager(const ConfigurationPtr & config)
+void Context::initResourceGroupManager([[maybe_unused]] const ConfigurationPtr & config)
 {
-    if (!config->has("resource_groups"))
-    {
-        LOG_DEBUG(&Poco::Logger::get("Context"), "No config found. Not creating Resource Group Manager");
-        return ;
-    }
-    auto resource_group_manager_type = config->getRawString("resource_groups.type", "vw");
-    if (resource_group_manager_type == "vw")
-    {
-        if (!getResourceManagerClient())
-        {
-            LOG_ERROR(&Poco::Logger::get("Context"), "Cannot create VW Resource Group Manager since Resource Manager client is not initialized.");
-            return;
-        }
-        shared->resource_group_manager = std::make_shared<VWResourceGroupManager>(getGlobalContext());
-    }
-    else if (resource_group_manager_type == "internal")
-    {
-        if (!CGroupManagerFactory::instance().isInit())
-        {
-            LOG_ERROR(&Poco::Logger::get("Context"), "Cannot create Internal Resource Group Manager since cgroup manger is not initialized");
-            return ;
-        }
-        shared->resource_group_manager = std::make_shared<InternalResourceGroupManager>();
-    }
-    else
-        throw Exception("Unknown Resource Group Manager type", ErrorCodes::UNKNOWN_ELEMENT_IN_CONFIG);
+    LOG_DEBUG(&Poco::Logger::get(__PRETTY_FUNCTION__), "Skip initialize resource group");
+
+    // if (!config->has("resource_groups"))
+    // {
+    //     LOG_DEBUG(&Poco::Logger::get("Context"), "No config found. Not creating Resource Group Manager");
+    //     return ;
+    // }
+    // auto resource_group_manager_type = config->getRawString("resource_groups.type", "vw");
+    // if (resource_group_manager_type == "vw")
+    // {
+    //     if (!getResourceManagerClient())
+    //     {
+    //         LOG_ERROR(&Poco::Logger::get("Context"), "Cannot create VW Resource Group Manager since Resource Manager client is not initialised.");
+    //         return;
+    //     }
+    //     LOG_DEBUG(&Poco::Logger::get("Context"), "Creating VW Resource Group Manager");
+    //     shared->resource_group_manager = std::make_shared<VWResourceGroupManager>(getGlobalContext());
+    // }
+    // else if (resource_group_manager_type == "internal")
+    // {
+    //     LOG_DEBUG(&Poco::Logger::get("Context"), "Creating Internal Resource Group Manager");
+    //     shared->resource_group_manager = std::make_shared<InternalResourceGroupManager>();
+    // }
+    // else
+    //     throw Exception("Unknown Resource Group Manager type", ErrorCodes::UNKNOWN_ELEMENT_IN_CONFIG);
 }
 
 void Context::setResourceGroup(const IAST * ast)
@@ -1569,15 +1564,12 @@ void Context::setUser(const Credentials & credentials, const Poco::Net::SocketAd
         client_info.current_password = basic_credentials->getPassword();
     //#endif
 
-    String tenant = getTenantId();
     /// Find a user with such name and check the credentials.
     /// NOTE: getAccessControlManager().login and other AccessControl's functions may require some IO work,
     /// so Context::getLock() must be unlocked while we're doing this.
     auto new_user_id = getAccessControlManager().login(credentials, address.host());
     auto new_access = getAccessControlManager().getContextAccess(
-        new_user_id, /* current_roles = */ {}, /* use_default_roles = */ true, settings, current_database, client_info,
-        tenant,
-        has_tenant_id_in_username);
+        new_user_id, /* current_roles = */ {}, /* use_default_roles = */ true, settings, current_database, client_info);
 
     auto lock = getLock();
     user_id = new_user_id;
@@ -1595,6 +1587,7 @@ void Context::setUser(const String & name, const String & password, const Poco::
 {
     //CNCH multi-tenant user name pattern from gateway client: {tenant_id}`{user_name}
     String user = name;
+    bool pushed = false;
     if (auto pos = user.find('`'); pos != String::npos)
     {
         auto tenant_id = String(user.c_str(), pos);
@@ -1602,14 +1595,9 @@ void Context::setUser(const String & name, const String & password, const Poco::
         this->setTenantId(tenant_id);
         auto sub_user = user.substr(pos + 1);
         if (sub_user != "default")
-        {
-            has_tenant_id_in_username = true;
             user[pos] = '.';            ///{tenant_id}`{user_name}=>{tenant_id}.{user_name}
-        }
         else
-        {
             user = std::move(sub_user); ///{tenant_id}`default=>default
-        }
     }
     setUser(BasicCredentials(user, password), address);
     if (pushed)
@@ -1618,7 +1606,7 @@ void Context::setUser(const String & name, const String & password, const Poco::
 
 void Context::setUserWithoutCheckingPassword(const String & name, const Poco::Net::SocketAddress & address)
 {
-    setUser(AlwaysAllowCredentials(formatUserName(name)), address);
+    setUser(AlwaysAllowCredentials(name), address);
 }
 
 std::shared_ptr<const User> Context::getUser() const
@@ -1685,9 +1673,7 @@ void Context::calculateAccessRights()
     auto lock = getLock();
     if (user_id)
         access = getAccessControlManager().getContextAccess(
-            *user_id, current_roles, use_default_roles, settings, current_database, client_info,
-            tenant_id,
-            has_tenant_id_in_username);
+            *user_id, current_roles, use_default_roles, settings, current_database, client_info);
 }
 
 
@@ -2150,7 +2136,7 @@ void Context::applySettingChange(const SettingChange & change)
 }
 
 
-void Context::applySettingsChanges(const SettingsChanges & changes, bool internal)
+void Context::applySettingsChanges(const SettingsChanges & changes)
 {
     auto lock = getLock();
 
@@ -2181,14 +2167,13 @@ void Context::applySettingsChanges(const SettingsChanges & changes, bool interna
 
     // NOTE: tenanted users connect to server using tenant id given in connection info.
     // allow only whitelisted settings for tenanted users
-    if (is_tenant_user() && !internal && !isInternalQuery () && getIsRestrictSettingsToWhitelist() && getClientInfo().query_kind == ClientInfo::QueryKind::INITIAL_QUERY && !getCurrentTenantId().empty())
+    if (this->getIsRestrictSettingsToWhitelist() && !this->getTenantId().empty())
     {
         for (const auto & change : changes)
         {
             if (!SettingsChanges::WHITELIST_SETTINGS.contains(change.name))
                 throw Exception(ErrorCodes::UNKNOWN_SETTING, "Unknown or disabled setting " + change.name +
-                    "for tenant user. Contact the admin about whether it is needed to add it to tenant_whitelist_settings"
-                    " in configuration");
+                    " for tenant user. Contact the admin about whether it is needed to add it to tenant_whitelist_settings in configuration");
         }
     }
 
@@ -2261,21 +2246,6 @@ String Context::getInitialQueryId() const
 }
 
 
-void Context::setCoordinatorAddress(const Protos::AddressInfo & address)
-{
-    coordinator_address = address;
-}
-
-void Context::setCoordinatorAddress(const AddressInfo & address)
-{
-    coordinator_address = address;
-}
-
-AddressInfo Context::getCoordinatorAddress() const
-{
-    return coordinator_address;
-}
-
 void Context::setPlanSegmentInstanceId(const PlanSegmentInstanceId & instance_id)
 {
     plan_segment_instance_id = instance_id;
@@ -2285,16 +2255,6 @@ PlanSegmentInstanceId Context::getPlanSegmentInstanceId() const
 {
     return plan_segment_instance_id;
 };
-
-void Context::initPlanSegmentExHandler()
-{
-    plan_segment_ex_handler = std::make_shared<ExceptionHandler>();
-}
-
-ExceptionHandlerPtr Context::getPlanSegmentExHandler() const
-{
-    return plan_segment_ex_handler;
-}
 
 void Context::setCurrentDatabaseNameInGlobalContext(const String & name)
 {
@@ -2438,7 +2398,7 @@ void Context::killCurrentQuery()
 {
     if (process_list_elem)
     {
-        process_list_elem->cancelQuery(true, false);
+        process_list_elem->cancelQuery(true);
     }
 };
 
@@ -2639,6 +2599,16 @@ ProgressCallback Context::getProgressCallback() const
     return progress_callback;
 }
 
+void Context::setInternalProgressCallback(ProgressCallback callback)
+{
+    internal_progress_callback = callback;
+}
+
+ProgressCallback Context::getInternalProgressCallback() const
+{
+    return internal_progress_callback;
+}
+
 void Context::setProcessListEntry(std::shared_ptr<ProcessListEntry> process_list_entry_)
 {
     process_list_entry = process_list_entry_;
@@ -2750,12 +2720,6 @@ void Context::dropNvmCache() const
         shared->nvm_cache->reset();
 }
 
-void Context::setFooterCache(size_t max_size_in_bytes)
-{
-    auto lock = getLock();
-    if (max_size_in_bytes)
-        ArrowFooterCache::initialize(max_size_in_bytes);
-}
 
 void Context::setUncompressedCache(size_t max_size_in_bytes)
 {
@@ -3949,15 +3913,6 @@ std::shared_ptr<CloudMaterializedMySQLLog> Context::getCloudMaterializedMySQLLog
     return shared->cnch_system_logs->getMaterializedMySQLLog();
 }
 
-std::shared_ptr<CloudUniqueTableLog> Context::getCloudUniqueTableLog() const
-{
-    auto lock = getLock();
-    if (!shared->cnch_system_logs)
-        return {};
-
-    return shared->cnch_system_logs->getUniqueTableLog();
-}
-
 std::shared_ptr<MutationLog> Context::getMutationLog() const
 {
     auto lock = getLock();
@@ -3979,15 +3934,6 @@ std::shared_ptr<ProcessorsProfileLog> Context::getProcessorsProfileLog() const
     return shared->system_logs->processors_profile_log;
 }
 
-std::shared_ptr<RemoteReadLog> Context::getRemoteReadLog() const
-{
-    auto lock = getLock();
-
-    if (!shared->system_logs)
-        return {};
-
-    return shared->system_logs->remote_read_log;
-}
 
 std::shared_ptr<ZooKeeperLog> Context::getZooKeeperLog() const
 {
@@ -4399,20 +4345,21 @@ void Context::setIsRestrictSettingsToWhitelist(bool is_restrict)
     shared->restrict_tenanted_users_to_whitelist_settings = is_restrict;
 }
 
+bool Context::getIsRestrictSystemTables() const
+{
+    return shared->restrict_tenanted_users_to_system_tables;
+}
+
+void Context::setIsRestrictSystemTables(bool is_restrict)
+{
+    /// Lock isn't required, you should set it at start
+    shared->restrict_tenanted_users_to_system_tables = is_restrict;
+}
+
 void Context::addRestrictSettingsToWhitelist(const std::vector<String>& setting_names) const
 {
     for (auto & name : setting_names)
         SettingsChanges::WHITELIST_SETTINGS.emplace(name);
-}
-
-bool Context::getBlockPrivilegedOp() const
-{
-    return shared->restrict_tenanted_users_to_privileged_operations;
-}
-
-void Context::setBlockPrivilegedOp(bool is_restrict)
-{
-    shared->restrict_tenanted_users_to_privileged_operations = is_restrict;
 }
 
 void Context::setDefaultProfiles(const Poco::Util::AbstractConfiguration & config)
@@ -5770,9 +5717,9 @@ Context::PartAllocator Context::getPartAllocationAlgo() const
     }
 }
 
-void Context::createPlanNodeIdAllocator(int max_id)
+void Context::createPlanNodeIdAllocator()
 {
-    id_allocator = std::make_shared<PlanNodeIdAllocator>(max_id);
+    id_allocator = std::make_shared<PlanNodeIdAllocator>();
 }
 
 void Context::createSymbolAllocator()
@@ -5908,13 +5855,11 @@ AsynchronousReaderPtr Context::getThreadPoolReader() const
 {
     auto lock = getLock();
 
+    const Poco::Util::AbstractConfiguration & config = getConfigRef();
+    auto pool_size = config.getUInt(".threadpool_remote_fs_reader_pool_size", 250);
+    auto queue_size = config.getUInt(".threadpool_remote_fs_reader_queue_size", 1000000);
     if (!shared->asynchronous_remote_fs_reader)
-    {
-        const Poco::Util::AbstractConfiguration & config = getConfigRef();
-        auto pool_size = config.getUInt(".threadpool_remote_fs_reader_pool_size", 250);
-        auto queue_size = config.getUInt(".threadpool_remote_fs_reader_queue_size", 1000000);
         shared->asynchronous_remote_fs_reader = std::make_shared<ThreadPoolRemoteFSReader>(pool_size, queue_size);
-    }
 
     return shared->asynchronous_remote_fs_reader;
 }
