@@ -13,29 +13,30 @@
  * limitations under the License.
  */
 
+#include <optional>
 #include <Optimizer/Property/PropertyMatcher.h>
 
 #include <Core/SortDescription.h>
 #include <Interpreters/Context.h>
 #include <Optimizer/Property/Property.h>
 
-#include <algorithm>
-#include <optional>
-#include <vector>
-
 namespace DB
 {
 bool PropertyMatcher::matchNodePartitioning(
     const Context & context,
     Partitioning & required,
+    bool enforce_not_match,
     const Partitioning & actual,
     const SymbolEquivalences & equivalences,
     const Constants & constants)
 {
-    if (required.getHandle() == Partitioning::Handle::ARBITRARY)
+    if (enforce_not_match)
+        return false; 
+
+    if (required.getPartitioningHandle() == Partitioning::Handle::ARBITRARY)
         return true;
 
-    if (required.getHandle() == Partitioning::Handle::FIXED_HASH && context.getSettingsRef().enforce_round_robin
+    if (required.getPartitioningHandle() == Partitioning::Handle::FIXED_HASH && context.getSettingsRef().enforce_round_robin
         && required.isEnforceRoundRobin() && actual.normalize(equivalences).satisfy(required.normalize(equivalences), constants))
     {
         required.setHandle(Partitioning::Handle::FIXED_ARBITRARY);
@@ -46,32 +47,20 @@ bool PropertyMatcher::matchNodePartitioning(
 }
 
 bool PropertyMatcher::matchStreamPartitioning(
-    const Context &,
-    const Partitioning & required,
-    const Partitioning & actual,
-    const SymbolEquivalences & equivalences,
-    const Constants & constants,
-    bool match_local_exchange)
+    const Context &, const Partitioning & required, const Partitioning & actual, const SymbolEquivalences & equivalences)
 {
-    if (required.getHandle() == Partitioning::Handle::ARBITRARY)
+    if (required.getPartitioningHandle() == Partitioning::Handle::ARBITRARY)
         return true;
-    // todo remove
-    if (!match_local_exchange)
-    {
-        if (required.getHandle() == Partitioning::Handle::FIXED_HASH)
-            return true;
-        if (required.getHandle() == Partitioning::Handle::FIXED_ARBITRARY)
-            return true;
-    }
-
-    return actual.normalize(equivalences).satisfy(required.normalize(equivalences), constants);
+    return required.normalize(equivalences) == actual.normalize(equivalences);
 }
+
 
 Sorting PropertyMatcher::matchSorting(
     const Context & context, const Sorting & required, const Sorting & actual, const SymbolEquivalences & equivalences)
 {
     return matchSorting(context, required.toSortDesc(), actual, equivalences);
 }
+
 
 /// Optimize in case of exact match with order key element
 /// or in some simple cases when order key element is wrapped into monotonic function.
@@ -176,68 +165,64 @@ Sorting PropertyMatcher::matchSorting(const Context &, const SortDescription & r
     return {};
 }
 
+
 template <typename T>
-static std::vector<T> intersection(const std::vector<std::vector<T>> & inputs)
+static std::vector<T> findCommonPrefix(const std::vector<std::vector<T>> & input)
 {
-    if (inputs.empty())
+    if (input.empty())
         return {};
-    if (inputs.size() == 1)
-        return inputs[0];
 
-    std::unordered_set<std::string> common_elements;
-    for (const auto & element : inputs[0])
-        common_elements.emplace(element);
-
-    for (size_t i = 1; i < inputs.size(); i++)
+    std::vector<T> prefix = input[0];
+    for (size_t i = 1; i < input.size(); i++)
     {
-        std::unordered_set<std::string> new_common_elements;
-        for (const auto & element : inputs[i])
-            if (common_elements.contains(element))
-                new_common_elements.emplace(element);
-        common_elements = std::move(new_common_elements);
+        const auto & current = input[i];
+
+        size_t j = 0;
+        while (j < prefix.size() && j < current.size() && prefix[j] == current[j])
+            j++;
+
+        prefix.resize(j);
     }
 
-    std::vector<std::string> ordered_common_elements;
-    for (const auto & element : inputs[0])
-        if (common_elements.contains(element))
-            ordered_common_elements.emplace_back(element);
-
-    return ordered_common_elements;
+    return prefix;
 }
 
 Property PropertyMatcher::compatibleCommonRequiredProperty(const std::unordered_set<Property, PropertyHash> & required_properties)
 {
     if (required_properties.empty())
         return Property{};
+    if (required_properties.size() == 1)
+        return *required_properties.begin();
 
     // check if all requries are broadcast
     bool all_broadcast = std::all_of(required_properties.begin(), required_properties.end(), [](const auto & property) {
-        return property.getNodePartitioning().getHandle() == Partitioning::Handle::FIXED_BROADCAST;
+        return property.getNodePartitioning().getPartitioningHandle() == Partitioning::Handle::FIXED_BROADCAST;
     });
     if (all_broadcast)
     {
-                Property common_property{Partitioning{Partitioning::Handle::FIXED_BROADCAST}};
-                return common_property;
+        bool all_preferred = std::all_of(
+            required_properties.begin(), required_properties.end(), [](const auto & property) { return property.isPreferred(); });
+        Property common_property{Partitioning{Partitioning::Handle::FIXED_BROADCAST}};
+        common_property.setPreferred(all_preferred);
+        return common_property;
     }
 
     // find common partition_handle && partition_columns ignore ARBITRARY / FIXED_ARBITRARY / FIXED_BROADCAST
+    bool all_preferred = true;
     bool has_partition_columns = false;
-    bool has_required_handle = false;
     std::vector<Partitioning::Handle> partition_handles;
     std::vector<std::vector<String>> partition_columns;
     for (const auto & property : required_properties)
     {
-        auto partition_handle = property.getNodePartitioning().getHandle();
-// don't support single / coordinator right now, as the cost of them are incorrect, caused cte to choose the wrong plan
+        auto partition_handle = property.getNodePartitioning().getPartitioningHandle();
         if (partition_handle == Partitioning::Handle::ARBITRARY || partition_handle == Partitioning::Handle::FIXED_ARBITRARY
-            || partition_handle == Partitioning::Handle::FIXED_BROADCAST || partition_handle == Partitioning::Handle::SINGLE
-            || partition_handle == Partitioning::Handle::COORDINATOR)
+            || partition_handle == Partitioning::Handle::FIXED_BROADCAST)
             continue;
 
         partition_handles.emplace_back(partition_handle);
-                has_partition_columns |= !property.getNodePartitioning().getColumns().empty();
-has_required_handle |= property.getNodePartitioning().isRequireHandle();
-        partition_columns.emplace_back(property.getNodePartitioning().getColumns());
+        all_preferred &= property.isPreferred();
+        has_partition_columns |= !property.getNodePartitioning().getPartitioningColumns().empty();
+        partition_columns.emplace_back(property.getNodePartitioning().getPartitioningColumns());
     }
 
     if (partition_handles.empty())
@@ -248,16 +233,12 @@ has_required_handle |= property.getNodePartitioning().isRequireHandle();
             return Property{};
 
     // find common prefix partition columns
-    std::vector<String> common_partition_columns = intersection(partition_columns);
-    if (has_partition_columns && common_partition_columns.empty())
+    std::vector<String> common_prefix_partition_columns = findCommonPrefix(partition_columns);
+    if (has_partition_columns && common_prefix_partition_columns.empty())
         return Property{};
 
-
-    Property common_property{Partitioning{common_partition_handle, common_partition_columns}};
-
-    if (has_required_handle)
-    common_property.getNodePartitioningRef().setRequireHandle(true);
-
+    Property common_property{Partitioning{common_partition_handle, common_prefix_partition_columns}};
+    common_property.setPreferred(all_preferred);
     return common_property;
 }
 }

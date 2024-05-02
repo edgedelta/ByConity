@@ -32,12 +32,15 @@ void AddExchange::rewrite(QueryPlan & plan, ContextMutablePtr context) const
     Property required{Partitioning{Partitioning::Handle::SINGLE}};
 
     required.getNodePartitioningRef().setComponent(Partitioning::Component::COORDINATOR);
+    if (context->getSettingsRef().offloading_with_query_plan)
+        required.setEnforceNotMatch(true);
     ExchangeContext cxt{context, required};
     ExchangeResult result = VisitorUtil::accept(plan.getPlanNode(), visitor, cxt);
 
     PlanNodePtr node = result.getNodePtr();
     Property output = result.getOutputProperty();
-    if (!PropertyMatcher::matchNodePartitioning(*context, required.getNodePartitioningRef(), output.getNodePartitioning()))
+    if (!PropertyMatcher::matchNodePartitioning(
+            *context, required.getNodePartitioningRef(), required.isEnforceNotMatch(), output.getNodePartitioning()))
     {
         Utils::checkArgument(node->getChildren().size() == 1, "Output node has more than 1 child");
 
@@ -46,10 +49,6 @@ void AddExchange::rewrite(QueryPlan & plan, ContextMutablePtr context) const
         PlanNodes enforced_children{enforced_node};
         node->replaceChildren(enforced_children);
     }
-
-    // enforce a gather with keep_order if offloading_with_query_plan enabled
-    if (context->getSettingsRef().offloading_with_query_plan)
-        node = PropertyEnforcer::enforceOffloadingGatherNode(node, *context);
     plan.update(node);
 }
 
@@ -61,7 +60,7 @@ ExchangeResult ExchangeVisitor::visitPlanNode(PlanNodeBase & node, ExchangeConte
     Property preferred = required_set[0];
     ExchangeContext child_context{cxt.getContext(), preferred};
     ExchangeResult result = visitChild(child, child_context);
-    return rebaseAndDeriveProperties(ptr, result, cxt.getRequired(), cxt.getContext());
+    return rebaseAndDeriveProperties(ptr, result, cxt.getContext());
 }
 
 ExchangeResult ExchangeVisitor::visitProjectionNode(ProjectionNode & node, ExchangeContext & cxt)
@@ -96,23 +95,29 @@ ExchangeResult ExchangeVisitor::visitJoinNode(JoinNode & node, ExchangeContext &
     ExchangeResult right_result = visitChild(right, right_child_property);
 
     if (!PropertyMatcher::matchNodePartitioning(
-            *cxt.getContext(), left_property.getNodePartitioningRef(), left_result.getOutputProperty().getNodePartitioning()))
+            *cxt.getContext(),
+            left_property.getNodePartitioningRef(),
+            left_property.isEnforceNotMatch(),
+            left_result.getOutputProperty().getNodePartitioning()))
     {
         PlanNodePtr enforced_node = PropertyEnforcer::enforceNodePartitioning(
             left_result.getNodePtr(), left_property, left_result.getOutputProperty(), *cxt.getContext());
-        Property enforced_prop = PropertyDeriver::deriveProperty(
-            enforced_node->getStep(), left_result.getOutputProperty(), cxt.getRequired(), cxt.getContext());
+        Property enforced_prop
+            = PropertyDeriver::deriveProperty(enforced_node->getStep(), left_result.getOutputProperty(), cxt.getContext());
         ExchangeResult enforced_result{enforced_node, enforced_prop};
         left_result = enforced_result;
     }
 
     if (!PropertyMatcher::matchNodePartitioning(
-            *cxt.getContext(), right_property.getNodePartitioningRef(), right_result.getOutputProperty().getNodePartitioning()))
+            *cxt.getContext(),
+            right_property.getNodePartitioningRef(),
+            right_property.isEnforceNotMatch(),
+            right_result.getOutputProperty().getNodePartitioning()))
     {
         PlanNodePtr enforced_node = PropertyEnforcer::enforceNodePartitioning(
             right_result.getNodePtr(), right_property, right_result.getOutputProperty(), *cxt.getContext());
-        Property enforced_prop = PropertyDeriver::deriveProperty(
-            enforced_node->getStep(), right_result.getOutputProperty(), cxt.getRequired(), cxt.getContext());
+        Property enforced_prop
+            = PropertyDeriver::deriveProperty(enforced_node->getStep(), right_result.getOutputProperty(), cxt.getContext());
         ExchangeResult enforced_result{enforced_node, enforced_prop};
         right_result = enforced_result;
     }
@@ -120,7 +125,7 @@ ExchangeResult ExchangeVisitor::visitJoinNode(JoinNode & node, ExchangeContext &
     std::vector<ExchangeResult> results;
     results.emplace_back(left_result);
     results.emplace_back(right_result);
-    return rebaseAndDeriveProperties(ptr, results, cxt.getRequired(), cxt.getContext());
+    return rebaseAndDeriveProperties(ptr, results, cxt.getContext());
 }
 
 ExchangeResult ExchangeVisitor::visitAggregatingNode(AggregatingNode & node, ExchangeContext & cxt)
@@ -157,7 +162,8 @@ ExchangeResult ExchangeVisitor::visitUnionNode(UnionNode & node, ExchangeContext
         children.push_back(result.getNodePtr());
         results.emplace_back(result);
     }
-return rebaseAndDeriveProperties(ptr, results, cxt.getRequired(), cxt.getContext());
+
+    return rebaseAndDeriveProperties(ptr, results, cxt.getContext());
 }
 
 ExchangeResult ExchangeVisitor::visitExchangeNode(ExchangeNode & node, ExchangeContext & cxt)
@@ -173,21 +179,21 @@ ExchangeResult ExchangeVisitor::visitRemoteExchangeSourceNode(RemoteExchangeSour
 ExchangeResult ExchangeVisitor::visitTableScanNode(TableScanNode & node, ExchangeContext & cxt)
 {
     PlanNodePtr ptr = node.shared_from_this();
-    Property output = PropertyDeriver::deriveProperty(ptr->getStep(), cxt.getContext(), cxt.getRequired());
+    Property output = PropertyDeriver::deriveProperty(ptr->getStep(), cxt.getContext());
     return ExchangeResult{ptr, output};
 }
 
 ExchangeResult ExchangeVisitor::visitReadNothingNode(ReadNothingNode & node, ExchangeContext & cxt)
 {
     PlanNodePtr ptr = node.shared_from_this();
-    Property output = PropertyDeriver::deriveProperty(ptr->getStep(), cxt.getContext(), cxt.getRequired());
+    Property output = PropertyDeriver::deriveProperty(ptr->getStep(), cxt.getContext());
     return ExchangeResult{ptr, output};
 }
 
 ExchangeResult ExchangeVisitor::visitValuesNode(ValuesNode & node, ExchangeContext & cxt)
 {
     PlanNodePtr ptr = node.shared_from_this();
-    Property output = PropertyDeriver::deriveProperty(ptr->getStep(), cxt.getContext(), cxt.getRequired());
+    Property output = PropertyDeriver::deriveProperty(ptr->getStep(), cxt.getContext());
     return ExchangeResult{ptr, output};
 }
 
@@ -331,8 +337,7 @@ ExchangeResult ExchangeVisitor::visitChild(PlanNodePtr node, ExchangeContext & c
     return VisitorUtil::accept(node, *this, cxt);
 }
 
-ExchangeResult
-ExchangeVisitor::rebaseAndDeriveProperties(const PlanNodePtr & node, ExchangeResult & result, Property & require, ContextMutablePtr & cxt)
+ExchangeResult ExchangeVisitor::rebaseAndDeriveProperties(const PlanNodePtr & node, ExchangeResult & result, ContextMutablePtr & cxt)
 {
     // replace the children of current node
     PlanNodes child;
@@ -340,11 +345,11 @@ ExchangeVisitor::rebaseAndDeriveProperties(const PlanNodePtr & node, ExchangeRes
     node->replaceChildren(child);
 
     // derive property base on the replaced node
-    return deriveProperties(node, result.getOutputProperty(), require, cxt);
+    return deriveProperties(node, result.getOutputProperty(), cxt);
 }
 
-ExchangeResult ExchangeVisitor::rebaseAndDeriveProperties(
-    const PlanNodePtr & node, std::vector<ExchangeResult> & results, Property & require, ContextMutablePtr & cxt)
+ExchangeResult
+ExchangeVisitor::rebaseAndDeriveProperties(const PlanNodePtr & node, std::vector<ExchangeResult> & results, ContextMutablePtr & cxt)
 {
     PlanNodes children;
     PropertySet input_properties = std::vector<Property>();
@@ -354,21 +359,19 @@ ExchangeResult ExchangeVisitor::rebaseAndDeriveProperties(
         input_properties.emplace_back(result.getOutputProperty());
     }
     node->replaceChildren(children);
-    return deriveProperties(node, input_properties, require, cxt);
+    return deriveProperties(node, input_properties, cxt);
 }
 
-ExchangeResult
-ExchangeVisitor::deriveProperties(const PlanNodePtr & node, Property & input_property, Property & require, ContextMutablePtr & cxt)
+ExchangeResult ExchangeVisitor::deriveProperties(const PlanNodePtr & node, Property & input_property, ContextMutablePtr & cxt)
 {
     PropertySet input_properties = std::vector<Property>();
     input_properties.emplace_back(input_property);
-    return deriveProperties(node, input_properties, require, cxt);
+    return deriveProperties(node, input_properties, cxt);
 }
 
-ExchangeResult
-ExchangeVisitor::deriveProperties(const PlanNodePtr & node, PropertySet & input_properties, Property & require, ContextMutablePtr & cxt)
+ExchangeResult ExchangeVisitor::deriveProperties(const PlanNodePtr & node, PropertySet & input_properties, ContextMutablePtr & cxt)
 {
-    Property property = PropertyDeriver::deriveProperty(node->getStep(), input_properties, require, cxt);
+    Property property = PropertyDeriver::deriveProperty(node->getStep(), input_properties, cxt);
     return ExchangeResult{node, property};
 }
 
@@ -382,47 +385,52 @@ ExchangeResult ExchangeVisitor::enforceNodeAndStream(PlanNodeBase & node, Exchan
     ExchangeResult result = visitChild(child, child_context);
 
     ExchangeResult enforced_node_result;
-    if (!PropertyMatcher::matchNodePartitioning(
-            *cxt.getContext(), preferred.getNodePartitioningRef(), result.getOutputProperty().getNodePartitioning()))
+    if (!preferred.isPreferred()
+        && !PropertyMatcher::matchNodePartitioning(
+            *cxt.getContext(),
+            preferred.getNodePartitioningRef(),
+            preferred.isEnforceNotMatch(),
+            result.getOutputProperty().getNodePartitioning()))
     {
         PlanNodePtr enforced_node
             = PropertyEnforcer::enforceNodePartitioning(result.getNodePtr(), preferred, result.getOutputProperty(), *cxt.getContext());
         Property enforced_node_prop
-            = PropertyDeriver::deriveProperty(enforced_node->getStep(), result.getOutputProperty(), cxt.getRequired(), cxt.getContext());
+            = PropertyDeriver::deriveProperty(enforced_node->getStep(), result.getOutputProperty(), cxt.getContext());
         enforced_node_result = ExchangeResult{enforced_node, enforced_node_prop};
     }
 
     ExchangeResult enforced_stream_result;
-    if (!PropertyMatcher::matchStreamPartitioning(
-            *cxt.getContext(), preferred.getStreamPartitioning(), result.getOutputProperty().getStreamPartitioning(), {}, {}, cxt.getContext()->getSettingsRef().enable_add_local_exchange))
+    if (!preferred.isPreferred()
+        && !PropertyMatcher::matchStreamPartitioning(
+            *cxt.getContext(), preferred.getStreamPartitioning(), result.getOutputProperty().getStreamPartitioning()))
     {
         if (enforced_node_result.getNodePtr() != nullptr)
         {
             PlanNodePtr enforced_stream_node = PropertyEnforcer::enforceStreamPartitioning(
                 enforced_node_result.getNodePtr(), preferred, enforced_node_result.getOutputProperty(), *cxt.getContext());
             Property enforced_stream_prop = PropertyDeriver::deriveProperty(
-                enforced_stream_node->getStep(), enforced_node_result.getOutputProperty(), cxt.getRequired(), cxt.getContext());
+                enforced_stream_node->getStep(), enforced_node_result.getOutputProperty(), cxt.getContext());
             enforced_stream_result = ExchangeResult{enforced_stream_node, enforced_stream_prop};
         }
         else
         {
             PlanNodePtr enforced_stream_node = PropertyEnforcer::enforceStreamPartitioning(
                 result.getNodePtr(), preferred, result.getOutputProperty(), *cxt.getContext());
-            Property enforced_stream_prop = PropertyDeriver::deriveProperty(
-                enforced_stream_node->getStep(), result.getOutputProperty(), cxt.getRequired(), cxt.getContext());
+            Property enforced_stream_prop
+                = PropertyDeriver::deriveProperty(enforced_stream_node->getStep(), result.getOutputProperty(), cxt.getContext());
             enforced_stream_result = ExchangeResult{enforced_stream_node, enforced_stream_prop};
         }
     }
 
     if (enforced_stream_result.getNodePtr() != nullptr)
     {
-        return rebaseAndDeriveProperties(ptr, enforced_stream_result, cxt.getRequired(), cxt.getContext());
+        return rebaseAndDeriveProperties(ptr, enforced_stream_result, cxt.getContext());
     }
     if (enforced_node_result.getNodePtr() != nullptr)
     {
-        return rebaseAndDeriveProperties(ptr, enforced_node_result, cxt.getRequired(), cxt.getContext());
+        return rebaseAndDeriveProperties(ptr, enforced_node_result, cxt.getContext());
     }
-    return rebaseAndDeriveProperties(ptr, result, cxt.getRequired(), cxt.getContext());
+    return rebaseAndDeriveProperties(ptr, result, cxt.getContext());
 }
 
 ExchangeResult ExchangeVisitor::enforceNode(PlanNodeBase & node, ExchangeContext & cxt)
@@ -433,19 +441,21 @@ ExchangeResult ExchangeVisitor::enforceNode(PlanNodeBase & node, ExchangeContext
     Property preferred = required_set[0];
     ExchangeContext child_context{cxt.getContext(), preferred};
     ExchangeResult result = visitChild(child, child_context);
-    
-    if (PropertyMatcher::matchNodePartitioning(
-            *cxt.getContext(), preferred.getNodePartitioningRef(), result.getOutputProperty().getNodePartitioning()))
+    if (!preferred.isPreferred()
+        && PropertyMatcher::matchNodePartitioning(
+            *cxt.getContext(),
+            preferred.getNodePartitioningRef(),
+            preferred.isEnforceNotMatch(),
+            result.getOutputProperty().getNodePartitioning()))
     {
-        return rebaseAndDeriveProperties(ptr, result, cxt.getRequired(), cxt.getContext());
+        return rebaseAndDeriveProperties(ptr, result, cxt.getContext());
     }
     PlanNodePtr enforced_node
         = PropertyEnforcer::enforceNodePartitioning(result.getNodePtr(), preferred, result.getOutputProperty(), *cxt.getContext());
-    Property enforced_node_prop
-        = PropertyDeriver::deriveProperty(enforced_node->getStep(), result.getOutputProperty(), cxt.getRequired(), cxt.getContext());
+    Property enforced_node_prop = PropertyDeriver::deriveProperty(enforced_node->getStep(), result.getOutputProperty(), cxt.getContext());
     ExchangeResult enforced_node_result{enforced_node, enforced_node_prop};
 
-    return rebaseAndDeriveProperties(ptr, enforced_node_result, cxt.getRequired(), cxt.getContext());
+    return rebaseAndDeriveProperties(ptr, enforced_node_result, cxt.getContext());
 }
 
 }
