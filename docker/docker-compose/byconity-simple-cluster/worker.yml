@@ -182,11 +182,6 @@ storage_configuration:
           default: local_disk
           disk: local_disk
 hdfs_addr: "hdfs://hdfs-namenode:9000"
-cnch_unique_table_log:
-  database: cnch_system
-  table: cnch_unique_table_log
-  flush_max_row_count: 10000
-  flush_interval_milliseconds: 7500
 query_log:
   database: system
   table: query_log
@@ -305,7 +300,5 @@ udf_processor:
   timeout_ms: 10000
   max_retry: 1
 cnch_config: "/config/cnch-config.yml"
-restrict_tenanted_users_to_system_tables: false
-restrict_tenanted_users_to_whitelist_settings: false
 additional_services:
   FullTextSearch: true
