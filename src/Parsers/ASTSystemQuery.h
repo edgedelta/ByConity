@@ -182,6 +182,7 @@ public:
     // For GC and DEDUP
     ASTPtr partition; // The value or ID of the partition is stored here.
 
+
     /// for CLEAN TRANSACTION txn_id, RELEASE MEMORY LOCK [db.tb]/[OF TXN xxx]
     bool specify_txn = false;
     UInt64 txn_id;

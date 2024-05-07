@@ -79,48 +79,15 @@ enum PreloadLevelSettings : UInt64
       "The maximum size of blocks of uncompressed data before compressing for writing to a table.", \
       0) \
     M(UInt64, max_block_size, DEFAULT_BLOCK_SIZE, "Maximum block size for reading", 0) \
-    M(UInt64, \
-      max_insert_block_size, \
-      DEFAULT_INSERT_BLOCK_SIZE, \
-      "The maximum block size for insertion, if we control the creation of blocks for insertion.", \
-      0) \
-    M(UInt64, \
-      max_insert_block_size_bytes, \
-      DEFAULT_BLOCK_SIZE_BYTES, \
-      "The maximum block bytes for insertion, if we control the creation of blocks for insertion.", \
-      0) \
-    M(UInt64, \
-      min_insert_block_size_rows, \
-      DEFAULT_INSERT_BLOCK_SIZE, \
-      "Squash blocks passed to INSERT query to specified size in rows, if blocks are not big enough.", \
-      0) \
-    M(UInt64, \
-      min_insert_block_size_bytes, \
-      (DEFAULT_INSERT_BLOCK_SIZE * 256), \
-      "Squash blocks passed to INSERT query to specified size in bytes, if blocks are not big enough.", \
-      0) \
-    M(UInt64, \
-      min_insert_block_size_rows_for_materialized_views, \
-      0, \
-      "Like min_insert_block_size_rows, but applied only during pushing to MATERIALIZED VIEW (default: min_insert_block_size_rows)", \
-      0) \
-    M(UInt64, \
-      min_insert_block_size_bytes_for_materialized_views, \
-      0, \
-      "Like min_insert_block_size_bytes, but applied only during pushing to MATERIALIZED VIEW (default: min_insert_block_size_bytes)", \
-      0) \
-    M(UInt64, \
-      max_joined_block_size_rows, \
-      DEFAULT_BLOCK_SIZE, \
-      "Maximum block size for JOIN result (if join algorithm supports it). 0 means unlimited.", \
-      0) \
-    M(UInt64, \
-      max_insert_threads, \
-      0, \
-      "The maximum number of threads to execute the INSERT SELECT query. Values 0 or 1 means that INSERT SELECT is not run in parallel. " \
-      "Higher values will lead to higher memory usage. Parallel INSERT SELECT has effect only if the SELECT part is run on parallel, see " \
-      "'max_threads' setting.", \
-      0) \
+    M(UInt64, max_insert_block_size, DEFAULT_INSERT_BLOCK_SIZE, "The maximum block size for insertion, if we control the creation of blocks for insertion.", 0) \
+    M(UInt64, max_insert_block_size_bytes, DEFAULT_BLOCK_SIZE_BYTES, "The maximum block bytes for insertion, if we control the creation of blocks for insertion.", 0) \
+    M(UInt64, min_insert_block_size_rows, DEFAULT_INSERT_BLOCK_SIZE, "Squash blocks passed to INSERT query to specified size in rows, if blocks are not big enough.", 0) \
+    M(UInt64, min_insert_block_size_bytes, (DEFAULT_INSERT_BLOCK_SIZE * 256), "Squash blocks passed to INSERT query to specified size in bytes, if blocks are not big enough.", 0) \
+    M(UInt64, min_insert_block_size_rows_for_materialized_views, 0, "Like min_insert_block_size_rows, but applied only during pushing to MATERIALIZED VIEW (default: min_insert_block_size_rows)", 0) \
+    M(UInt64, min_insert_block_size_bytes_for_materialized_views, 0, "Like min_insert_block_size_bytes, but applied only during pushing to MATERIALIZED VIEW (default: min_insert_block_size_bytes)", 0) \
+    M(UInt64, max_joined_block_size_rows, DEFAULT_BLOCK_SIZE, "Maximum block size for JOIN result (if join algorithm supports it). 0 means unlimited.", 0) \
+    M(UInt64, max_insert_threads, 0, "The maximum number of threads to execute the INSERT SELECT query. Values 0 or 1 means that INSERT SELECT is not run in parallel. Higher values will lead to higher memory usage. Parallel INSERT SELECT has effect only if the SELECT part is run on parallel, see 'max_threads' setting.", 0) \
+    M(Bool, enable_insert_squashing, true, "Squashing when insert", 0) \
     M(UInt64, max_final_threads, 16, "The maximum number of threads to read from table with FINAL.", 0) \
     M(MaxThreads, max_threads, 0, "The maximum number of threads to execute the request. By default, it is determined automatically.", 0) \
     M(MaxThreads, \
@@ -730,6 +697,7 @@ enum PreloadLevelSettings : UInt64
     M(Bool, enable_predicate_pushdown, false, "Where to push down predicate", 0) \
     M(Bool, dict_table_full_mode, false, "If encode / decode table is not bucket table, try to dispatch dict to all workers, if false, throw exception instead", 0) \
     M(UInt64, pathgraph_threshold_y, 0, "maximum point number in each level", 0) \
+    M(Bool, to_string_extra_arguments, true, "Whether to allow an extra argument in toString Function", 0) \
     \
     M(UInt64, max_query_cpu_seconds, 0, "Limit the maximum amount of CPU resources such a query segment can consume.", 0) \
     M(UInt64, max_distributed_query_cpu_seconds, 0, "Limit the maximum amount of CPU resources such a distribute query can consume.", 0) \
@@ -1209,6 +1177,7 @@ enum PreloadLevelSettings : UInt64
       0) \
     M(Bool, query_plan_filter_push_down, true, "Allow to push down filter by predicate query plan step", 0) \
     M(Bool, enable_partition_filter_push_down, false, "Allow to push down partition filter to query info", 0) \
+    M(Bool, remove_partition_filter_on_worker, true, "Remove partition filter before worker execution, since partition pruning has been done on the server. This temp fix is used for not selecting partition key as prewhere", 0) \
     M(Bool, enable_optimizer_early_prewhere_push_down, false, "Allow to push down prewhere in the optimizer phase", 0) \
     M(UInt64, regexp_max_matches_per_row, 1000, "Max matches of any single regexp per row, used to safeguard 'extractAllGroupsHorizontal' against consuming too much memory with greedy RE.", 0) \
     \
@@ -1216,7 +1185,7 @@ enum PreloadLevelSettings : UInt64
     M(UInt64, offset, 0, "Offset on read rows from the most 'end' result for select query", 0) \
     \
     M(UInt64, function_range_max_elements_in_block, 500000000, "Maximum number of values generated by function 'range' per block of data (sum of array sizes for every row in a block, see also 'max_block_size' and 'min_insert_block_size_rows'). It is a safety threshold.", 0) \
-    M(ShortCircuitFunctionEvaluation, short_circuit_function_evaluation, ShortCircuitFunctionEvaluation::ENABLE, "Setting for short-circuit function evaluation configuration. Possible values: 'enable', 'disable', 'force_enable'", 0) \
+    M(ShortCircuitFunctionEvaluation, short_circuit_function_evaluation, ShortCircuitFunctionEvaluation::ENABLE, "Setting for short-circuit function evaluation configuration. Possible values: 'enable' - use short-circuit function evaluation for functions that are suitable for it, 'disable' - disable short-circuit function evaluation, 'force_enable' - use short-circuit function evaluation for all functions.", 0) \
     \
     /** Bytedance */ \
     M(UInt64, force_alter_conflict_check, 1, "force alter conflict check", 0) \
@@ -1326,7 +1295,7 @@ enum PreloadLevelSettings : UInt64
     M(Milliseconds, topology_retry_interval_ms, 100, "Interval of topology background task to retry.", 0) \
     M(Milliseconds, topology_lease_life_ms, 12000, "Expiration time of topology lease.", 0) \
     M(Milliseconds, topology_session_restart_check_ms, 120, "Check and try to restart leader election for server master", 0) \
-    M(UInt64, catalog_max_commit_size, 2000, "Max record number to be committed in one batch.", 0) \
+    M(UInt64, catalog_max_commit_size, 500, "Max record number to be committed in one batch.", 0) \
     M(Bool, catalog_enable_multiple_threads, false, "Whether leverage multiple threads to handle metadata.", 0) \
     M(UInt64, catalog_multiple_threads_min_parts, 10000, "Minimum parts number to enable multi-thread in calc visible parts.", 0) \
     M(Bool, server_write_ha, false, "Whether to enable write on non-host server if host server is not available. Directly commit from non-host server.", 0) \
@@ -1375,6 +1344,9 @@ enum PreloadLevelSettings : UInt64
     M(Bool, disable_optimize_final, true, "Disable optimize final command", 0) \
     M(Milliseconds, brpc_data_parts_timeout_ms, 30000, "Timeout for transmitting data parts in brpc", 0) \
     M(UInt64, scan_all_table_threshold, 20, "The upper limit to avoid scan all tables in some system tables, like tables and cnch_tables.", 0) \
+    M(Seconds, cnch_txn_lock_expire_duration_seconds, 30, "Transaction lock expire duration.", 0) \
+    M(Seconds, cnch_lock_manager_txn_checker_schedule_seconds, 30, "LockManager txn checker schedule seconds.", 0) \
+    M(UInt64, parts_preallocate_pool_size, 16, "Number of threads for part preallocate", 0) \
     /** Settings for hive */ \
     M(Bool, use_hive_metastore_filter, true, "", 0) \
     M(Bool, use_hive_cluster_key_filter, true, "", 0) \
@@ -1391,6 +1363,7 @@ enum PreloadLevelSettings : UInt64
     M(Bool, enable_unique_table_attach_without_dedup, false, "Enable directly make attached parts visible without dedup for unique table, for example: override mode of offline loading", 0) \
     M(Bool, enable_unique_table_detach_ignore_delete_bitmap, false, "Enable ignore delete bitmap info when handling detach commands for unique table, for example: delete bitmap has been broken, we can just ignore it via this parameter.", 0) \
     M(DedupKeyMode, dedup_key_mode, DedupKeyMode::REPLACE, "Handle different deduplication modes, current valid values: REPLACE, THROW, APPEND. THROW mode can only be used in non-staging area scenarios. APPEND mode will not execute dedup process, which is suitable for historical non-duplicated data import scenarios", 0) \
+    M(Seconds, unique_sleep_seconds_after_acquire_lock, 0, "Only for test", 0) \
     \
     /** Settings for Map */ \
     M(Bool, optimize_map_column_serialization, false, "Construct map value columns in advance during serialization", 0) \
@@ -1402,7 +1375,8 @@ enum PreloadLevelSettings : UInt64
     M(UInt64, grace_hash_join_initial_buckets, 1, "Initial number of grace hash join buckets", 0) \
     M(UInt64, grace_hash_join_max_buckets, 1024, "Limit on the number of grace hash join buckets", 0) \
     M(UInt64, grace_hash_join_left_side_parallel, 1, "Initial number of grace hash join left side parallel", 0) \
-    M(UInt64, grace_hash_join_read_result_block_size, 65536, "Initial number of grace hash join left side parallel", 0) \
+    M(UInt64, grace_hash_join_read_result_block_size, 65536, "Rows for reading spilled block in grace hash join.", 0) \
+    M(UInt64, grace_hash_join_read_result_block_bytes, 10000000, "Bytes for reading spilled block in grace hash join.", 0) \
     M(Bool, use_grace_hash_only_repartition, false, "Only use grace hash join when exchange type is repartition", 0) \
     M(UInt64, filesystem_cache_max_download_size, (128UL * 1024 * 1024 * 1024), "Max remote filesystem cache size that can be downloaded by a single query", 0) \
     M(Bool, skip_download_if_exceeds_query_cache, true, "Skip download from remote filesystem if exceeds query cache size", 0) \
@@ -1419,6 +1393,7 @@ enum PreloadLevelSettings : UInt64
     M(Bool, enable_brpc_builtin_services, true, "Whether to enable brpc builtin services", 0)\
     \
     /** Obsolete settings that do nothing but left for compatibility reasons. Remove each one after half a year of obsolescence. */ \
+    M(Bool, enable_memory_efficient_ingest_partition, true, "Obsolete setting, does nothing.", 0) \
     M(UInt64, max_memory_usage_for_all_queries, 0, "Obsolete setting, does nothing.", 0) \
     M(UInt64, multiple_joins_rewriter_version, 0, "Obsolete setting, does nothing.", 0) \
     M(Bool, enable_debug_queries, false, "Obsolete setting, does nothing.", 0) \
@@ -1449,6 +1424,8 @@ enum PreloadLevelSettings : UInt64
     M(Bool, enable_replicas_create_ingest_node_in_zk, 0, "Whether to enable replicas to create ingest node in zk", 0) \
     M(Bool, allow_ingest_empty_partition, false, "Allow empty partition replace target table", 0) \
     M(Bool, enable_async_ingest, false, "Allow ingest in aync mode", 0) \
+    M(Bool, optimize_ingest_with_bucket, true, "Using bucket table to optimize ingest", 0) \
+    M(UInt64, max_ingest_task_on_workers, 50, "Max ingest task on wokers, now It is not make a distinction with query num", 0) \
     /** Early Stop **/ \
     M(Milliseconds, query_shard_timeout_time, 0, "Timeout for query shard", 0) \
     M(Milliseconds, late_shard_relax_time, 1000, "Relaxition time for late shard", 0) \
