@@ -18,7 +18,6 @@
 //#include <Catalog/MetastoreByteKVImpl.h>
 #include <Catalog/MetastoreFDBImpl.h>
 #include <Catalog/StringHelper.h>
-#include <Catalog/CatalogUtils.h>
 #include <Protos/data_models.pb.h>
 #include <Protos/data_models_mv.pb.h>
 
@@ -28,25 +27,29 @@
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
-#include <Access/IAccessEntity.h>
 #include <Catalog/IMetastore.h>
 #include <CloudServices/CnchBGThreadCommon.h>
 #include <Core/UUID.h>
-#include <Interpreters/DistributedStages/PlanSegmentInstance.h>
-#include <Interpreters/SQLBinding/SQLBinding.h>
 #include <MergeTreeCommon/InsertionLabel.h>
-#include <Parsers/formatTenantDatabaseName.h>
 #include <Protos/RPCHelpers.h>
 #include <ResourceManagement/CommonData.h>
 #include <Statistics/ExportSymbols.h>
 #include <Statistics/StatisticsBase.h>
-#include <Storages/StorageSnapshot.h>
 #include <Transaction/TransactionCommon.h>
 #include <Transaction/TxnTimestamp.h>
 #include <cppkafka/cppkafka.h>
 #include <google/protobuf/repeated_field.h>
-#include <Common/Config/MetastoreConfig.h>
 #include <common/types.h>
+#include <Storages/StorageSnapshot.h>
+#include <Access/IAccessEntity.h>
+#include <Parsers/formatTenantDatabaseName.h>
+#include <Interpreters/SQLBinding/SQLBinding.h>
+#include <Common/Config/MetastoreConfig.h>
+
+namespace DB::ErrorCodes
+{
+    extern const int METASTORE_ACCESS_ENTITY_NOT_IMPLEMENTED;
+}
 
 namespace DB::ErrorCodes
 {
@@ -97,7 +100,6 @@ namespace DB::Catalog
 #define CLUSTER_BG_JOB_STATUS "CLUSTER_BGJS_"
 #define MERGE_BG_JOB_STATUS "MERGE_BGJS_"
 #define PARTGC_BG_JOB_STATUS "PARTGC_BGJS_"
-#define PARTMOVER_BG_JOB_STATUS "PARTMOVER_BGJS_"
 #define CONSUMER_BG_JOB_STATUS "CONSUMER_BGJS_"
 #define DEDUPWORKER_BG_JOB_STATUS "DEDUPWORKER_BGJS_"
 #define OBJECT_SCHEMA_ASSEMBLE_BG_JOB_STATUS "OBJECT_SCHEMA_ASSEMBLE_BGJS_"
@@ -127,7 +129,6 @@ namespace DB::Catalog
 #define TABLE_TRASHITEMS_METRICS_SNAPSHOT_PREFIX "TTS_"
 #define DICTIONARY_BUCKET_UPDATE_TIME_PREFIX "DBUT_"
 #define ENTITY_UUID_MAPPING "EUM_"
-#define SENSITIVE_RESOURCE_PREFIX "SR_"
 
 using EntityType = IAccessEntity::Type;
 struct EntityMetastorePrefix
@@ -447,12 +448,6 @@ public:
         return escapeString(name_space) + '_' + TABLE_PARTITION_INFO_PREFIX + uuid + '_';
     }
 
-    static std::string tablePartitionInfoKey(const std::string & name_space, const std::string & uuid, const std::string & partition_id)
-    {
-        /// To keep the partitions have the same order as data parts in bytekv, we add an extra "_" in the key of partition meta
-        return tablePartitionInfoPrefix(name_space, uuid) + partition_id + "_";
-    }
-
     static std::string tableMutationPrefix(const std::string & name_space)
     {
         return escapeString(name_space) + "_" + TABLE_MUTATION_PREFIX;
@@ -559,28 +554,9 @@ public:
         return undoBufferKey(name_space, txn, write_undo_buffer_new_key) + "_";
     }
 
-    static std::string undoBufferStoreKey(
-        const std::string & name_space,
-        const UInt64 & txn,
-        const String & rpc_address,
-        const UndoResource & resource,
-        PlanSegmentInstanceId instance_id,
-        bool write_undo_buffer_new_key)
+    static std::string undoBufferStoreKey(const std::string & name_space, const UInt64 & txn, const String & rpc_address, const UndoResource & resource, bool write_undo_buffer_new_key)
     {
-        return fmt::format(
-            "{}_{}_{}_{}_{}",
-            undoBufferKey(name_space, txn, write_undo_buffer_new_key),
-            escapeString(rpc_address),
-            instance_id.segment_id,
-            instance_id.parallel_id,
-            escapeString(toString(resource.id)));
-    }
-
-    static std::string undoBufferSegmentInstanceKey(
-        const std::string & name_space, const UInt64 & txn, const String & rpc_address, PlanSegmentInstanceId instance_id, bool write_undo_buffer_new_key)
-    {
-        return fmt::format(
-            "{}_{}_{}_{}", undoBufferKey(name_space, txn, write_undo_buffer_new_key), escapeString(rpc_address), instance_id.segment_id, instance_id.parallel_id);
+        return undoBufferKey(name_space, txn, write_undo_buffer_new_key) + '_' + escapeString(rpc_address) + '_' + escapeString(toString(resource.id));
     }
 
     static std::string kvLockKey(const std::string & name_space, const std::string & uuid, const std::string & part_name)
@@ -630,16 +606,6 @@ public:
     static std::string partGCBGJobStatusKey(const std::string & name_space, const std::string & uuid)
     {
         return allPartGCBGJobStatusKeyPrefix(name_space) + uuid;
-    }
-
-    static std::string allPartMoverBGJobStatusKeyPrefix(const std::string & name_space)
-    {
-        return escapeString(name_space) + '_' + PARTMOVER_BG_JOB_STATUS;
-    }
-
-    static std::string partMoverBGJobStatusKey(const std::string & name_space, const std::string & uuid)
-    {
-        return allPartMoverBGJobStatusKeyPrefix(name_space) + uuid;
     }
 
     static std::string allConsumerBGJobStatusKeyPrefix(const std::string & name_space)
@@ -848,30 +814,21 @@ public:
         return escapeString(name_space) + '_' + DETACHED_PART_PREFIX + uuid + '_' + part_name;
     }
 
-    static String sensitiveResourcePrefix(const String & name_space)
-    {
-        return fmt::format("{}_{}", escapeString(name_space), SENSITIVE_RESOURCE_PREFIX);
-    }
-    static String sensitiveResourceKey(const String & name_space, const String & db_name)
-    {
-        return fmt::format("{}{}", sensitiveResourcePrefix(name_space), db_name);
-    }
-
-    static String accessEntityPrefix(EntityType type, const String & name_space)
+    static std::string accessEntityPrefix(EntityType type, const std::string & name_space)
     {
         return fmt::format("{}_{}", escapeString(name_space), getEntityMetastorePrefix(type).prefix);
     }
-    static String accessEntityKey(EntityType type, const String & name_space, const String & name)
+    static std::string accessEntityKey(EntityType type, const std::string & name_space, const std::string & name)
     {
         return fmt::format("{}{}", accessEntityPrefix(type, name_space), name);
     }
 
-    static String accessEntityUUIDNameMappingPrefix(const String & name_space)
+    static std::string accessEntityUUIDNameMappingPrefix(const std::string & name_space)
     {
         return fmt::format("{}_{}", escapeString(name_space), ENTITY_UUID_MAPPING);
     }
 
-    static String accessEntityUUIDNameMappingKey(const String & name_space, const String & uuid)
+    static std::string accessEntityUUIDNameMappingKey(const std::string & name_space, const std::string & uuid)
     {
         return fmt::format("{}{}", accessEntityUUIDNameMappingPrefix(name_space), uuid);
     }
@@ -1027,15 +984,9 @@ public:
     IMetaStore::IteratorPtr getAllDictionaryMeta(const String & name_space);
     std::vector<std::shared_ptr<DB::Protos::DataModelDictionary>> getDictionariesFromTrash(const String & name_space, const String & database);
 
-    void prepareAddDataParts(
-        const String & name_space,
-        const String & table_uuid,
-        const Strings & current_partitions,
-        std::unordered_set<String> & deleting_partitions,
-        const google::protobuf::RepeatedPtrField<Protos::DataModelPart> & parts,
-        BatchCommitRequest & batch_write,
-        const std::vector<String> & expected_parts,
-        bool update_sync_list = false);
+    void prepareAddDataParts(const String & name_space, const String & table_uuid, const Strings & current_partitions,
+                             const google::protobuf::RepeatedPtrField<Protos::DataModelPart> & parts, BatchCommitRequest & batch_write,
+                             const std::vector<String> & expected_parts, bool update_sync_list = false);
     void prepareAddStagedParts(
         const String & name_space,
         const String & table_uuid,
@@ -1081,24 +1032,10 @@ public:
     Strings getAllMutations(const String & name_space, const String & uuid);
     std::multimap<String, String> getAllMutations(const String & name_space);
 
-    void writeUndoBuffer(
-        const String & name_space,
-        const UInt64 & txnID,
-        const String & rpc_address,
-        const String & uuid,
-        UndoResources & resources,
-        PlanSegmentInstanceId instance_id,
-        bool write_undo_buffer_new_key);
+    void writeUndoBuffer(const String & name_space, const UInt64 & txnID, const String & rpc_address, const String & uuid, UndoResources & resources, bool write_undo_buffer_new_key);
 
     void clearUndoBuffer(const String & name_space, const UInt64 & txnID);
-    void clearUndoBuffer(const String & name_space, const UInt64 & txnID, const String & rpc_address, PlanSegmentInstanceId instance_id);
     IMetaStore::IteratorPtr getUndoBuffer(const String & name_space, UInt64 txnID, bool write_undo_buffer_new_key);
-    IMetaStore::IteratorPtr getUndoBuffer(
-        const String & name_space,
-        UInt64 txnID,
-        const String & rpc_address,
-        PlanSegmentInstanceId instance_id,
-        bool write_undo_buffer_new_key);
     IMetaStore::IteratorPtr getAllUndoBuffer(const String & name_space);
 
     void multiDrop(const Strings & keys);
@@ -1259,10 +1196,6 @@ public:
         const String& tbl_uuid, const String& range_start, const String& range_end,
         bool include_start = true, bool include_end = false);
 
-    // Sensitive Resources
-    void putSensitiveResource(const String & name_space, const String & database, const String & table, const String & column, const String & target, bool value) const;
-    std::shared_ptr<Protos::DataModelSensitiveDatabase> getSensitiveResource(const String & name_space, const String & database) const;
-
     // Access Entities
     String getAccessEntity(EntityType type, const String & name_space, const String & name) const;
     Strings getAllAccessEntities(EntityType type, const String & name_space) const;
@@ -1280,16 +1213,12 @@ public:
 
     String getByKey(const String & key);
 
-    IMetaStore::IteratorPtr getByPrefix(const String & prefix, size_t limit = 0);
-
     /**
      * @brief Get all items in the trash state. This is a GC related function.
      *
      * @param limit Limit the results, disabled by passing 0.
-     * @param start_key KV Scan will begin from `start_key` if it's not empty.
      */
-    IMetaStore::IteratorPtr
-    getItemsInTrash(const String & name_space, const String & table_uuid, const size_t & limit, const String & start_key = "");
+    IMetaStore::IteratorPtr getItemsInTrash(const String & name_space, const String & table_uuid, const size_t & limit);
 
     //Object column schema related API
     static String extractTxnIDFromPartialSchemaKey(const String & partial_schema_key);
@@ -1310,9 +1239,6 @@ public:
     void updateObjectPartialSchemaStatus(const String &name_space, const TxnTimestamp & txn_id, const ObjectPartialSchemaStatus & status);
 
     IMetaStore::IteratorPtr getAllDeleteBitmaps(const String & name_space, const String & table_uuid);
-
-    // return successfully removed partitions
-    Strings removePartitions(const String & name_space, const String & table_uuid, const PartitionWithGCStatus & partitions);
 
     /**
      * @brief Get parts partition metrics snapshots in table level.
