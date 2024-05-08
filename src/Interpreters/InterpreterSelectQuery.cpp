@@ -116,7 +116,6 @@
 #include "Interpreters/TreeRewriter.h"
 #include "Storages/SelectQueryInfo.h"
 #include <sstream>
-
 #include <Optimizer/PredicateUtils.h>
 #include <Storages/StorageCloudMergeTree.h>
 
@@ -557,20 +556,12 @@ InterpreterSelectQuery::InterpreterSelectQuery(
                 ASTSelectQuery::Expression::WHERE, makeASTFunction("and", query.where()->clone(), p->clone()));
         }
 
-        // TODO: Yuanning RuntimeFilter
-        // extract runtime_filters as 2nd-stage of prewhere
-        // if (context->getSettingsRef().enable_two_stages_prewhere && query.prewhere()) {
-        //     auto [tmp_runtime_filters, first_stage_filters] = RuntimeFilterUtils::extractExecutableRuntimeFiltersForTwoStagesPrewhere(query.prewhere());
-        //     query.setExpression(ASTSelectQuery::Expression::PREWHERE, first_stage_filters.empty()? nullptr: PredicateUtils::combineConjuncts(first_stage_filters));
-        //     this->runtime_filters = tmp_runtime_filters;
-        // }
-
         query_analyzer = std::make_unique<SelectQueryExpressionAnalyzer>(
             query_ptr,
             syntax_analyzer_result,
             context,
             metadata_snapshot,
-            required_result_column_names,
+            NameSet(required_result_column_names.begin(), required_result_column_names.end()),
             !options.only_analyze,
             options,
             std::move(subquery_for_sets),
@@ -1255,7 +1246,6 @@ void InterpreterSelectQuery::executeImpl(QueryPlan & query_plan, const BlockInpu
                 expressions.prewhere_info->remove_prewhere_column);
 
             prewhere_step->setStepDescription("PREWHERE");
-
             query_plan.addStep(std::move(prewhere_step));
         }
     }
@@ -2467,7 +2457,6 @@ static Aggregator::Params getAggregatorParams(
         group_by_two_level_threshold,
         group_by_two_level_threshold_bytes,
         settings.max_bytes_before_external_group_by,
-        settings.spill_mode == SpillMode::AUTO,
         settings.spill_buffer_bytes_before_external_group_by,
         settings.empty_result_for_aggregation_by_empty_set || (keys.empty() && query_analyzer.hasConstAggregationKeys()),
         context.getTemporaryVolume(),
@@ -2756,8 +2745,7 @@ void InterpreterSelectQuery::executeWindow(QueryPlan & query_plan)
                 settings.remerge_sort_lowered_memory_bytes_ratio,
                 settings.max_bytes_before_external_sort,
                 context->getTemporaryVolume(),
-                settings.min_free_disk_space_for_temporary_data,
-                settings.spill_mode == SpillMode::AUTO);
+                settings.min_free_disk_space_for_temporary_data);
             merge_sorting_step->setStepDescription("Merge sorted blocks for window '" + w.window_name + "'");
             query_plan.addStep(std::move(merge_sorting_step));
 
@@ -2828,8 +2816,7 @@ void InterpreterSelectQuery::executeOrder(QueryPlan & query_plan, InputOrderInfo
         settings.remerge_sort_lowered_memory_bytes_ratio,
         settings.max_bytes_before_external_sort,
         context->getTemporaryVolume(),
-        settings.min_free_disk_space_for_temporary_data,
-        settings.spill_mode == SpillMode::AUTO);
+        settings.min_free_disk_space_for_temporary_data);
 
     merge_sorting_step->setStepDescription("Merge sorted blocks for ORDER BY");
     query_plan.addStep(std::move(merge_sorting_step));
