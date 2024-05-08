@@ -1587,7 +1587,6 @@ void Context::setUser(const String & name, const String & password, const Poco::
 {
     //CNCH multi-tenant user name pattern from gateway client: {tenant_id}`{user_name}
     String user = name;
-    bool pushed = false;
     if (auto pos = user.find('`'); pos != String::npos)
     {
         auto tenant_id = String(user.c_str(), pos);
@@ -2597,16 +2596,6 @@ void Context::setProgressCallback(ProgressCallback callback)
 ProgressCallback Context::getProgressCallback() const
 {
     return progress_callback;
-}
-
-void Context::setInternalProgressCallback(ProgressCallback callback)
-{
-    internal_progress_callback = callback;
-}
-
-ProgressCallback Context::getInternalProgressCallback() const
-{
-    return internal_progress_callback;
 }
 
 void Context::setProcessListEntry(std::shared_ptr<ProcessListEntry> process_list_entry_)
