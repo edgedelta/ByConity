@@ -15,7 +15,6 @@
 
 #pragma once
 
-#include <atomic>
 #include <map>
 #include <optional>
 #include <set>
@@ -31,23 +30,22 @@
 #include <Statistics/ExportSymbols.h>
 #include <Statistics/StatisticsBase.h>
 // #include <Transaction/ICnchTransaction.h>
-#include <Catalog/IMetastore.h>
-#include <Interpreters/DistributedStages/PlanSegmentInstance.h>
 #include <ResourceManagement/CommonData.h>
-#include <Storages/IStorage_fwd.h>
 #include <Storages/MergeTree/CnchMergeTreeMutationEntry.h>
 #include <Storages/MergeTree/MergeTreeDataPartCNCH_fwd.h>
-#include <Storages/StorageSnapshot.h>
 #include <Transaction/TransactionCommon.h>
 #include <Transaction/TxnTimestamp.h>
 #include <cppkafka/cppkafka.h>
 #include "common/types.h"
+#include <Common/Exception.h>
 #include <Common/Config/MetastoreConfig.h>
 #include <Common/Configurations.h>
 #include <Common/DNSResolver.h>
-#include <Common/Exception.h>
 #include <Common/HostWithPorts.h>
 #include <common/getFQDNOrHostName.h>
+#include "Storages/IStorage_fwd.h"
+#include <Storages/StorageSnapshot.h>
+#include <Catalog/IMetastore.h>
 // #include <Access/MaskingPolicyDataModel.h>
 
 namespace DB::ErrorCodes
@@ -277,10 +275,6 @@ public:
 
     ServerDataPartsVector getTrashedPartsInPartitions(const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts, VisibilityLevel visibility = VisibilityLevel::Visible);
 
-    bool hasTrashedPartsInPartition(const ConstStoragePtr & storage, const String & partition);
-
-    ServerDataPartsWithDBM getAllServerDataPartsWithDBM(const ConstStoragePtr & storage, const TxnTimestamp & ts, const Context * session_context, VisibilityLevel visibility = VisibilityLevel::Visible);
-
     ServerDataPartsVector getAllServerDataParts(const ConstStoragePtr & storage, const TxnTimestamp & ts, const Context * session_context, VisibilityLevel visibility = VisibilityLevel::Visible);
     DataPartsVector getDataPartsByNames(const NameSet & names, const StoragePtr & table, const TxnTimestamp & ts);
     DataPartsVector getStagedDataPartsByNames(const NameSet & names, const StoragePtr & table, const TxnTimestamp & ts);
@@ -335,8 +329,6 @@ public:
     void dropAllPart(const StoragePtr & storage, const TxnTimestamp & txnID, const TxnTimestamp & ts);
 
     std::vector<std::shared_ptr<MergeTreePartition>> getPartitionList(const ConstStoragePtr & table, const Context * session_context);
-    PartitionWithGCStatus getPartitionsWithGCStatus(const StoragePtr & table, const Strings & required_partitions);
-
     std::vector<Protos::LastModificationTimeHint> getLastModificationTimeHints(const ConstStoragePtr & table);
 
     template<typename Map>
@@ -448,24 +440,14 @@ public:
     void clearParts(const StoragePtr & table, const CommitItems & commit_data);
 
     /// write undo buffer before write vfs
-    void writeUndoBuffer(
-        const StorageID & storage_id, const TxnTimestamp & txnID, const UndoResources & resources, PlanSegmentInstanceId instance_id = {});
-    void writeUndoBuffer(
-        const StorageID & storage_id, const TxnTimestamp & txnID, UndoResources && resources, PlanSegmentInstanceId instance_id = {});
+    void writeUndoBuffer(const StorageID & storage_id, const TxnTimestamp & txnID, const UndoResources & resources);
+    void writeUndoBuffer(const StorageID & storage_id, const TxnTimestamp & txnID, UndoResources && resources);
 
     /// clear undo buffer
     void clearUndoBuffer(const TxnTimestamp & txnID);
 
-    /// clear undo buffer
-    void clearUndoBuffer(const TxnTimestamp & txnID, const String & rpc_address, PlanSegmentInstanceId instance_id);
-
     /// return storage uuid -> undo resources
     std::unordered_map<String, UndoResources> getUndoBuffer(const TxnTimestamp & txnID);
-    std::unordered_map<String, UndoResources>
-    getUndoBuffer(const TxnTimestamp & txnID, const String & rpc_address, PlanSegmentInstanceId instance_id);
-    /// execute undos, returns whether clean_fs_lock_by_scan is true
-    uint32_t applyUndos(
-        const TransactionRecord & txn_record, const StoragePtr & table, const UndoResources & resources, bool & clean_fs_lock_by_scan);
 
     /// return txn_id -> undo resources
     std::unordered_map<UInt64, UndoResources> getAllUndoBuffer();
@@ -614,14 +596,10 @@ public:
      * Trashed items including data parts, staged parts, and deleted bitmaps.
      *
      * @param limit Limit the result retured. Disabled with value `0`.
-     * @param start_key When provided, KV scan will start from the `start_key`,
-     * and it will be updated after calling this method.
      * @return Trashed parts.
      */
-    TrashItems getDataItemsInTrash(const StoragePtr & storage, const size_t & limit = 0, String * start_key = nullptr);
+    TrashItems getDataItemsInTrash(const StoragePtr & storage, const size_t & limit = 0);
 
-    void markPartitionDeleted(const StoragePtr & table, const Strings & partitions);
-    void deletePartitionsMetadata(const StoragePtr & table, const PartitionWithGCStatus & partitions);
 
     /// APIs to sync data parts for preallocate mode
     std::vector<TxnTimestamp> getSyncList(const StoragePtr & table);
@@ -858,16 +836,13 @@ public:
     void commitObjectPartialSchema(const TxnTimestamp & txn_id);
     void abortObjectPartialSchema(const TxnTimestamp & txn_id);
     void initStorageObjectSchema(StoragePtr & res);
-    // Sensitive Resources
-    void putSensitiveResource(const String & database, const String & table, const String & column, const String & target, bool value);
-    std::shared_ptr<Protos::DataModelSensitiveDatabase> getSensitiveResource(const String & database);
 
     // Access Entities
     std::optional<AccessEntityModel> tryGetAccessEntity(EntityType type, const String & name);
     std::vector<AccessEntityModel> getAllAccessEntities(EntityType type);
     std::optional<String> tryGetAccessEntityName(const UUID & uuid);
     void dropAccessEntity(EntityType type, const UUID & uuid, const String & name);
-    void putAccessEntity(EntityType type, AccessEntityModel & new_access_entity, const AccessEntityModel & old_access_entity, bool replace_if_exists = true);
+    void putAccessEntity(EntityType type, AccessEntityModel & new_access_entity, AccessEntityModel & old_access_entity, bool replace_if_exists = true);
 
 
 private:
@@ -1052,5 +1027,6 @@ void remove_not_exist_items(std::vector<T> & items_to_write, std::vector<size_t>
 }
 
 using CatalogPtr = std::shared_ptr<Catalog>;
+void notifyOtherServersOnAccessEntityChange(const Context & context, EntityType type, const String & tenanted_name, const UUID & uuid);
 void fillUUIDForDictionary(DB::Protos::DataModelDictionary &);
 }
