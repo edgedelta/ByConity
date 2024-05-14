@@ -187,4 +187,34 @@ PlanNodePtr PropertyEnforcer::enforceOffloadingGatherNode(const PlanNodePtr & no
         = std::make_unique<ExchangeStep>(DataStreams{node->getStep()->getOutputStream()}, ExchangeMode::GATHER, Partitioning{}, true);
     return PlanNodeBase::createPlanNode(context.nextNodeId(), std::move(gather_step), PlanNodes{node});
 }
+
+PlanNodePtr PropertyEnforcer::enforceOffloadingGatherNode(const PlanNodePtr & node, Context & context)
+{
+    // TableWrite or Projection-TableWrite don't need gather
+    if (node->getType() == IQueryPlanStep::Type::TableFinish
+        || (node->getChildren().size() == 1 && node->getChildren()[0]->getType() == IQueryPlanStep::Type::TableFinish))
+        return node;
+
+    // already Exchange
+    if (node->getType() == IQueryPlanStep::Type::Exchange
+        || (node->getChildren().size() == 1 && node->getChildren()[0]->getType() == IQueryPlanStep::Type::Exchange))
+            return node;
+
+    auto * projection = dynamic_cast<ProjectionStep *>(node->getStep().get());
+    // add gather before final projection
+    if (projection && projection->isFinalProject())
+    {
+        // offloading_with_query_plan need keep_order
+        auto gather_step = std::make_unique<ExchangeStep>(
+        DataStreams{node->getChildren()[0]->getStep()->getOutputStream()}, ExchangeMode::GATHER, Partitioning{}, true);
+        auto gather_node = PlanNodeBase::createPlanNode(context.nextNodeId(), std::move(gather_step), node->getChildren());
+        node->replaceChildren(PlanNodes{gather_node});
+        return node;
+    }
+    
+    // offloading_with_query_plan need keep_order
+    auto gather_step
+        = std::make_unique<ExchangeStep>(DataStreams{node->getStep()->getOutputStream()}, ExchangeMode::GATHER, Partitioning{}, true);
+    return PlanNodeBase::createPlanNode(context.nextNodeId(), std::move(gather_step), PlanNodes{node});
+}
 }
