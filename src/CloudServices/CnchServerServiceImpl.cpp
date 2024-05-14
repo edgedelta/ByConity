@@ -32,6 +32,9 @@
 #include <Statistics/AutoStatisticsRpcUtils.h>
 #include <Statistics/AutoStatisticsManager.h>
 #include <Common/Exception.h>
+#include <Parsers/ASTSerDerHelper.h>
+#include <IO/ReadBufferFromString.h>
+#include <Optimizer/SelectQueryInfoHelper.h>
 #include <DataTypes/ObjectUtils.h>
 #include <Parsers/ASTSerDerHelper.h>
 #include <IO/ReadBufferFromString.h>
