@@ -1794,9 +1794,8 @@ void CnchServerServiceImpl::notifyAccessEntityChange(
                 // KVAccessStorage::onAccessEntityChanged will find the newly update/deleted access entity and notify all subscribers
                 if (toString(type) == entity_type)
                 {
-                    const auto storage = gc->getAccessControlManager().getStorage(id);
-                    if (storage)
-                        storage->find(type, name);
+                    if (auto kv_access_storage = std::dynamic_pointer_cast<KVAccessStorage>(gc->getAccessControlManager().getStorage(id)))
+                        kv_access_storage->onAccessEntityChanged(type, name);
                 }
 
             }
