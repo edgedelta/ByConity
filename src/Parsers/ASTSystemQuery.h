@@ -125,7 +125,6 @@ public:
         FETCH_PARTS,
         METASTORE,
         CLEAR_BROKEN_TABLES,
-        DEDUP_WITH_HIGH_PRIORITY, // dedup with high priority db.table [partition partition_expr]
         DEDUP, // dedup db.table [partition partition_expr] for repair
         SYNC_DEDUP_WORKER,
         START_DEDUP_WORKER,
@@ -182,11 +181,7 @@ public:
     // For GC and DEDUP
     ASTPtr partition; // The value or ID of the partition is stored here.
 
-    // For DEDUP
-    bool specify_bucket = false;
-    UInt64 bucket_number;
-
-    /// for CLEAN TRANSACTION txn_id
+    /// for CLEAN TRANSACTION txn_id, RELEASE MEMORY LOCK [db.tb]/[OF TXN xxx]
     bool specify_txn = false;
     UInt64 txn_id;
 

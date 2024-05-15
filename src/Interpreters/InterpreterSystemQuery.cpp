@@ -64,8 +64,6 @@
 #include <BridgeHelper/CatBoostLibraryBridgeHelper.h>
 #include <Access/ContextAccess.h>
 #include <Access/AllowedClientHosts.h>
-#include <CloudServices/CnchBGThreadsMap.h>
-#include <CloudServices/DedupWorkerManager.h>
 #include <Databases/IDatabase.h>
 #include <DataStreams/OneBlockInputStream.h>
 #include <Disks/DiskRestartProxy.h>
@@ -92,7 +90,6 @@
 #include <Interpreters/CnchQueryMetrics/QueryMetricLog.h>
 #include <Interpreters/CnchQueryMetrics/QueryWorkerMetricLog.h>
 #include <Interpreters/AutoStatsTaskLog.h>
-#include <Interpreters/RemoteReadLog.h>
 #include <common/sleep.h>
 #include <Core/UUID.h>
 #include <Interpreters/StorageID.h>
@@ -443,8 +440,7 @@ BlockIO InterpreterSystemQuery::execute()
                 [&] { if (auto opentelemetry_span_log = getContext()->getOpenTelemetrySpanLog()) opentelemetry_span_log->flush(true); },
                 [&] { if (auto zookeeper_log = getContext()->getZooKeeperLog()) zookeeper_log->flush(true); },
                 [&] { if (auto processors_profile_log = getContext()->getProcessorsProfileLog()) processors_profile_log->flush(true); },
-                [&] { if (auto auto_stats_task_log = getContext()->getAutoStatsTaskLog()) auto_stats_task_log->flush(true); },
-                [&] { if (auto remote_read_log = getContext()->getRemoteReadLog()) remote_read_log->flush(true); }
+                [&] { if (auto auto_stats_task_log = getContext()->getAutoStatsTaskLog()) auto_stats_task_log->flush(true); }
             );
             break;
         }
@@ -523,9 +519,6 @@ BlockIO InterpreterSystemQuery::executeCnchCommand(ASTSystemQuery & query, Conte
             break;
         case Type::GC:
             executeGc(query);
-            break;
-        case Type::DEDUP_WITH_HIGH_PRIORITY:
-            dedupWithHighPriority(query);
             break;
         case Type::DEDUP:
             executeDedup(query);
@@ -1222,37 +1215,9 @@ void InterpreterSystemQuery::executeGc(const ASTSystemQuery & query)
     if (auto server_type = local_context->getServerType(); server_type != ServerType::cnch_server)
         throw Exception("SYSTEM GC is only available on CNCH server", ErrorCodes::NOT_IMPLEMENTED);
 
-    StoragePtr table = DatabaseCatalog::instance().getTable(table_id, getContext());
-    /// Try to forward query to the target server if needed
-    if (getContext()->getSettings().enable_auto_query_forwarding)
-    {
-        auto cnch_table_helper = CnchStorageCommonHelper(table->getStorageID(), table->getDatabaseName(), table->getTableName());
-        if (cnch_table_helper.forwardQueryToServerIfNeeded(getContext(), table->getStorageID()))
-            return;
-    }
-
-    CnchPartGCThread gc_thread(local_context, table->getStorageID());
+    auto storage = DatabaseCatalog::instance().getTable(table_id, local_context);
+    CnchPartGCThread gc_thread(local_context, storage->getStorageID());
     gc_thread.executeManually(query.partition, local_context);
-}
-
-void InterpreterSystemQuery::dedupWithHighPriority(const ASTSystemQuery & query)
-{
-    if (getContext()->getServerType() != ServerType::cnch_server)
-        throw Exception("SYSTEM DEDUP WITH HIGH PRIORITY is only available on CNCH server", ErrorCodes::NOT_IMPLEMENTED);
-
-    StoragePtr table = DatabaseCatalog::instance().getTable(table_id, getContext());
-
-    /// Try to forward query to the target server if needs to
-    if (getContext()->getSettings().enable_auto_query_forwarding)
-    {
-        auto cnch_table_helper = CnchStorageCommonHelper(table->getStorageID(), table->getDatabaseName(), table->getTableName());
-        if (cnch_table_helper.forwardQueryToServerIfNeeded(getContext(), table->getStorageID()))
-            return;
-    }
-
-    auto dedup_thread = getContext()->getCnchBGThreadsMap(CnchBGThread::DedupWorker)->tryGetThread(table->getStorageID());
-    if (auto dedup_worker_manager = dynamic_cast<DedupWorkerManager *>(dedup_thread.get()))
-        dedup_worker_manager->dedupWithHighPriority(query.partition, getContext());
 }
 
 void InterpreterSystemQuery::executeDedup(const ASTSystemQuery & query)
@@ -1262,7 +1227,7 @@ void InterpreterSystemQuery::executeDedup(const ASTSystemQuery & query)
 
     auto storage = DatabaseCatalog::instance().getTable(table_id, getContext());
     if (auto * cnch_table = dynamic_cast<StorageCnchMergeTree *>(storage.get()))
-        cnch_table->executeDedupForRepair(query, getContext());
+        cnch_table->executeDedupForRepair(query.partition, getContext());
     else
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Table {} is not a CnchMergeTree", table_id.getNameForLogs());
 }
