@@ -125,6 +125,7 @@ public:
         FETCH_PARTS,
         METASTORE,
         CLEAR_BROKEN_TABLES,
+        DEDUP_WITH_HIGH_PRIORITY, // dedup with high priority db.table [partition partition_expr]
         DEDUP, // dedup db.table [partition partition_expr] for repair
         SYNC_DEDUP_WORKER,
         START_DEDUP_WORKER,
@@ -144,6 +145,7 @@ public:
         START_VIEW,
         STOP_VIEW,
         DROP_VIEW_META,
+        RELEASE_MEMORY_LOCK, /// RELEASE MEMORY LOCK [db.tb]/[OF TXN xxx]
         END
     };
 
@@ -180,7 +182,12 @@ public:
     // For GC and DEDUP
     ASTPtr partition; // The value or ID of the partition is stored here.
 
+    // For DEDUP
+    bool specify_bucket = false;
+    UInt64 bucket_number;
+
     /// for CLEAN TRANSACTION txn_id
+    bool specify_txn = false;
     UInt64 txn_id;
 
     String getID(char) const override { return "SYSTEM query"; }

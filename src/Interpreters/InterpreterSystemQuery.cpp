@@ -64,6 +64,8 @@
 #include <BridgeHelper/CatBoostLibraryBridgeHelper.h>
 #include <Access/ContextAccess.h>
 #include <Access/AllowedClientHosts.h>
+#include <CloudServices/CnchBGThreadsMap.h>
+#include <CloudServices/DedupWorkerManager.h>
 #include <Databases/IDatabase.h>
 #include <DataStreams/OneBlockInputStream.h>
 #include <Disks/DiskRestartProxy.h>
@@ -90,7 +92,11 @@
 #include <Interpreters/CnchQueryMetrics/QueryMetricLog.h>
 #include <Interpreters/CnchQueryMetrics/QueryWorkerMetricLog.h>
 #include <Interpreters/AutoStatsTaskLog.h>
-#include "common/sleep.h"
+#include <common/sleep.h>
+#include <Core/UUID.h>
+#include <Interpreters/StorageID.h>
+#include <Storages/StorageCnchMergeTree.h>
+#include <Transaction/LockManager.h>
 
 #if !defined(ARCADIA_BUILD)
 #    include "config_core.h"
@@ -509,10 +515,15 @@ BlockIO InterpreterSystemQuery::executeCnchCommand(ASTSystemQuery & query, Conte
         case Type::STOP_CLUSTER:
         case Type::START_VIEW:
         case Type::STOP_VIEW:
+        case Type::STOP_MOVES:
+        case Type::START_MOVES:
             executeBGTaskInCnchServer(system_context, query.type);
             break;
         case Type::GC:
             executeGc(query);
+            break;
+        case Type::DEDUP_WITH_HIGH_PRIORITY:
+            dedupWithHighPriority(query);
             break;
         case Type::DEDUP:
             executeDedup(query);
@@ -549,6 +560,9 @@ BlockIO InterpreterSystemQuery::executeCnchCommand(ASTSystemQuery & query, Conte
             break;
         case Type::DROP_VIEW_META:
             dropMvMeta(query);
+            break;
+        case Type::RELEASE_MEMORY_LOCK:
+            releaseMemoryLock(query, table_id, system_context);
             break;
         default:
             throw Exception(ErrorCodes::NOT_IMPLEMENTED, "System command {} is not supported in CNCH", ASTSystemQuery::typeToString(query.type));
@@ -724,6 +738,12 @@ void InterpreterSystemQuery::executeBGTaskInCnchServer(ContextMutablePtr & syste
             break;
         case Type::STOP_VIEW:
             daemon_manager->controlDaemonJob(storage->getStorageID(), CnchBGThreadType::CnchRefreshMaterializedView, CnchBGThreadAction::Stop, CurrentThread::getQueryId().toString());
+            break;
+        case Type::START_MOVES:
+            daemon_manager->controlDaemonJob(storage->getStorageID(), CnchBGThreadType::PartMover, CnchBGThreadAction::Start, CurrentThread::getQueryId().toString());
+            break;
+        case Type::STOP_MOVES:
+            daemon_manager->controlDaemonJob(storage->getStorageID(), CnchBGThreadType::PartMover, CnchBGThreadAction::Stop, CurrentThread::getQueryId().toString());
             break;
         default:
             throw Exception("Unknown command type " + toString(ASTSystemQuery::typeToString(type)), ErrorCodes::LOGICAL_ERROR);
@@ -1200,9 +1220,37 @@ void InterpreterSystemQuery::executeGc(const ASTSystemQuery & query)
     if (auto server_type = local_context->getServerType(); server_type != ServerType::cnch_server)
         throw Exception("SYSTEM GC is only available on CNCH server", ErrorCodes::NOT_IMPLEMENTED);
 
-    auto storage = DatabaseCatalog::instance().getTable(table_id, local_context);
-    CnchPartGCThread gc_thread(local_context, storage->getStorageID());
+    StoragePtr table = DatabaseCatalog::instance().getTable(table_id, getContext());
+    /// Try to forward query to the target server if needed
+    if (getContext()->getSettings().enable_auto_query_forwarding)
+    {
+        auto cnch_table_helper = CnchStorageCommonHelper(table->getStorageID(), table->getDatabaseName(), table->getTableName());
+        if (cnch_table_helper.forwardQueryToServerIfNeeded(getContext(), table->getStorageID()))
+            return;
+    }
+
+    CnchPartGCThread gc_thread(local_context, table->getStorageID());
     gc_thread.executeManually(query.partition, local_context);
+}
+
+void InterpreterSystemQuery::dedupWithHighPriority(const ASTSystemQuery & query)
+{
+    if (getContext()->getServerType() != ServerType::cnch_server)
+        throw Exception("SYSTEM DEDUP WITH HIGH PRIORITY is only available on CNCH server", ErrorCodes::NOT_IMPLEMENTED);
+
+    StoragePtr table = DatabaseCatalog::instance().getTable(table_id, getContext());
+
+    /// Try to forward query to the target server if needs to
+    if (getContext()->getSettings().enable_auto_query_forwarding)
+    {
+        auto cnch_table_helper = CnchStorageCommonHelper(table->getStorageID(), table->getDatabaseName(), table->getTableName());
+        if (cnch_table_helper.forwardQueryToServerIfNeeded(getContext(), table->getStorageID()))
+            return;
+    }
+
+    auto dedup_thread = getContext()->getCnchBGThreadsMap(CnchBGThread::DedupWorker)->tryGetThread(table->getStorageID());
+    if (auto dedup_worker_manager = dynamic_cast<DedupWorkerManager *>(dedup_thread.get()))
+        dedup_worker_manager->dedupWithHighPriority(query.partition, getContext());
 }
 
 void InterpreterSystemQuery::executeDedup(const ASTSystemQuery & query)
@@ -1212,7 +1260,7 @@ void InterpreterSystemQuery::executeDedup(const ASTSystemQuery & query)
 
     auto storage = DatabaseCatalog::instance().getTable(table_id, getContext());
     if (auto * cnch_table = dynamic_cast<StorageCnchMergeTree *>(storage.get()))
-        cnch_table->executeDedupForRepair(query.partition, getContext());
+        cnch_table->executeDedupForRepair(query, getContext());
     else
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Table {} is not a CnchMergeTree", table_id.getNameForLogs());
 }
@@ -1728,6 +1776,24 @@ void InterpreterSystemQuery::lockMemoryLock(const ASTSystemQuery & query, const 
     cnch_lock->lock();
     LOG_DEBUG(log, "Acquired lock in {} ms", lock_watch.elapsedMilliseconds());
     sleepForSeconds(query.seconds);
+}
+
+void InterpreterSystemQuery::releaseMemoryLock(const ASTSystemQuery & query, const StorageID & table_id, ContextPtr local_context)
+{
+    if (query.specify_txn)
+    {
+        /// SYSTEM RELEASE MEMORY LOCK OF TXN xxx;
+        LockManager::instance().releaseLocksForTxn(query.txn_id, *local_context);
+    }
+    else
+    {
+        /// SYSTEM RELEASE MEMORY LOCK db.table;
+        auto storage = DatabaseCatalog::instance().getTable(table_id, local_context);
+        if (!dynamic_cast<StorageCnchMergeTree *>(storage.get()))
+            throw Exception("StorageCnchMergeTree is expected, but got " + storage->getName(), ErrorCodes::BAD_ARGUMENTS);
+
+        LockManager::instance().releaseLocksForTable(storage->getCnchStorageID(), *local_context);
+    }
 }
 
 }

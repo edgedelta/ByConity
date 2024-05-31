@@ -43,6 +43,7 @@ struct ManipulationTaskParams
     String create_table_query; /// non-empty if the task needs to create temporary table
     StoragePtr storage; /// On which storage this manipulate task should run
     bool is_bucket_table{false}; /// mark if the table is treated as bucket table when create this manipulation task
+    bool need_remove_expired_values{false}; /// Flag for TTL Merge and MATERIALIZE TTL.
 
     ServerDataPartsVector source_parts;         /// Used by server
     MergeTreeDataPartsVector source_data_parts; /// Used by worker
@@ -69,11 +70,11 @@ struct ManipulationTaskParams
     void assignSourceParts(ServerDataPartsVector parts);
     void assignSourceParts(MergeTreeDataPartsVector parts);
 
-    void assignParts(MergeTreeMutableDataPartsVector parts);
+    void assignParts(MergeTreeMutableDataPartsVector parts, const std::function<UInt64()> & ts_getter);
 
 private:
     template <class Vec>
-    void assignSourcePartsImpl(const Vec & parts);
+    void assignSourcePartsImpl(const Vec & parts, UInt64 ts = 0);
 };
 
 }

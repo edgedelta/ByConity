@@ -18,20 +18,20 @@
 #include <optional>
 #include <variant>
 
+#include <Columns/ColumnsNumber.h>
 #include <DataStreams/RemoteQueryExecutor.h>
 #include <DataStreams/RemoteQueryExecutorReadContext.h>
 #include <DataTypes/DataTypeAggregateFunction.h>
+#include <Interpreters/SegmentScheduler.h>
 #include <Processors/Exchange/DataTrans/DataTrans_fwd.h>
 #include <Processors/Exchange/DataTrans/IBroadcastReceiver.h>
 #include <Processors/Exchange/ExchangeOptions.h>
 #include <Processors/Exchange/ExchangeSource.h>
 #include <Processors/ISource.h>
 #include <Processors/Transforms/AggregatingTransform.h>
-#include <common/logger_useful.h>
 #include <Common/Exception.h>
 #include <Common/time.h>
-#include <Columns/ColumnsNumber.h>
-#include <Interpreters/SegmentScheduler.h>
+#include <common/logger_useful.h>
 
 namespace DB
 {
@@ -132,7 +132,7 @@ std::optional<Chunk> ExchangeSource::tryGenerate()
 
 void ExchangeSource::onCancel()
 {
-    LOG_TRACE(logger, "ExchangeSource {} onCancel", getName());
+    LOG_TRACE(logger, "{} onCancel", getName());
     was_query_canceled = true;
     receiver->finish(BroadcastStatusCode::RECV_CANCELLED, "Cancelled by pipeline");
 }
@@ -142,9 +142,28 @@ void ExchangeSource::checkBroadcastStatus(const BroadcastStatus & status) const
     if (status.code > BroadcastStatusCode::RECV_REACH_LIMIT)
     {
         if (status.is_modifer)
-            throw Exception(
-                getName() + " fail to receive data: " + status.message + " code: " + std::to_string(status.code),
-                ErrorCodes::EXCHANGE_DATA_TRANS_EXCEPTION);
+        {
+            if(status.code == BroadcastStatusCode::RECV_TIMEOUT)
+            {
+                throw Exception(
+                    ErrorCodes::TIMEOUT_EXCEEDED,
+                    "Query {} receive data timeout, maybe you can increase settings max_execution_time. Debug info for source {}: {}",
+                    CurrentThread::getQueryId(),
+                    getName(),
+                    status.message);
+            }
+            else 
+            {
+                throw Exception(
+                    ErrorCodes::EXCHANGE_DATA_TRANS_EXCEPTION,
+                    "Query {} cancel receive data due to unknown reason with code {}, try to find real error in log or query_log. Debug "
+                    "info for source {}: {}",
+                    CurrentThread::getQueryId(),
+                    status.code,
+                    getName(),
+                    status.message);
+            }
+        }
 
         // FIXME
         // if (fetch_exception_from_scheduler)
@@ -160,8 +179,13 @@ void ExchangeSource::checkBroadcastStatus(const BroadcastStatus & status) const
         // If receiver is finished and not cancelly by pipeline, we should cancel pipeline here
         if (status.code != BroadcastStatusCode::RECV_CANCELLED)
             throw Exception(
-                getName() + " will cancel with finish message: " + status.message + " code: " + std::to_string(status.code),
-                ErrorCodes::QUERY_WAS_CANCELLED);
+                ErrorCodes::QUERY_WAS_CANCELLED,
+                "Query {} cancel receive data due to unknown reason with code {}, try to find real error in log or query_log. Debug "
+                "info for source {}: {}",
+                CurrentThread::getQueryId(),
+                status.code,
+                getName(),
+                status.message);
     }
 }
 

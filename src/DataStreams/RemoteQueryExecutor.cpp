@@ -203,6 +203,7 @@ void RemoteQueryExecutor::sendQuery()
     auto timeouts = ConnectionTimeouts::getTCPTimeoutsWithFailover(settings);
     ClientInfo modified_client_info = context->getClientInfo();
     
+    // change query kind to secondary query here
     if (!is_server_forwarding)
         modified_client_info.query_kind = ClientInfo::QueryKind::SECONDARY_QUERY;
 
@@ -601,10 +602,6 @@ void RemoteQueryExecutor::parseQueryWorkerMetrics(const QueryWorkerMetricElement
             context->getQueryContext()->insertQueryWorkerMetricsElement(*element);
         else if (context->getServerType() == ServerType::cnch_worker)  /// For cnch aggre worker, store the elements and forward them to cnch server
             context->getQueryContext()->addQueryWorkerMetricElements(std::move(element));
-
-        auto internal_progress_callback = context->getInternalProgressCallback();
-        if (internal_progress_callback)
-            internal_progress_callback({element->read_rows, element->read_bytes, 0, 0, element->read_cached_bytes});
     }
 }
 

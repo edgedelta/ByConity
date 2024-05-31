@@ -363,12 +363,31 @@ bool ParserSystemQuery::parseImpl(IParser::Pos & pos, ASTPtr & node, Expected & 
             break;
         }
 
+        case Type::DEDUP_WITH_HIGH_PRIORITY:
+        {
+            if (!parseDatabaseAndTableName(pos, expected, res->database, res->table))
+                return false;
+            if (!ParserKeyword{"PARTITION"}.ignore(pos, expected))
+                return false;
+            if (!parser_partition.parse(pos, res->partition, expected))
+                return false;
+            break;
+        }
+
         case Type::DEDUP:
         {
             if (!parseDatabaseAndTableName(pos, expected, res->database, res->table))
                 return false;
             if (ParserKeyword{"PARTITION"}.ignore(pos, expected) && !parser_partition.parse(pos, res->partition, expected))
                 return false;
+            if (ParserKeyword{"BUCKET"}.ignore(pos, expected))
+            {
+                ASTPtr ast;
+                if (!ParserUnsignedInteger().parse(pos, ast, expected))
+                    return false;
+                res->specify_bucket = true;
+                res->bucket_number = safeGet<UInt64>(ast->as<ASTLiteral>()->value);
+            }
             if (!ParserKeyword{"FOR REPAIR"}.ignore(pos, expected))
                 return false;
             break;
@@ -437,6 +456,21 @@ bool ParserSystemQuery::parseImpl(IParser::Pos & pos, ASTPtr & node, Expected & 
             if (!parseDatabaseAndTableName(pos, expected, res->database, res->table))
                 return false;
             break;
+
+        case Type::RELEASE_MEMORY_LOCK:
+        {
+            if (ParserKeyword{"OF"}.ignore(pos, expected))
+            {
+                if (!ParserKeyword{"TXN"}.ignore(pos, expected))
+                    return false;
+                if (!parse_uint(pos, expected, res->txn_id))
+                    return false;
+                res->specify_txn = true;
+            }
+            else
+                parseDatabaseAndTableName(pos, expected, res->database, res->table);
+            break;
+        }
 
         default:
             /// There are no [db.table] after COMMAND NAME

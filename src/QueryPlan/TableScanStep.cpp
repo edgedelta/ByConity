@@ -1154,9 +1154,14 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
 
     stage_watch.restart();
     ASTPtr partition_filter;
+    auto mutable_context = Context::createCopy(build_context.context);
     if (query_info.partition_filter)
         partition_filter = query_info.partition_filter->clone();
-    auto interpreter = std::make_shared<InterpreterSelectQuery>(query_info.query, build_context.context, options);
+    // FIXME: It is used to work around partition keys being chosen as PREWHERE. In long term, we should rely on
+    // enable_partition_filter_push_down = 1 to do the stuff
+    if (mutable_context->getSettingsRef().remove_partition_filter_on_worker)
+        mutable_context->setSetting("enable_partition_filter_push_down", 1U);
+    auto interpreter = std::make_shared<InterpreterSelectQuery>(query_info.query, mutable_context, options);
     interpreter->execute(true);
     auto backup_input_order_info = query_info.input_order_info;
     query_info = interpreter->getQueryInfo();
@@ -1168,7 +1173,8 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
     if (query_info.prewhere_info)
         query_info.prewhere_info->need_filter = true;
 
-    query_info.partition_filter = partition_filter;
+    if (partition_filter)
+        query_info.partition_filter = partition_filter;
 
     if (use_projection_index)
     {
@@ -1429,6 +1435,7 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
                     settings.group_by_two_level_threshold,
                     settings.group_by_two_level_threshold_bytes,
                     settings.max_bytes_before_external_group_by,
+                    settings.spill_mode == SpillMode::AUTO,
                     settings.spill_buffer_bytes_before_external_group_by,
                     settings.empty_result_for_aggregation_by_empty_set,
                     context->getTemporaryVolume(),
@@ -1462,6 +1469,7 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
                     settings.group_by_two_level_threshold,
                     settings.group_by_two_level_threshold_bytes,
                     settings.max_bytes_before_external_group_by,
+                    settings.spill_mode == SpillMode::AUTO,
                     settings.spill_buffer_bytes_before_external_group_by,
                     settings.empty_result_for_aggregation_by_empty_set,
                     context->getTemporaryVolume(),
@@ -1653,13 +1661,13 @@ void TableScanStep::allocate(ContextPtr context)
         query_info.syntax_analyzer_result = tree_rewriter_result;
     }
 
+    query_info = fillQueryInfo(context);
     original_table = storage_id.table_name;
     storage_id = storage->prepareTableRead(getRequiredColumns(), query_info, context);
 
     // update query info
     if (query_info.query)
     {
-        query_info = fillQueryInfo(context);
         /// trigger preallocate tables
         // if (!cnch->isOnDemandMode())
         // cnch->read(column_names, query_info, context, processed_stage, max_block_size, 1);

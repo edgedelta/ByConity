@@ -35,6 +35,7 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int INCORRECT_QUERY;
+    extern const int UNSUPPORTED_PARAMETER;
 }
 
 void changeASTSettings(ASTPtr &node)
@@ -120,6 +121,9 @@ bool QueryUseOptimizerChecker::check(ASTPtr node, ContextMutablePtr context, boo
         return false;
     }
 
+    if (!context->getSettingsRef().enable_optimizer && context->getSettingsRef().enable_distributed_output)
+        throw Exception("Distributed output in non-optimizer mode is not supported, please enable optimizer.", ErrorCodes::UNSUPPORTED_PARAMETER);
+
     String reason;
     if (auto * explain = node->as<ASTExplainQuery>())
     {
@@ -146,7 +150,7 @@ bool QueryUseOptimizerChecker::check(ASTPtr node, ContextMutablePtr context, boo
 
     if (node->as<ASTSelectQuery>() || node->as<ASTSelectWithUnionQuery>() || node->as<ASTSelectIntersectExceptQuery>())
     {
-        // disable system query, array join, table function, no merge tree table
+        // disable system query, table function, no merge tree table
         NameSet with_tables;
 
         QueryUseOptimizerVisitor checker;
@@ -223,9 +227,6 @@ bool QueryUseOptimizerVisitor::visitNode(ASTPtr & node, QueryUseOptimizerContext
 
 static bool checkDatabaseAndTable(const ASTTableExpression & table_expression, const ContextMutablePtr & context, const NameSet & ctes)
 {
-    if (table_expression.sample_size || table_expression.sample_offset)
-        return false;
-
     if (table_expression.database_and_table_name)
     {
         auto db_and_table = DatabaseAndTableWithAlias(table_expression.database_and_table_name);

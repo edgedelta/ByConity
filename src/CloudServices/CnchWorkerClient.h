@@ -27,6 +27,7 @@
 #include <Transaction/TxnTimestamp.h>
 #include <brpc/controller.h>
 #include <Common/Exception.h>
+#include <Storages/CheckResults.h>
 #include "Storages/Hive/HiveFile/IHiveFile_fwd.h"
 #include "Storages/MergeTree/MergeTreeDataPartCNCH_fwd.h"
 #include <Storages/DataPart_fwd.h>
@@ -91,6 +92,20 @@ public:
         const ExceptionHandlerWithFailedInfoPtr & handler,
         const WorkerId & worker_id = WorkerId{});
 
+    brpc::CallId sendCnchFileDataParts(
+        const ContextPtr & context,
+        const StoragePtr & storage,
+        const String & local_table_name,
+        const FileDataPartsCNCHVector & parts,
+        const ExceptionHandlerPtr & handler);
+
+    CheckResults checkDataParts(
+        const ContextPtr & context,
+        const IStorage & storage,
+        const String & local_table_name,
+        const String & create_query,
+        const ServerDataPartsVector & parts);
+
     brpc::CallId preloadDataParts(
         const ContextPtr & context,
         const TxnTimestamp & txn_id,
@@ -127,7 +142,8 @@ public:
 
     void removeWorkerResource(TxnTimestamp txn_id);
 
-    void createDedupWorker(const StorageID & storage_id, const String & create_table_query, const HostWithPorts & host_ports);
+    void createDedupWorker(const StorageID & storage_id, const String & create_table_query, const HostWithPorts & host_ports, const size_t & deduper_index);
+    void assignHighPriorityDedupPartition(const StorageID & storage_id, const Names & high_priority_partition);
     void dropDedupWorker(const StorageID & storage_id);
     DedupWorkerStatus getDedupWorkerStatus(const StorageID & storage_id);
 

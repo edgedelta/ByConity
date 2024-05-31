@@ -35,34 +35,35 @@
 namespace DB
 {
 
-NameSet PushPartialAggThroughExchange::BLOCK_AGGS{"pathCount", "attributionAnalysis", "attributionCorrelationFuse", "attribution", "attributionCorrelation"};
+NameSet PushPartialAggThroughExchange::BLOCK_AGGS{
+    "pathCount",
+    "attributionAnalysis",
+    "attributionCorrelationFuse",
+    "attribution",
+    "attributionCorrelation",
+
+    // fixme: remove bitmap* if correctness problem fixed
+    "bitmapJoinAndCard",
+    "bitmapJoinAndCard2",
+    "bitmapJoin",
+    "bitmapCount",
+    "bitmapExtract",
+    "bitmapMultiCount",
+    "bitmapMultiCountWithDate",
+    "bitmapMaxLevel",
+    "bitmapColumnDiff"};
 
 static std::pair<bool, bool> canPushPartialWithHint(const AggregatingStep * step)
 {
     const auto & hint_list = step->getHints();
-    bool enable_push_partical_agg = true;
     for (const auto & hint : hint_list)
     {
         if (hint->getType() == HintCategory::PUSH_PARTIAL_AGG)
         {
-            auto match = [&](String & name) -> bool {
-                for (const auto & agg : step->getAggregates())
-                {
-                    if (name == agg.function->getName())
-                        return true;
-                }
-                return false;
-            };
-
             if (auto enable_hint = std::dynamic_pointer_cast<EnablePushPartialAgg>(hint))
-            {
-                enable_push_partical_agg = match(enable_hint->getFunctionName());
-            }
+                return {true, true};
             else if (auto disable_hint = std::dynamic_pointer_cast<DisablePushPartialAgg>(hint))
-            {
-                enable_push_partical_agg = !match(disable_hint->getFunctionName());
-            }
-            return {true, enable_push_partical_agg};
+                return {true, false};
         }
     }
     return {false, true};

@@ -71,8 +71,13 @@ public:
 
     void removeIntermediateData(const TxnTimestamp & txn_id);
 
-    ServerDataPartsVector fetchDataParts(const String & remote_host, const ConstStoragePtr & table, const Strings & partition_list, const TxnTimestamp & ts);
-    DeleteBitmapMetaPtrVector fetchDeleteBitmaps(const String & remote_host, const ConstStoragePtr & table, const Strings & partition_list, const TxnTimestamp & ts);
+    ServerDataPartsVector fetchDataParts(const String & remote_host, const ConstStoragePtr & table, const Strings & partition_list, const TxnTimestamp & ts, const std::set<Int64> & bucket_numbers);
+    DeleteBitmapMetaPtrVector fetchDeleteBitmaps(
+        const String & remote_host,
+        const ConstStoragePtr & table,
+        const Strings & partition_list,
+        const TxnTimestamp & ts,
+        const std::set<Int64> & bucket_numbers = {});
 
     PrunedPartitions fetchPartitions(
         const String & remote_host,
@@ -87,6 +92,8 @@ public:
         const TxnTimestamp & txnID,
         const bool is_merged_parts,
         const bool preallocate_mode);
+
+    void redirectClearParts(const StoragePtr & table, const Catalog::CommitItems & commit_data);
 
     void redirectSetCommitTime(
         const StoragePtr & table,
@@ -191,6 +198,7 @@ public:
 
     void forceRecalculateMetrics(const StorageID & storage_id);
     std::vector<Protos::LastModificationTimeHint> getLastModificationTimeHints(const StorageID & storage_id);
+    void notifyTableCreated(const UUID & storage_uuid, int64_t cnch_notify_table_created_rpc_timeout_ms);
 
     void notifyAccessEntityChange(IAccessEntity::Type type, const String & name, const UUID & uuid);
 private:

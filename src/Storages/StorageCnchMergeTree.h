@@ -30,6 +30,8 @@ namespace DB
 {
 
 struct PrepareContextResult;
+class ASTSystemQuery;
+
 class StorageCnchMergeTree final : public shared_ptr_helper<StorageCnchMergeTree>, public MergeTreeMetaBase, public CnchStorageCommonHelper
 {
     friend struct shared_ptr_helper<StorageCnchMergeTree>;
@@ -41,7 +43,7 @@ public:
     std::string getName() const override { return "Cnch" + merging_params.getModeName() + "MergeTree"; }
 
     void loadMutations();
-
+    bool supportsParallelInsert() const override { return !getInMemoryMetadataPtr()->hasUniqueKey(); }
     bool supportsSampling() const override { return true; }
     bool supportsFinal() const override { return true; }
     bool supportsPrewhere() const override { return true; }
@@ -128,7 +130,7 @@ public:
 
     /// Return all base parts and delete bitmap metas in the given partitions.
     /// If `partitions` is empty, return meta for all partitions.
-    MergeTreeDataPartsCNCHVector getUniqueTableMeta(TxnTimestamp ts, const Strings & partitions = {}, bool force_bitmap = true);
+    MergeTreeDataPartsCNCHVector getUniqueTableMeta(TxnTimestamp ts, const Strings & partitions = {}, bool force_bitmap = true, const std::set<Int64> & bucket_numbers = {});
 
     /// return table's committed staged parts (excluding deleted ones).
     /// if partitions != null, ignore staged parts not belong to `partitions`.
@@ -144,7 +146,7 @@ public:
     void getDeleteBitmapMetaForStagedParts(const MergeTreeDataPartsCNCHVector & parts, ContextPtr context, TxnTimestamp start_time);
 
     /// Used by the "SYSTEM DEDUP" command to repair unique table by removing duplicate keys in visible parts.
-    void executeDedupForRepair(const ASTPtr & partition, ContextPtr context);
+    void executeDedupForRepair(const ASTSystemQuery & query, ContextPtr context);
 
     /// Used by the "SYSTEM SYNC DEDUP WORKER" command to wait for all staged parts to publish
     void waitForStagedPartsToPublish(ContextPtr context);
@@ -293,7 +295,8 @@ private:
     ServerDataPartsVector filterPartsInExplicitTransaction(ServerDataPartsVector & data_parts, ContextPtr local_context) const;
 
     /// Generate view dependency create queries for materialized view writing
-    Names genViewDependencyCreateQueries(const StorageID & storage_id, ContextPtr local_context, const String & table_suffix, std::set<String> & cnch_table_create_queries);
+    NameSet genViewDependencyCreateQueries(
+        const StorageID & storage_id, ContextPtr local_context, const String & table_suffix, std::set<String> & cnch_table_create_queries);
 
     Pipe ingestPartition(const struct PartitionCommand & command, const ContextPtr local_context);
 

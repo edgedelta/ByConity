@@ -263,12 +263,10 @@ void CnchTablePartitionMetricsHelper::recalculateOrSnapshotPartitionsMetrics(
 
     for (auto & partition : table_meta_ptr->partitions)
     {
-        if (partition == nullptr)
+        if (partition == nullptr || partition->metrics_ptr == nullptr)
             continue;
 
         LOG_TRACE(log, "recalculateOrSnapshotPartitionsMetrics {} {}", table_meta_ptr->table, partition->partition_id);
-        if (partition->metrics_ptr == nullptr)
-            continue;
 
         auto task = [this, partition, current_time, table_meta_ptr, force]() {
             CurrentMetrics::Increment metric_increment(CurrentMetrics::SystemCnchPartsInfoRecalculationTasksSize);
@@ -291,9 +289,9 @@ void CnchTablePartitionMetricsHelper::recalculateOrSnapshotPartitionsMetrics(
     }
 
     /// Schedule a table level trash items recalculation.
-    auto task = [this, table_meta_ptr, current_time]() {
+    auto task = [this, table_meta_ptr, current_time, force]() {
         CurrentMetrics::Increment metric_increment{CurrentMetrics::SystemCnchTrashItemsInfoRecalculationTasksSize};
-        table_meta_ptr->trash_item_metrics->recalculate(current_time, getContext());
+        table_meta_ptr->trash_item_metrics->recalculate(current_time, getContext(), force);
     };
 
     if (schedule_timeout)

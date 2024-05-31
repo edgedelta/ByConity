@@ -194,6 +194,8 @@ const char * ASTSystemQuery::typeToString(Type type)
             return "METASTORE";
         case Type::CLEAR_BROKEN_TABLES:
             return "CLEAR BROKEN TABLES";
+        case Type::DEDUP_WITH_HIGH_PRIORITY:
+            return "DEDUP WITH HIGH PRIORITY";
         case Type::DEDUP:
             return "DEDUP";
         case Type::SYNC_DEDUP_WORKER:
@@ -232,6 +234,8 @@ const char * ASTSystemQuery::typeToString(Type type)
             return "STOP VIEW";
         case Type::DROP_VIEW_META:
             return "DROP VIEW META";
+        case Type::RELEASE_MEMORY_LOCK:
+            return "RELEASE MEMORY LOCK";
         case Type::UNKNOWN:
         case Type::END:
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Unknown SYSTEM query command");
@@ -376,6 +380,15 @@ void ASTSystemQuery::formatImpl(const FormatSettings & settings, FormatState & s
             partition->formatImpl(settings, state, frame);
         }
     }
+    else if (type == Type::DEDUP_WITH_HIGH_PRIORITY)
+    {
+        print_database_table();
+        if (partition)
+        {
+            settings.ostr << (settings.hilite ? hilite_keyword : "") << " PARTITION " << (settings.hilite ? hilite_none : "");
+            partition->formatImpl(settings, state, frame);
+        }
+    }
     else if (type == Type::DEDUP)
     {
         print_database_table();
@@ -383,6 +396,9 @@ void ASTSystemQuery::formatImpl(const FormatSettings & settings, FormatState & s
         {
             settings.ostr << (settings.hilite ? hilite_keyword : "") << " PARTITION " << (settings.hilite ? hilite_none : "");
             partition->formatImpl(settings, state, frame);
+
+            if (specify_bucket)
+                settings.ostr << " BUCKET " << bucket_number;
         }
         settings.ostr << " FOR REPAIR";
     }
@@ -400,6 +416,13 @@ void ASTSystemQuery::formatImpl(const FormatSettings & settings, FormatState & s
     else if(type == Type::START_MATERIALIZEDMYSQL || type == Type::STOP_MATERIALIZEDMYSQL)
     {
         print_database();
+    }
+    else if (type == Type::RELEASE_MEMORY_LOCK)
+    {
+        if (specify_txn)
+            settings.ostr << " OF TXN " << txn_id;
+        else
+            print_database_table();
     }
 }
 

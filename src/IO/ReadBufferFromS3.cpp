@@ -23,6 +23,7 @@
 
 #if USE_AWS_S3
 
+#    include <Interpreters/RemoteReadLog.h>
 #    include <IO/ReadBufferFromIStream.h>
 #    include <IO/ReadBufferFromS3.h>
 #    include <IO/S3Common.h>
@@ -72,7 +73,7 @@ ReadBufferFromS3::ReadBufferFromS3(
     bool use_external_buffer_,
     off_t read_until_position_,
     std::optional<size_t> file_size_)
-    : ReadBufferFromFileBase(use_external_buffer_ ? 0 : read_settings_.buffer_size, nullptr, 0, file_size_)
+    : ReadBufferFromFileBase(use_external_buffer_ ? 0 : read_settings_.remote_fs_buffer_size, nullptr, 0, file_size_)
     , client_ptr(std::move(client_ptr_))
     , bucket(bucket_)
     , key(key_)
@@ -176,6 +177,8 @@ bool ReadBufferFromS3::nextImpl()
 
     size_t attempt = 0;
     size_t sleep_ms = 100;
+    Stopwatch timer;
+    const auto request_time = std::chrono::system_clock::now();
     while (true)
     {
         Stopwatch watch;
@@ -222,6 +225,7 @@ bool ReadBufferFromS3::nextImpl()
             impl.reset();
         }
     }
+
     if (!next_result) {
         read_all_range_successfully = true;
         return false;
@@ -229,6 +233,11 @@ bool ReadBufferFromS3::nextImpl()
 
     BufferBase::set(impl->buffer().begin(), impl->buffer().size(), impl->offset());
     ProfileEvents::increment(ProfileEvents::ReadBufferFromS3ReadBytes, working_buffer.size());
+    if (read_settings.remote_read_log)
+    {
+        read_settings.remote_read_log->insert(
+            request_time, bucket + ":" + key, offset, working_buffer.size(), timer.elapsedMicroseconds(), read_settings.remote_read_context);
+    }
     offset += working_buffer.size();
     return true;
 }
@@ -374,7 +383,6 @@ Aws::S3::Model::GetObjectResult ReadBufferFromS3::sendRequest(size_t range_begin
             bucket, key, range_begin);
     }
 
-    // ProfileEvents::increment(ProfileEvents::S3GetObject);
     Stopwatch watch;
 
     ProfileEvents::increment(ProfileEvents::S3GetObject);

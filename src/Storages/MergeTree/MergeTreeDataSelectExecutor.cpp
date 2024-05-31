@@ -366,6 +366,7 @@ QueryPlanPtr MergeTreeDataSelectExecutor::read(
                     settings.group_by_two_level_threshold,
                     settings.group_by_two_level_threshold_bytes,
                     settings.max_bytes_before_external_group_by,
+                    settings.spill_mode == SpillMode::AUTO,
                     settings.spill_buffer_bytes_before_external_group_by,
                     settings.empty_result_for_aggregation_by_empty_set,
                     context->getTemporaryVolume(),
@@ -399,6 +400,7 @@ QueryPlanPtr MergeTreeDataSelectExecutor::read(
                     settings.group_by_two_level_threshold,
                     settings.group_by_two_level_threshold_bytes,
                     settings.max_bytes_before_external_group_by,
+                    settings.spill_mode == SpillMode::AUTO,
                     settings.spill_buffer_bytes_before_external_group_by,
                     settings.empty_result_for_aggregation_by_empty_set,
                     context->getTemporaryVolume(),
@@ -1398,6 +1400,10 @@ static void selectColumnNames(
             sample_factor_column_queried = true;
             virt_column_names.push_back(name);
         }
+        else if (name == "_bucket_number")
+        {
+            virt_column_names.push_back(name);
+        }
         else
         {
             real_column_names.push_back(name);
@@ -1563,14 +1569,13 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
 {
     MarkRanges res;
 
+    /// Do NOT need to load index if it is not used.
     size_t marks_count = part->index_granularity.getMarksCount();
-    const auto & index = *(part->getIndex());
     if (marks_count == 0)
         return res;
 
     bool has_final_mark = part->index_granularity.hasFinalMark();
 
-    /// If index is not used.
     if (key_condition.alwaysUnknownOrTrue())
     {
         if (has_final_mark)
@@ -1580,6 +1585,9 @@ MarkRanges MergeTreeDataSelectExecutor::markRangesFromPKRange(
 
         return res;
     }
+
+    /// Here, index is needed and we try to load it
+    const auto & index = *(part->getIndex());
 
     size_t used_key_size = key_condition.getMaxKeyColumn() + 1;
 
@@ -1784,7 +1792,7 @@ MarkRanges MergeTreeDataSelectExecutor::filterMarksUsingIndex(
         ranges,
         reader_settings,
         context->getMarkCache().get(),
-        context->getInternalProgressCallback());
+        context->getProgressCallback());
 
     MarkRanges res;
 

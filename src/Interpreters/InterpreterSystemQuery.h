@@ -89,6 +89,8 @@ private:
     void executeMetastoreCmd(ASTSystemQuery & query) const;
     void executeCleanTrashTable(const ASTSystemQuery & query);
     void executeGc(const ASTSystemQuery & query);
+    /// dedup staging parts within the specific partition with high priority
+    void dedupWithHighPriority(const ASTSystemQuery & query);
     void executeDedup(const ASTSystemQuery & query);
 
     void dumpCnchServerStatus();
@@ -121,8 +123,11 @@ private:
     /// a command to test MemoryLock
     void lockMemoryLock(const ASTSystemQuery & query, const StorageID & table_id, ContextPtr local_context);
 
+    void releaseMemoryLock(const ASTSystemQuery & query, const StorageID & table_id, ContextPtr local_context);
+
     /// drop materialized view previous meta
     void dropMvMeta(ASTSystemQuery & query);
+
 };
 
 

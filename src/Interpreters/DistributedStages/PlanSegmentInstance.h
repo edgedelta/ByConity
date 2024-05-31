@@ -19,9 +19,13 @@ struct PlanSegmentInstanceId
         if (segment_id < other.segment_id)
             return true;
         else if (segment_id > other.segment_id)
-            return true;
+            return false;
         else
             return parallel_id < other.parallel_id;
+    }
+    String toString() const
+    {
+        return fmt::format("instance_id[{}, {}]", segment_id, parallel_id);
     }
 };
 
@@ -34,6 +38,7 @@ struct PlanSegmentExecutionInfo
     AddressInfo execution_address;
     std::optional<size_t> source_task_index;
     std::optional<size_t> source_task_count;
+    UInt32 retry_id = std::numeric_limits<UInt32>::max();
 };
 
 struct PlanSegmentInstance

@@ -216,6 +216,20 @@ message TableFinishStep {
   optional AST query = 4;
 }
 
+message OutfileWriteStep {
+  message OutfileTarget {
+    required string request_uri = 1;
+    required string format = 2;
+    required string compression_method_str = 3;
+    required uint64 compression_level = 4;
+  }
+
+  required ITransformingStep query_plan_base = 1;
+  required OutfileTarget outfile_target = 2;
+}
+
+message OutfileFinishStep {}
+
 message FilterStep {
   required ITransformingStep query_plan_base = 1;
   required AST filter = 2;
@@ -266,6 +280,7 @@ message MergeSortingStep {
   required double remerge_lowered_memory_bytes_ratio = 6;
   required uint64 max_bytes_before_external_sort = 7;
   required uint64 min_free_disk_space = 8;
+  required bool enable_adaptive_spill = 9;
 }
 
 message MergingAggregatedStep {
@@ -365,9 +380,29 @@ message BufferStep {
 
 message ExplainAnalyzeStep {}
 
+message LocalExchangeStep {
+  required ITransformingStep query_plan_base = 1;
+  required ExchangeMode.Enum exchange_type = 2;
+  required Partitioning schema = 3;
+}
 
 message MultiJoinStep {
   required Graph graph = 1;
+}
+
+message SampleRatioStep {
+  required ITransformingStep query_plan_base = 1;
+  required float sample_ratio = 2;
+}
+
+message ExpandStep {
+  required ITransformingStep query_plan_base = 1;
+  required Assignments assignments = 2;
+  map<string, DataType> name_to_type = 3;
+  required string group_id_symbol = 4;
+  repeated uint32 group_id_value = 5;
+  map<uint32, StringVec> group_id_non_null_symbol = 6;
+
 }
 
 // this must be identical to APPLY_STEP_PROTOBUF_TYPES_AND_NAMES
@@ -417,9 +452,14 @@ message QueryPlanStep {
     IntersectOrExceptStep intersect_or_except_step = 37;
     BufferStep buffer_step = 38;
     ApplyStep apply_step = 39;
+    OutfileWriteStep outfile_write_step = 40;
+    OutfileFinishStep outfile_finish_step = 41;
     ExplainAnalyzeStep explain_analyze_step = 44;
     TotalsHavingStep totals_having_step = 50;
+    LocalExchangeStep local_exchange_step = 54;
     MultiJoinStep multi_join_step = 55;
+    SampleRatioStep sample_ratio_step = 56;
+    ExpandStep expand_step = 57;
   }
 }
 

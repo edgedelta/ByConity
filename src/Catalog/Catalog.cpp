@@ -33,20 +33,21 @@
 #include <Databases/DatabaseCnch.h>
 #include <common/logger_useful.h>
 // #include <ext/range.h>
-#include <Common/Exception.h>
-#include <Common/ProfileEvents.h>
-#include <Common/Status.h>
-#include <Common/RpcClientPool.h>
-#include <Common/serverLocality.h>
-#include <Common/ScanWaitFreeMap.h>
+#include <Catalog/DataModelPartWrapper_fwd.h>
 #include <Catalog/MetastoreCommon.h>
+#include <Core/Types.h>
 #include <DataTypes/ObjectUtils.h>
 #include <Storages/ColumnsDescription.h>
 #include <Storages/IStorage_fwd.h>
 #include <Storages/StorageSnapshot.h>
-#include <Catalog/DataModelPartWrapper_fwd.h>
 #include <Transaction/TransactionCommon.h>
-#include <Core/Types.h>
+#include <Common/Exception.h>
+#include <Common/ProfileEvents.h>
+#include <Common/RpcClientPool.h>
+#include <Common/ScanWaitFreeMap.h>
+#include <Common/Status.h>
+#include <Common/serverLocality.h>
+#include "Interpreters/DistributedStages/PlanSegmentInstance.h"
 // #include <Access/MaskingPolicyDataModel.h>
 // #include <Access/MaskingPolicyCommon.h>
 #include <Catalog/CatalogMetricHelper.h>
@@ -62,6 +63,7 @@
 #include <Statistics/ExportSymbols.h>
 #include <Statistics/StatisticsBase.h>
 #include <Storages/CnchStorageCache.h>
+#include <Storages/Hive/StorageCnchHive.h>
 #include <Storages/MergeTree/CnchAttachProcessor.h>
 #include <Storages/MergeTree/DeleteBitmapMeta.h>
 #include <Storages/MergeTree/MergeTreeDataPartCNCH_fwd.h>
@@ -69,10 +71,12 @@
 #include <Storages/PartCacheManager.h>
 #include <Storages/StorageCnchMergeTree.h>
 #include <Storages/StorageDictionary.h>
-#include <Storages/Hive/StorageCnchHive.h>
+#include <Transaction/Actions/S3AttachMetaAction.h>
+#include <Transaction/Actions/S3DetachMetaAction.h>
 #include <Transaction/TxnTimestamp.h>
 #include <Transaction/getCommitted.h>
 #include <brpc/server.h>
+
 
 /// TODO: put all global gflags together in somewhere.
 namespace brpc::policy { DECLARE_string(consul_agent_addr); }
@@ -475,6 +479,8 @@ namespace ProfileEvents
     extern const Event GetByKeyFailed;
     extern const Event GetMvBaseTableIDSuccess;
     extern const Event GetMvBaseTableIDFailed;
+    extern const Event GetMvBaseTableVersionSuccess;
+    extern const Event GetMvBaseTableVersionFailed;
     extern const Event UpdateMvMetaIDSuccess;
     extern const Event UpdateMvMetaIDFailed;
 }
@@ -515,6 +521,13 @@ namespace Catalog
         return parseQuery(parser, begin, end, "", 0, 0);
     }
 
+    void Catalog::loadFromConfig(const String & config_elem, const Poco::Util::AbstractConfiguration & config)
+    {
+        if (!config.has(config_elem))
+            return;
+        settings.loadFromConfig(config_elem + ".settings", config);
+    }
+
     Catalog::Catalog(Context & _context, const MetastoreConfig & config, String _name_space) : context(_context), name_space(_name_space)
     {
         runWithMetricSupport(
@@ -533,7 +546,6 @@ namespace Catalog
                 }
 
                 meta_proxy = std::make_shared<MetastoreProxy>(config);
-                max_commit_size_one_batch = context.getSettingsRef().catalog_max_commit_size;
                 /// Support set a custom topology key
                 if (config.topology_key.empty())
                     topology_key = name_space;
@@ -894,9 +906,10 @@ namespace Catalog
                 tb_data.set_txnid(txnID.toUInt64());
                 tb_data.set_commit_time(ts.toUInt64());
                 RPCHelpers::fillUUID(storage_id.uuid, *(tb_data.mutable_uuid()));
+                HostWithPorts host_port = context.getCnchTopologyMaster()->getTargetServer(uuid_str, storage_id.server_vw_name, true);
                 if (storage_id.server_vw_name != DEFAULT_SERVER_VW_NAME)
                 {
-                    if (context.getCnchTopologyMaster()->getTargetServer(uuid_str, storage_id.server_vw_name, true).empty())
+                    if (host_port.empty())
                         throw Exception("Cannot create table because no server in vw: " + storage_id.server_vw_name, ErrorCodes::CNCH_TOPOLOGY_NOT_MATCH_ERROR);
                     tb_data.set_server_vw_name(storage_id.server_vw_name);
                 }
@@ -912,28 +925,54 @@ namespace Catalog
                 meta_proxy->createTable(name_space, db_uuid, tb_data, dependencies, masking_policy_names);
                 if (auto query_context = CurrentThread::getGroup()->query_context.lock())
                 {
-                    meta_proxy->setTableClusterStatus(name_space, uuid_str, true, createTableFromDataModel(*query_context, tb_data)->getTableHashForClusterBy());
+                    meta_proxy->setTableClusterStatus(name_space, uuid_str, true, createTableFromDataModel(*query_context, tb_data)->getTableHashForClusterBy().getDeterminHash());
                 }
                 else
                 {
-                    meta_proxy->setTableClusterStatus(name_space, uuid_str, true, createTableFromDataModel(context, tb_data)->getTableHashForClusterBy());
+                    meta_proxy->setTableClusterStatus(name_space, uuid_str, true, createTableFromDataModel(context, tb_data)->getTableHashForClusterBy().getDeterminHash());
                 }
 
                 LOG_INFO(log, "finish createTable namespace {} table_name {}, uuid {}", name_space, storage_id.getFullTableName(), uuid_str);
+                notifyTableCreated(storage_id.uuid, host_port);
+                LOG_DEBUG(log, "finish create table meta for {}", uuid_str);
             },
             ProfileEvents::CreateTableSuccess,
             ProfileEvents::CreateTableFailed);
     }
 
-    void Catalog::createUDF(const String & db, const String & name, const String & create_query)
+    void Catalog::notifyTableCreated(const UUID & uuid, const HostWithPorts & host_port) noexcept
+    {
+        try
+        {
+            if (!host_port.empty() && !isLocalServer(host_port.getRPCAddress(), std::to_string(context.getRPCPort())))
+            {
+                context.getCnchServerClientPool().get(host_port)->notifyTableCreated(
+                    uuid, context.getSettings().cnch_notify_table_created_rpc_timeout_ms);
+                return;
+            }
+
+            auto storage = tryGetTableByUUID(context, UUIDHelpers::UUIDToString(uuid), TxnTimestamp::maxTS());
+
+            if (auto pcm = context.getPartCacheManager(); pcm && storage)
+            {
+                pcm->mayUpdateTableMeta(*storage, host_port.topology_version, true);
+            }
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log);
+        }
+    }
+
+    void Catalog::createUDF(const String & prefix_name, const String & name, const String & create_query)
     {
         runWithMetricSupport(
             [&] {
                 Protos::DataModelUDF udf_data;
 
-                LOG_DEBUG(log, "start createUDF {}: {}.{}", name_space, db, name);
+                LOG_DEBUG(log, "start createUDF {}: {}.{}", name_space, prefix_name, name);
                 //:ToDo add version and other info separately.
-                udf_data.set_database(db);
+                udf_data.set_prefix_name(prefix_name);
                 udf_data.set_function_name(name);
                 udf_data.set_function_definition(create_query);
                 meta_proxy->createUDF(name_space, udf_data);
@@ -942,10 +981,10 @@ namespace Catalog
             ProfileEvents::CreateUDFFailed);
     }
 
-    void Catalog::dropUDF(const String & db, const String & name)
+    void Catalog::dropUDF(const String & resolved_name)
     {
         runWithMetricSupport(
-            [&] { meta_proxy->dropUDF(name_space, db, name); }, ProfileEvents::DropUDFSuccess, ProfileEvents::DropUDFFailed);
+            [&] { meta_proxy->dropUDF(name_space, resolved_name); }, ProfileEvents::DropUDFSuccess, ProfileEvents::DropUDFFailed);
     }
 
     void Catalog::dropTable(
@@ -1037,7 +1076,7 @@ namespace Catalog
         const TxnTimestamp & previous_version,
         const TxnTimestamp & txnID,
         const TxnTimestamp & ts,
-        const bool is_recluster)
+        const bool is_modify_cluster_by)
     {
         runWithMetricSupport(
             [&] {
@@ -1099,8 +1138,8 @@ namespace Catalog
                     throw Exception("Alter table failed.", ErrorCodes::CATALOG_ALTER_TABLE_FAILURE);
 
                 // Set cluster status after Alter table is successful to update PartCacheManager with new table metadata
-                if (is_recluster)
-                    setTableClusterStatus(storage->getStorageUUID(), false, new_table->getTableHashForClusterBy());
+                if (is_modify_cluster_by)
+                    setTableClusterStatus(storage->getStorageUUID(), false, new_table->getTableHashForClusterBy().getDeterminHash());
 
                 if (auto cache_manager = context.getPartCacheManager(); cache_manager)
                 {
@@ -1293,7 +1332,7 @@ namespace Catalog
                 if (is_host_server && cache_manager)
                 {
                     auto cached_storage = cache_manager->getStorageFromCache(UUIDHelpers::toUUID(table_id->uuid()), host_server.topology_version);
-                    if (cached_storage && cached_storage->getStorageID().database_name == database && cached_storage->getStorageID().table_name == name)
+                    if (cached_storage && cached_storage->commit_time <= ts && cached_storage->getStorageID().database_name == database && cached_storage->getStorageID().table_name == name)
                     {
                         res = cached_storage;
                         return;
@@ -1364,7 +1403,7 @@ namespace Catalog
                     if (current_topology_version != PairInt64(0, 0))
                     {
                         auto cached_storage = cache_manager->getStorageFromCache(UUIDHelpers::toUUID(uuid), current_topology_version);
-                        if (cached_storage)
+                        if (cached_storage && cached_storage->commit_time <= ts)
                         {
                             auto host_server = current_topology.getTargetServer(uuid, cached_storage->getServerVwName());
                             if (isLocalServer(host_server.getRPCAddress(), std::to_string(context.getRPCPort())))
@@ -1497,8 +1536,29 @@ namespace Catalog
     ServerDataPartsWithDBM Catalog::getStagedServerDataPartsWithDBM(const ConstStoragePtr & table, const TxnTimestamp & ts, const NameSet * partitions)
     {
         ServerDataPartsWithDBM res;
-        res.first = getStagedServerDataParts(table, ts, partitions, /*execute_filter=*/false);
-        res.second = getDeleteBitmapsInPartitions(table, {partitions->begin(), partitions->end()}, ts, /*session_context=*/nullptr, /*execute_filter=*/false);
+        res.first = getStagedServerDataParts(table, ts, partitions, VisibilityLevel::All);
+
+        if (res.first.empty())
+            return res;
+
+        bool is_unique_table = table->getInMemoryMetadataPtr()->hasUniqueKey();
+        if (is_unique_table)
+        {
+            std::set<Int64> bucket_numbers;
+            if (table->isBucketTable())
+            {
+                for (const auto & part : res.first)
+                    bucket_numbers.insert(part->part_model().bucket_number());
+            }
+
+            res.second = getDeleteBitmapsInPartitions(
+                table,
+                {partitions->begin(), partitions->end()},
+                ts,
+                /*session_context=*/nullptr,
+                /*visibility=*/VisibilityLevel::All,
+                bucket_numbers);
+        }
 
         if (ts)
         {
@@ -1511,10 +1571,13 @@ namespace Catalog
                 res.second.size(),
                 ts.toString());
 
+            auto * txn_record_cache =
+                context.getServerType() == ServerType::cnch_server ? context.getCnchTransactionCoordinator().getFinishedOrFailedTxnRecordCache() : nullptr;
             /// Make sure they use the same records of transactions list.
             auto txn_records = getTransactionRecords(res.first, res.second);
-            getVisibleServerDataParts(res.first, ts, this, &txn_records);
-            getVisibleBitmaps(res.second, ts, this, &txn_records);
+            getVisibleServerDataParts(res.first, ts, this, &txn_records, txn_record_cache);
+            if (is_unique_table)
+                getVisibleBitmaps(res.second, ts, this, &txn_records, txn_record_cache);
 
             LOG_DEBUG(
                 log,
@@ -1529,11 +1592,12 @@ namespace Catalog
         return res;
     }
 
-    ServerDataPartsVector Catalog::getStagedServerDataParts(const ConstStoragePtr & table, const TxnTimestamp & ts, const NameSet * partitions, bool execute_filter)
+    ServerDataPartsVector Catalog::getStagedServerDataParts(const ConstStoragePtr & table, const TxnTimestamp & ts, const NameSet * partitions, VisibilityLevel visibility)
     {
         ServerDataPartsVector res;
         runWithMetricSupport(
             [&] {
+                Stopwatch watch;
                 const auto * storage = dynamic_cast<const MergeTreeMetaBase *>(table.get());
                 if (!storage)
                     throw Exception("Table is not a merge tree", ErrorCodes::BAD_ARGUMENTS);
@@ -1580,10 +1644,41 @@ namespace Catalog
                     res.push_back(std::make_shared<ServerDataPart>(createPartWrapperFromModel(*storage, std::move(*model))));
                 }
 
-                if (ts && execute_filter)
+                size_t size_before = res.size();
+                bool execute_filter = false;
+
+                if (ts && visibility != VisibilityLevel::All)
                 {
-                    getVisibleServerDataParts(res, ts, this, nullptr);
+                    execute_filter = true;
+                    LOG_TRACE(
+                        log,
+                        "{} Start handle intermediate staged data parts. Total number of staged parts is {}, timestamp: {}",
+                        storage->getStorageID().getNameForLogs(),
+                        res.size(),
+                        ts.toString());
+
+                    auto * txn_record_cache = context.getServerType() == ServerType::cnch_server
+                        ? context.getCnchTransactionCoordinator().getFinishedOrFailedTxnRecordCache()
+                        : nullptr;
+                    getVisibleServerDataParts(res, ts, this, nullptr, txn_record_cache);
+
+                    LOG_TRACE(
+                        log,
+                        "{} Finish handle intermediate staged data parts. Total number of staged parts is {}, timestamp: {}",
+                        storage->getStorageID().getNameForLogs(),
+                        res.size(),
+                        ts.toString());
                 }
+
+                LOG_DEBUG(
+                    log,
+                    "Elapsed {}ms to get {}/{} staged data parts for table : {}, ts : {}, execute_filter: {}"
+                    ,watch.elapsedMilliseconds()
+                    ,res.size()
+                    ,size_before
+                    ,storage->getStorageID().getNameForLogs()
+                    ,ts.toString()
+                    ,execute_filter);
             },
             ProfileEvents::GetStagedPartsSuccess,
             ProfileEvents::GetStagedPartsFailed);
@@ -1591,11 +1686,23 @@ namespace Catalog
     }
 
     DB::ServerDataPartsWithDBM Catalog::getServerDataPartsInPartitionsWithDBM(
-        const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts, const Context * session_context, VisibilityLevel visibility)
+        const ConstStoragePtr & storage,
+        const Strings & partitions,
+        const TxnTimestamp & ts,
+        const Context * session_context,
+        const VisibilityLevel visibility,
+        const std::set<Int64> & bucket_numbers)
     {
         ServerDataPartsWithDBM res;
-        res.first = getServerDataPartsInPartitions(storage, partitions, ts, session_context, visibility, /*execute_filter=*/false);
-        res.second = getDeleteBitmapsInPartitions(storage, {partitions.begin(), partitions.end()}, ts, /*session_context=*/nullptr, /*execute_filter=*/false);
+        res.first = getServerDataPartsInPartitions(storage, partitions, ts, session_context, VisibilityLevel::All, bucket_numbers);
+
+        if (res.first.empty())
+            return res;
+
+        bool is_unique_table = storage->getInMemoryMetadataPtr()->hasUniqueKey();
+        if (is_unique_table)
+            res.second = getDeleteBitmapsInPartitions(
+                storage, {partitions.begin(), partitions.end()}, ts, /*session_context=*/nullptr, VisibilityLevel::All, bucket_numbers);
 
         /// Make sure they use the same records of transactions list.
         if (ts && visibility != VisibilityLevel::All)
@@ -1609,16 +1716,21 @@ namespace Catalog
                 res.second.size(),
                 ts.toString());
 
-             auto txn_records = getTransactionRecords(res.first, res.second);
+            auto * txn_record_cache =
+                context.getServerType() == ServerType::cnch_server ? context.getCnchTransactionCoordinator().getFinishedOrFailedTxnRecordCache() : nullptr;
+
+            auto txn_records = getTransactionRecords(res.first, res.second);
             if (visibility == VisibilityLevel::Visible)
             {
-                getVisibleServerDataParts(res.first, ts, this, &txn_records);
-                getVisibleBitmaps(res.second, ts, this, &txn_records);
+                getVisibleServerDataParts(res.first, ts, this, &txn_records, txn_record_cache);
+                if (is_unique_table)
+                    getVisibleBitmaps(res.second, ts, this, &txn_records, txn_record_cache);
             }
             else
             {
-                getCommittedServerDataParts(res.first, ts, this, &txn_records);
-                getCommittedBitmaps(res.second, ts, this, &txn_records);
+                getCommittedServerDataParts(res.first, ts, this, &txn_records, txn_record_cache);
+                if (is_unique_table)
+                    getCommittedBitmaps(res.second, ts, this, &txn_records, txn_record_cache);
             }
 
             LOG_DEBUG(
@@ -1638,14 +1750,15 @@ namespace Catalog
         const Strings & partitions,
         const TxnTimestamp & ts,
         const Context * session_context,
-        VisibilityLevel visibility,
-        bool execute_filter)
+        const VisibilityLevel visibility,
+        const std::set<Int64> & bucket_numbers)
     {
         ServerDataPartsVector res;
         String source;
         runWithMetricSupport(
             [&] {
                 Stopwatch watch;
+                bool filter_bucket_numbers = false;
                 auto fall_back = [&]() {
                     ServerDataPartsVector tmp_res;
                     const auto & merge_tree_storage = dynamic_cast<const MergeTreeMetaBase &>(*storage);
@@ -1715,8 +1828,9 @@ namespace Catalog
                 {
                     try
                     {
-                        res = context.getCnchServerClientPool().get(host_with_rpc)->fetchDataParts(host_with_rpc, storage, partitions, ts);
+                        res = context.getCnchServerClientPool().get(host_with_rpc)->fetchDataParts(host_with_rpc, storage, partitions, ts, bucket_numbers);
                         source = "TargetServer(" + host_with_rpc + ")";
+                        filter_bucket_numbers = true;
                     }
                     catch (...)
                     {
@@ -1725,9 +1839,10 @@ namespace Catalog
                         source = "KV(cannot reach target server)";
                     }
                 }
-
-                if (execute_filter && ts && visibility != VisibilityLevel::All)
+                size_t visibility_filtered = 0;
+                if (ts && visibility != VisibilityLevel::All)
                 {
+                    visibility_filtered = res.size();
                     LOG_TRACE(
                         log,
                         "{} Start handle intermediate parts. Total number of parts is {}, timestamp: {}"
@@ -1735,10 +1850,13 @@ namespace Catalog
                         ,res.size()
                         ,ts.toString());
 
+                    auto * txn_record_cache =
+                        context.getServerType() == ServerType::cnch_server ? context.getCnchTransactionCoordinator().getFinishedOrFailedTxnRecordCache() : nullptr;
+
                     if (visibility == VisibilityLevel::Visible)
-                        getVisibleServerDataParts(res, ts, this, nullptr);
+                        getVisibleServerDataParts(res, ts, this, nullptr, txn_record_cache);
                     else
-                        getCommittedServerDataParts(res, ts, this, nullptr);
+                        getCommittedServerDataParts(res, ts, this, nullptr, txn_record_cache);
 
                     LOG_TRACE(
                         log,
@@ -1746,17 +1864,36 @@ namespace Catalog
                         ,storage->getStorageID().getNameForLogs()
                         ,res.size()
                         ,ts.toString());
+                    visibility_filtered -= res.size();
+                }
+
+                size_t bucket_filtered = 0;
+                /// Filter parts by bucket_numbers if it is bucket table and cluster ready
+                if (!res.empty() && !filter_bucket_numbers && !bucket_numbers.empty() && storage->isBucketTable() && isTableClustered(storage->getStorageUUID()))
+                {
+                    auto old_part_size = res.size();
+                    std::erase_if(res, [&bucket_numbers](const ServerDataPartPtr & part) {
+                        return part->part_model().bucket_number() >= 0 && bucket_numbers.count(part->part_model().bucket_number()) == 0;
+                    });
+                    LOG_TRACE(log, "{} filter parts by {} buckets from {} parts to {} parts."
+                        ,storage->getStorageID().getNameForLogs()
+                        ,bucket_numbers.size()
+                        ,old_part_size
+                        ,res.size());
+                    bucket_filtered = old_part_size - res.size();
                 }
 
                 LOG_DEBUG(
                     log,
-                    "Elapsed {}ms to get {} parts in {} partitions for table : {} , source : {}, ts : {}"
+                    "Elapsed {}ms to get {} parts in {} partitions for table : {} , source : {}, ts : {}, visibility filtered {} parts, bucket filtered {} parts."
                     ,watch.elapsedMilliseconds()
                     ,res.size()
                     ,partitions.size()
                     ,storage->getStorageID().getNameForLogs()
                     ,source
-                    ,ts.toString());
+                    ,ts.toString()
+                    ,visibility_filtered
+                    ,bucket_filtered);
             },
             ProfileEvents::GetServerDataPartsInPartitionsSuccess,
             ProfileEvents::GetServerDataPartsInPartitionsFailed);
@@ -1770,16 +1907,25 @@ namespace Catalog
         const Strings & partitions,
         const TxnTimestamp & ts,
         const Context * session_context,
-        bool execute_filter)
+        const VisibilityLevel visibility,
+        const std::set<Int64> & bucket_numbers)
     {
         DeleteBitmapMetaPtrVector res;
         String source;
         runWithMetricSupport(
             [&] {
                 Stopwatch watch;
+                bool filtered_with_bucket_numbers = false;
                 auto fall_back = [&]() {
+                    DeleteBitmapMetaPtrVector res;
+                    const auto & merge_tree_storage = dynamic_cast<const MergeTreeMetaBase &>(*storage);
                     Strings all_partitions = getPartitionIDsFromMetastore(storage);
-                    return getDeleteBitmapsInPartitionsImpl(storage, partitions, all_partitions, ts);
+                    DataModelDeleteBitmapPtrVector bitmaps = getDeleteBitmapsInPartitionsImpl(storage, partitions, all_partitions, ts);
+                    for (auto & ele : bitmaps)
+                    {
+                        res.emplace_back(std::make_shared<DeleteBitmapMeta>(merge_tree_storage, ele));
+                    }
+                    return res;
                 };
 
                 if (!dynamic_cast<const MergeTreeMetaBase *>(storage.get()))
@@ -1820,7 +1966,7 @@ namespace Catalog
                         res = context.getPartCacheManager()->getOrSetDeleteBitmapInPartitions(
                             *storage,
                             partitions,
-                            [&](const Strings & required_partitions, const Strings & full_partitions) -> DeleteBitmapMetaPtrVector {
+                            [&](const Strings & required_partitions, const Strings & full_partitions) -> DataModelDeleteBitmapPtrVector {
                                 miss_cache = true;
                                 return getDeleteBitmapsInPartitionsImpl(storage, required_partitions, full_partitions, TxnTimestamp::maxTS());
                             },
@@ -1834,8 +1980,11 @@ namespace Catalog
                 {
                     try
                     {
-                        res = context.getCnchServerClientPool().get(host_with_rpc)->fetchDeleteBitmaps(host_with_rpc, storage, partitions, ts);
+                        res = context.getCnchServerClientPool()
+                                  .get(host_with_rpc)
+                                  ->fetchDeleteBitmaps(host_with_rpc, storage, partitions, ts, bucket_numbers);
                         source = "TargetServer(" + host_with_rpc + ")";
+                        filtered_with_bucket_numbers = true;
                     }
                     catch (...)
                     {
@@ -1845,18 +1994,55 @@ namespace Catalog
                     }
                 }
 
+                size_t size_before = res.size();
+
                 /// filter out invisible bitmaps (uncommitted or invisible to current txn)
-                if (execute_filter)
-                    getVisibleBitmaps(res, ts, this, nullptr);
+                size_t visibility_filtered = 0;
+                bool filter_executed = false;
+                if (visibility != VisibilityLevel::All)
+                {
+                    visibility_filtered = res.size();
+                    filter_executed = true;
+                    auto * txn_record_cache = context.getServerType() == ServerType::cnch_server
+                        ? context.getCnchTransactionCoordinator().getFinishedOrFailedTxnRecordCache()
+                        : nullptr;
+                    getVisibleBitmaps(res, ts, this, nullptr, txn_record_cache);
+                    visibility_filtered -= res.size();
+                }
+
+                size_t bucket_filtered = 0;
+                if (!res.empty() && !filtered_with_bucket_numbers && !bucket_numbers.empty() && storage->isBucketTable()
+                    && isTableClustered(storage->getStorageUUID()))
+                {
+                    auto old_delete_bitmap_size = res.size();
+                    std::erase_if(res, [&bucket_numbers](const DeleteBitmapMetaPtr & bitmap) {
+                        return bitmap->getModel()->has_bucket_number() && bitmap->getModel()->bucket_number() >= 0
+                            && bucket_numbers.count(bitmap->getModel()->bucket_number()) == 0;
+                    });
+                    LOG_TRACE(
+                        log,
+                        "{} filter delete bitmaps by {} buckets from {} bitmaps to {} bitmaps.",
+                        storage->getStorageID().getNameForLogs(),
+                        bucket_numbers.size(),
+                        old_delete_bitmap_size,
+                        res.size());
+                    bucket_filtered = old_delete_bitmap_size - res.size();
+                }
+
                 LOG_DEBUG(
                     log,
-                    "Elapsed {}ms to get {} delete bitmaps in {} partitions for table : {} , source : {}, ts : {}"
-                    ,watch.elapsedMilliseconds()
-                    ,res.size()
-                    ,partitions.size()
-                    ,storage->getStorageID().getNameForLogs()
-                    ,source
-                    ,ts.toString());
+                    "Elapsed {}ms to get {}/{} delete bitmaps in {} partitions for table: {} , source: {}, ts: {}, visibility filtered "
+                    "{} bitmaps (executed: {}), bucket filtered {} bitmaps.",
+                    watch.elapsedMilliseconds(),
+                    res.size(),
+                    size_before,
+                    partitions.size(),
+                    storage->getStorageID().getNameForLogs(),
+                    source,
+                    ts.toString(),
+                    visibility_filtered,
+                    filter_executed,
+                    bucket_filtered);
             },
             ProfileEvents::GetDeleteBitmapsFromCacheInPartitionsSuccess,
             ProfileEvents::GetDeleteBitmapsFromCacheInPartitionsFailed);
@@ -1866,8 +2052,15 @@ namespace Catalog
     ServerDataPartsWithDBM Catalog::getTrashedPartsInPartitionsWithDBM(const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts)
     {
         ServerDataPartsWithDBM res;
-        res.first = getTrashedPartsInPartitions(storage, partitions, ts, /*execute_filter=*/ false);
-        res.second = getTrashedDeleteBitmapsInPartitions(storage, partitions, ts, /*execute_filter=*/ false);
+        res.first = getTrashedPartsInPartitions(storage, partitions, ts, VisibilityLevel::All);
+
+        if (res.first.empty())
+            return res;
+
+        bool is_unique_table = storage->getInMemoryMetadataPtr()->hasUniqueKey();
+        if (is_unique_table)
+            res.second = getTrashedDeleteBitmapsInPartitions(storage, partitions, ts, VisibilityLevel::All);
+
         if (ts)
         {
             LOG_DEBUG(
@@ -1879,10 +2072,13 @@ namespace Catalog
                 res.second.size(),
                 ts.toString());
 
+            auto * txn_record_cache =
+                context.getServerType() == ServerType::cnch_server ? context.getCnchTransactionCoordinator().getFinishedOrFailedTxnRecordCache() : nullptr;
             /// Make sure they use the same records of transactions list.
             auto txn_records = getTransactionRecords(res.first, res.second);
-            getVisibleServerDataParts(res.first, ts, this, &txn_records);
-            getVisibleBitmaps(res.second, ts, this, &txn_records);
+            getVisibleServerDataParts(res.first, ts, this, &txn_records, txn_record_cache);
+            if (is_unique_table)
+                getVisibleBitmaps(res.second, ts, this, &txn_records, txn_record_cache);
 
             LOG_DEBUG(
                 log,
@@ -1896,7 +2092,7 @@ namespace Catalog
         return res;
     }
 
-    ServerDataPartsVector Catalog::getTrashedPartsInPartitions(const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts, bool execute_filter)
+    ServerDataPartsVector Catalog::getTrashedPartsInPartitions(const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts, VisibilityLevel visibility)
     {
         ServerDataPartsVector res;
         runWithMetricSupport(
@@ -1917,8 +2113,13 @@ namespace Catalog
                 size_t size_before = res.size();
 
                 // TODO: should we remove the visibility check logic for trashed parts?
-                if (ts && execute_filter)
-                    getVisibleServerDataParts(res, ts, this, nullptr);
+                if (ts && visibility != VisibilityLevel::All)
+                {
+                    auto * txn_record_cache = context.getServerType() == ServerType::cnch_server
+                        ? context.getCnchTransactionCoordinator().getFinishedOrFailedTxnRecordCache()
+                        : nullptr;
+                    getVisibleServerDataParts(res, ts, this, nullptr, txn_record_cache);
+                }
 
                 LOG_DEBUG(
                     log,
@@ -1935,7 +2136,18 @@ namespace Catalog
         return res;
     }
 
-    ServerDataPartsVector Catalog::getAllServerDataParts(const ConstStoragePtr & storage, const TxnTimestamp & ts, const Context * session_context, VisibilityLevel visibility)
+    bool Catalog::hasTrashedPartsInPartition(const ConstStoragePtr & storage, const String & partition)
+    {
+        String uuid = UUIDHelpers::UUIDToString(storage->getStorageUUID());
+        String trash_part_prefix = MetastoreProxy::trashItemsPrefix(name_space, uuid) + PART_STORE_PREFIX + partition;
+
+        auto it = meta_proxy->getByPrefix(trash_part_prefix, 10);
+
+        return it->next();
+    }
+
+    ServerDataPartsVector Catalog::getAllServerDataParts(
+        const ConstStoragePtr & storage, const TxnTimestamp & ts, const Context * session_context, const VisibilityLevel visibility)
     {
         ServerDataPartsVector res;
         runWithMetricSupport(
@@ -2112,16 +2324,17 @@ namespace Catalog
                                                         && !storage->getInMemoryMetadataPtr()->getIsUserDefinedExpressionFromClusterByKey();
                 if (storage->isBucketTable() && !skip_table_definition_hash_check)
                 {
+                    auto table_definition_hash = storage->getTableHashForClusterBy();
                     for (auto & part : parts)
                     {
                         if (!part->deleted
-                            && (part->bucket_number < 0 || storage->getTableHashForClusterBy() != part->table_definition_hash))
+                            && (part->bucket_number < 0 || !table_definition_hash.match(part->table_definition_hash)))
                         {
                             LOG_DEBUG(
                                 log,
                                 "Part's table_definition_hash {} is different from target table's table_definition_hash {}"
                                 ,part->table_definition_hash
-                                ,storage->getTableHashForClusterBy());
+                                ,table_definition_hash.toString());
 
                             throw Exception(
                                 "Source table is not a bucket table or has a different CLUSTER BY definition from the target table. ",
@@ -2136,11 +2349,12 @@ namespace Catalog
                     && skip_table_definition_hash_check
                     && isTableClustered(storage->getStorageUUID()))
                 {
+                    auto table_definition_hash = storage->getTableHashForClusterBy();
                     for (auto & part : parts)
                     {
-                        if (!part->deleted && (storage->getTableHashForClusterBy() != part->table_definition_hash))
+                        if (!part->deleted && !table_definition_hash.match(part->table_definition_hash))
                         {
-                            setTableClusterStatus(storage->getStorageUUID(), false, storage->getTableHashForClusterBy());
+                            setTableClusterStatus(storage->getStorageUUID(), false, table_definition_hash.getDeterminHash());
                             break;
                         }
                     }
@@ -2232,7 +2446,7 @@ namespace Catalog
             assertLocalServerThrowIfNot(storage);
 
         // commit parts and delete bitmaps in one batch if the size is small.
-        if (total_parts_number + delete_bitmaps.size() + total_staged_parts_num < max_commit_size_one_batch)
+        if (total_parts_number + delete_bitmaps.size() + total_staged_parts_num < settings.max_commit_size_one_batch)
         {
             commit_in_batch(
                 {0,
@@ -2252,49 +2466,49 @@ namespace Catalog
         {
             // commit data parts first
             size_t batch_count{0};
-            while (batch_count + max_commit_size_one_batch < total_parts_number)
+            while (batch_count + settings.max_commit_size_one_batch < total_parts_number)
             {
                 commit_in_batch(
                     {batch_count,
-                     batch_count + max_commit_size_one_batch,
+                     batch_count + settings.max_commit_size_one_batch,
                      0,
                      0,
                      0,
                      0,
                      batch_count,
-                     batch_count + max_commit_size_one_batch,
+                     batch_count + settings.max_commit_size_one_batch,
                      0,
                      0,
                      0,
                      0});
-                batch_count += max_commit_size_one_batch;
+                batch_count += settings.max_commit_size_one_batch;
             }
             commit_in_batch({batch_count, total_parts_number, 0, 0, 0, 0, batch_count, total_parts_number, 0, 0, 0, 0});
 
             // then commit delete bitmap
             batch_count = 0;
-            while (batch_count + max_commit_size_one_batch < delete_bitmaps.size())
+            while (batch_count + settings.max_commit_size_one_batch < delete_bitmaps.size())
             {
                 commit_in_batch(
                     {0,
                      0,
                      batch_count,
-                     batch_count + max_commit_size_one_batch,
+                     batch_count + settings.max_commit_size_one_batch,
                      0,
                      0,
                      0,
                      0,
                      batch_count,
-                     batch_count + max_commit_size_one_batch,
+                     batch_count + settings.max_commit_size_one_batch,
                      0,
                      0});
-                batch_count += max_commit_size_one_batch;
+                batch_count += settings.max_commit_size_one_batch;
             }
             commit_in_batch({0, 0, batch_count, total_deleted_bitmaps_number, 0, 0, 0, 0, batch_count, total_deleted_bitmaps_number, 0, 0});
 
             // then commit staged parts
             batch_count = 0;
-            while (batch_count + max_commit_size_one_batch < total_staged_parts_num)
+            while (batch_count + settings.max_commit_size_one_batch < total_staged_parts_num)
             {
                 commit_in_batch(
                     {0,
@@ -2302,14 +2516,14 @@ namespace Catalog
                      0,
                      0,
                      batch_count,
-                     batch_count + max_commit_size_one_batch,
+                     batch_count + settings.max_commit_size_one_batch,
                      0,
                      0,
                      0,
                      0,
                      batch_count,
-                     batch_count + max_commit_size_one_batch});
-                batch_count += max_commit_size_one_batch;
+                     batch_count + settings.max_commit_size_one_batch});
+                batch_count += settings.max_commit_size_one_batch;
             }
             commit_in_batch({0, 0, 0, 0, batch_count, total_staged_parts_num, 0, 0, 0, 0, batch_count, total_staged_parts_num});
         }
@@ -2357,14 +2571,25 @@ namespace Catalog
         if (!parts.empty())
         {
             Strings current_partitions = getPartitionIDs(storage, nullptr);
+            std::unordered_set<String> deleting_partitions;
+            if (context.getPartCacheManager())
+                deleting_partitions = context.getPartCacheManager()->getDeletingPartitions(storage);
             meta_proxy->prepareAddDataParts(
                 name_space,
                 UUIDHelpers::UUIDToString(storage->getStorageID().uuid),
                 current_partitions,
+                deleting_partitions,
                 parts,
                 batch_writes,
                 expected_parts,
                 preallocate_mode);
+
+            // reset partition GC status if new data inserted into the deleting partition
+            if (!deleting_partitions.empty())
+            {
+                Strings partition_to_reset{deleting_partitions.begin(), deleting_partitions.end()};
+                context.getPartCacheManager()->updatePartitionGCTime(storage, partition_to_reset, 0);
+            }
         }
         meta_proxy->prepareAddDeleteBitmaps(
             name_space, UUIDHelpers::UUIDToString(storage->getStorageID().uuid), delete_bitmaps, batch_writes, expected_bitmaps);
@@ -2466,6 +2691,33 @@ namespace Catalog
         return partition_list;
     }
 
+    PartitionWithGCStatus Catalog::getPartitionsWithGCStatus(const StoragePtr & storage, const Strings & required_partitions)
+    {
+        PartitionWithGCStatus res;
+        if (required_partitions.empty())
+            return res;
+        if (auto * cnch_table = dynamic_cast<MergeTreeMetaBase *>(storage.get()))
+        {
+            PartitionMap partitions;
+            if (auto cache_manager = context.getPartCacheManager(); cache_manager)
+            {
+                const auto host_port = context.getCnchTopologyMaster()->getTargetServer(
+                    UUIDHelpers::UUIDToString(storage->getStorageUUID()), storage->getServerVwName(), true);
+                if (!host_port.empty() && isLocalServer(host_port.getRPCAddress(), std::to_string(context.getRPCPort()))
+                    && cache_manager->getPartitionInfo(*cnch_table, partitions, host_port.topology_version, required_partitions))
+                {
+                    for (const auto & p : partitions)
+                    {
+                        if (!p.second->part_cache_status.isLoaded() || p.second->metrics_ptr->read().total_parts_number!=0)
+                            continue;
+                        res.emplace(p.first, p.second->gctime);
+                    }
+                }
+            }
+        }
+        return res;
+    }
+
     Strings Catalog::getPartitionIDs(const ConstStoragePtr & storage, const Context * /*session_context*/)
     {
         Strings partition_ids;
@@ -2539,8 +2791,10 @@ namespace Catalog
                     Protos::PartitionMeta partition_meta;
                     partition_meta.ParseFromString(it->value());
                     auto partition_ptr = createPartitionFromMetaModel(table, partition_meta);
-                    partition_list.emplace(
-                        partition_meta.id(), std::make_shared<CnchPartitionInfo>(table_uuid, partition_ptr, partition_meta.id()));
+                    auto partition_info = std::make_shared<CnchPartitionInfo>(table_uuid, partition_ptr, partition_meta.id());
+                    if (partition_meta.has_gctime())
+                        partition_info->gctime = partition_meta.gctime();
+                    partition_list.emplace(partition_meta.id(), std::move(partition_info));
                 }
             },
             ProfileEvents::GetPartitionsFromMetastoreSuccess,
@@ -3106,13 +3360,14 @@ namespace Catalog
                                                         && !table->getInMemoryMetadataPtr()->getIsUserDefinedExpressionFromClusterByKey();
                 if (table->isBucketTable() && !skip_table_definition_hash_check)
                 {
+                    auto table_definition_hash = table->getTableHashForClusterBy();
                     for (const auto & part : commit_data.data_parts)
                     {
-                        if (!part->deleted && (part->bucket_number < 0 || table->getTableHashForClusterBy() != part->table_definition_hash))
+                        if (!part->deleted && (part->bucket_number < 0 || !table_definition_hash.match(part->table_definition_hash)))
                             throw Exception(
                                 "Part's table_definition_hash [" + std::to_string(part->table_definition_hash)
                                     + "] is different from target table's table_definition_hash  ["
-                                    + std::to_string(table->getTableHashForClusterBy()) + "]",
+                                    + table_definition_hash.toString() + "]",
                                 ErrorCodes::BUCKET_TABLE_ENGINE_MISMATCH);
                     }
                 }
@@ -3123,11 +3378,12 @@ namespace Catalog
                     && skip_table_definition_hash_check
                     && isTableClustered(table->getStorageUUID()))
                 {
+                    auto table_definition_hash = table->getTableHashForClusterBy();
                     for (const auto & part : commit_data.data_parts)
                     {
-                        if (!part->deleted && (table->getTableHashForClusterBy() != part->table_definition_hash))
+                        if (!part->deleted && !table_definition_hash.match(part->table_definition_hash))
                         {
-                            setTableClusterStatus(table->getStorageUUID(), false, table->getTableHashForClusterBy());
+                            setTableClusterStatus(table->getStorageUUID(), false, table_definition_hash.getDeterminHash());
                             break;
                         }
                     }
@@ -3356,10 +3612,7 @@ namespace Catalog
     }
 
     /// clear garbage parts generated by aborted or failed transaction.
-    void Catalog::clearParts(
-        const StoragePtr & storage,
-        const CommitItems & commit_data,
-        const bool skip_part_cache)
+    void Catalog::clearParts(const StoragePtr & storage, const CommitItems & commit_data)
     {
         runWithMetricSupport(
             [&] {
@@ -3374,6 +3627,31 @@ namespace Catalog
                     ,commit_data.delete_bitmaps.size()
                     ,commit_data.staged_parts.size()
                     ,storage->getStorageID().getNameForLogs());
+
+                const auto host_ports = context.getCnchTopologyMaster()->getTargetServer(
+                    UUIDHelpers::UUIDToString(storage->getStorageUUID()), storage->getServerVwName(), false);
+
+                if (!isLocalServer(host_ports.getRPCAddress(), std::to_string(context.getRPCPort())))
+                {
+                    try
+                    {
+                        LOG_DEBUG(
+                            log,
+                            "Redirect clearParts request to remote host : {} for table {}",
+                            host_ports.toDebugString(),
+                            storage->getStorageID().getNameForLogs());
+                        context.getCnchServerClientPool().get(host_ports)->redirectClearParts(storage, commit_data);
+                        return;
+                    }
+                    catch (Exception & e)
+                    {
+                        /// if remote quest got exception and cannot fallback to commit to current node, throw exception directly
+                        throw Exception(
+                            "Fail to redirect clearParts request to remote host : " + host_ports.toDebugString()
+                                + ". Error message : " + e.what(),
+                            ErrorCodes::CATALOG_COMMIT_PART_ERROR);
+                    }
+                }
 
                 Strings drop_keys;
                 drop_keys.reserve(commit_data.data_parts.size() + commit_data.delete_bitmaps.size() + commit_data.staged_parts.size());
@@ -3394,12 +3672,13 @@ namespace Catalog
 
                 // Clear staged part meta
                 const auto staged_part_prefix = MetastoreProxy::stagedDataPartPrefix(name_space, table_uuid);
-                for (auto & part : commit_data.staged_parts)
+                for (const auto & part : commit_data.staged_parts)
                     drop_keys.emplace_back(staged_part_prefix + part->info.getPartName());
 
-                bool need_invalid_cache = context.getPartCacheManager() && !commit_data.data_parts.empty() && !skip_part_cache;
+                bool need_invalid_part_cache = context.getPartCacheManager() && !commit_data.data_parts.empty();
+                bool need_invalid_bitmap_cache = context.getPartCacheManager() && !commit_data.delete_bitmaps.empty();
                 /// drop in batch if the number of drop keys greater than max_drop_size_one_batch
-                if (drop_keys.size() > max_drop_size_one_batch)
+                if (drop_keys.size() > settings.max_drop_size_one_batch)
                 {
                     size_t batch_count{0};
                     const size_t mark1 = commit_data.data_parts.size();
@@ -3409,12 +3688,12 @@ namespace Catalog
                     {
                         meta_proxy->multiDrop(Strings{
                             drop_keys.begin() + batch_count,
-                            drop_keys.begin() + std::min(batch_count + max_drop_size_one_batch, drop_keys.size())});
-                        /// clear part cache immediately after drop from metastore
-                        if (need_invalid_cache)
-                        {
-                            size_t batch_count_end = batch_count + max_drop_size_one_batch;
+                            drop_keys.begin() + std::min(batch_count + settings.max_drop_size_one_batch, drop_keys.size())});
 
+                        const size_t batch_count_end = batch_count + settings.max_drop_size_one_batch;
+                        /// clear part cache immediately after drop from metastore
+                        if (need_invalid_part_cache)
+                        {
                             // │  parts  │  delete bitmaps  │  staged parts  │
                             // ▼         ▼                  ▼                ▼
                             // └─────────────────────────────────────────────┘
@@ -3432,33 +3711,32 @@ namespace Catalog
                                             commit_data.data_parts.begin() + left_bound, commit_data.data_parts.begin() + right_bound});
                                 }
                             }
-
+                        }
+                        if (need_invalid_bitmap_cache)
+                        {
                             /// For delete bitmaps.
-                            {
-                                size_t left_bound = std::max(batch_count, mark1);
-                                size_t right_bound = std::min(batch_count_end, mark2);
+                            const size_t left_bound = std::max(batch_count, mark1);
+                            const size_t right_bound = std::min(batch_count_end, mark2);
 
-                                if (left_bound < right_bound)
-                                {
-                                    context.getPartCacheManager()->invalidDeleteBitmapCache(
-                                        storage->getStorageID().uuid,
-                                        DeleteBitmapMetaPtrVector{
-                                            commit_data.delete_bitmaps.begin() + left_bound - mark1,
-                                            commit_data.delete_bitmaps.begin() + right_bound - mark1});
-                                }
+                            if (left_bound < right_bound)
+                            {
+                                context.getPartCacheManager()->invalidDeleteBitmapCache(
+                                    storage->getStorageID().uuid,
+                                    DeleteBitmapMetaPtrVector{
+                                        commit_data.delete_bitmaps.begin() + left_bound - mark1,
+                                        commit_data.delete_bitmaps.begin() + right_bound - mark1});
                             }
                         }
-                        batch_count += max_drop_size_one_batch;
+                        batch_count += settings.max_drop_size_one_batch;
                     }
                 }
                 else
                 {
                     meta_proxy->multiDrop(drop_keys);
-                    if (need_invalid_cache)
-                    {
+                    if (need_invalid_part_cache)
                         context.getPartCacheManager()->invalidPartCache(storage->getStorageID().uuid, commit_data.data_parts);
+                    if (need_invalid_bitmap_cache)
                         context.getPartCacheManager()->invalidDeleteBitmapCache(storage->getStorageID().uuid, commit_data.delete_bitmaps);
-                    }
                 }
 
                 LOG_INFO(
@@ -3474,35 +3752,47 @@ namespace Catalog
     }
 
     // write undo buffer before write vfs
-    void Catalog::writeUndoBuffer(const String & uuid, const TxnTimestamp & txnID, const UndoResources & resources)
+    void Catalog::writeUndoBuffer(
+        const StorageID & storage_id, const TxnTimestamp & txnID, const UndoResources & resources, PlanSegmentInstanceId instance_id)
     {
         runWithMetricSupport(
             [&] {
+                if (storage_id.uuid == UUIDHelpers::Nil)
+                    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Storage uuid of table {} can't be empty", storage_id.getNameForLogs());
+                String uuid_str = UUIDHelpers::UUIDToString(storage_id.uuid);
+
                 /// write resources in batch, max batch size is max_commit_size_one_batch
-                auto begin = resources.begin(), end = std::min(resources.end(), begin + max_commit_size_one_batch);
+                auto begin = resources.begin(), end = std::min(resources.end(), begin + settings.max_commit_size_one_batch);
                 while (begin < end)
                 {
                     UndoResources tmp{begin, end};
-                    meta_proxy->writeUndoBuffer(name_space, txnID.toUInt64(), context.getHostWithPorts().getRPCAddress(), uuid, tmp);
+                    meta_proxy->writeUndoBuffer(
+                        name_space, txnID.toUInt64(), context.getHostWithPorts().getRPCAddress(), uuid_str, tmp, instance_id, settings.write_undo_buffer_new_key);
                     begin = end;
-                    end = std::min(resources.end(), begin + max_commit_size_one_batch);
+                    end = std::min(resources.end(), begin + settings.max_commit_size_one_batch);
                 }
             },
             ProfileEvents::WriteUndoBufferConstResourceSuccess,
             ProfileEvents::WriteUndoBufferConstResourceFailed);
     }
 
-    void Catalog::writeUndoBuffer(const String & uuid, const TxnTimestamp & txnID, UndoResources && resources)
+    void Catalog::writeUndoBuffer(
+        const StorageID & storage_id, const TxnTimestamp & txnID, UndoResources && resources, PlanSegmentInstanceId instance_id)
     {
         runWithMetricSupport(
             [&] {
-                auto begin = resources.begin(), end = std::min(resources.end(), begin + max_commit_size_one_batch);
+                if (storage_id.uuid == UUIDHelpers::Nil)
+                    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Storage uuid of table {} can't be empty", storage_id.getNameForLogs());
+                String uuid_str = UUIDHelpers::UUIDToString(storage_id.uuid);
+
+                auto begin = resources.begin(), end = std::min(resources.end(), begin + settings.max_commit_size_one_batch);
                 while (begin < end)
                 {
                     UndoResources tmp{std::make_move_iterator(begin), std::make_move_iterator(end)};
-                    meta_proxy->writeUndoBuffer(name_space, txnID.toUInt64(), context.getHostWithPorts().getRPCAddress(), uuid, tmp);
+                    meta_proxy->writeUndoBuffer(
+                        name_space, txnID.toUInt64(), context.getHostWithPorts().getRPCAddress(), uuid_str, tmp, instance_id, settings.write_undo_buffer_new_key);
                     begin = end;
-                    end = std::min(resources.end(), begin + max_commit_size_one_batch);
+                    end = std::min(resources.end(), begin + settings.max_commit_size_one_batch);
                 }
             },
             ProfileEvents::WriteUndoBufferNoConstResourceSuccess,
@@ -3521,22 +3811,97 @@ namespace Catalog
             ProfileEvents::ClearUndoBufferFailed);
     }
 
+    // clear undo buffer by segment instance
+    void Catalog::clearUndoBuffer(const TxnTimestamp & txnID, const String & rpc_address, PlanSegmentInstanceId instance_id)
+    {
+        runWithMetricSupport(
+            [&] {
+                /// clear by prefix (txnID) for undo buffer.
+                meta_proxy->clearUndoBuffer(name_space, txnID.toUInt64(), rpc_address, instance_id);
+            },
+            ProfileEvents::ClearUndoBufferSuccess,
+            ProfileEvents::ClearUndoBufferFailed);
+    }
+
     std::unordered_map<String, UndoResources> Catalog::getUndoBuffer(const TxnTimestamp & txnID)
     {
         std::unordered_map<String, UndoResources> res;
         runWithMetricSupport(
             [&] {
-                auto it = meta_proxy->getUndoBuffer(name_space, txnID.toUInt64());
-                while (it->next())
-                {
-                    UndoResource resource = UndoResource::deserialize(it->value());
-                    resource.txn_id = txnID;
-                    res[resource.uuid()].emplace_back(std::move(resource));
-                }
+                auto get_func = [&](bool write_undo_buffer_new_key) {
+                    auto it = meta_proxy->getUndoBuffer(name_space, txnID.toUInt64(), write_undo_buffer_new_key);
+                    while (it->next())
+                    {
+                        UndoResource resource = UndoResource::deserialize(it->value());
+                        resource.txn_id = txnID;
+                        res[resource.uuid()].emplace_back(std::move(resource));
+                    }
+                };
+                /// Get both old and new undo buffer keys;
+                get_func(true);
+                get_func(false);
             },
             ProfileEvents::GetUndoBufferSuccess,
             ProfileEvents::GetUndoBufferFailed);
         return res;
+    }
+
+    std::unordered_map<String, UndoResources>
+    Catalog::getUndoBuffer(const TxnTimestamp & txnID, const String & rpc_address, PlanSegmentInstanceId instance_id)
+    {
+        std::unordered_map<String, UndoResources> res;
+        runWithMetricSupport(
+            [&] {
+                auto get_func = [&](bool write_undo_buffer_new_key) {
+                    auto it = meta_proxy->getUndoBuffer(name_space, txnID.toUInt64(), rpc_address, instance_id, write_undo_buffer_new_key);
+                    while (it->next())
+                    {
+                        UndoResource resource = UndoResource::deserialize(it->value());
+                        resource.txn_id = txnID;
+                        res[resource.uuid()].emplace_back(std::move(resource));
+                    }
+                };
+                /// Get both old and new undo buffer keys;
+                get_func(true);
+                get_func(false);
+            },
+            ProfileEvents::GetUndoBufferSuccess,
+            ProfileEvents::GetUndoBufferFailed);
+        return res;
+    }
+
+    uint32_t Catalog::applyUndos(
+        const TransactionRecord & txn_record, const StoragePtr & table, const UndoResources & resources, bool & clean_fs_lock_by_scan)
+    {
+        auto * storage = dynamic_cast<MergeTreeMetaBase *>(table.get());
+        if (!storage)
+            throw Exception("Table is not of MergeTree class", ErrorCodes::LOGICAL_ERROR);
+
+        // clean vfs
+        for (const auto & resource : resources)
+        {
+            resource.clean(*this, storage);
+        }
+
+        UndoResourceNames names = integrateResources(resources);
+        /// Release directory lock if any
+        if (!names.kvfs_lock_keys.empty())
+        {
+            clearFilesysLocks({names.kvfs_lock_keys.begin(), names.kvfs_lock_keys.end()}, txn_record.txnID());
+            clean_fs_lock_by_scan = false;
+        }
+
+        // Clean attach parts for s3 aborted
+        S3AttachMetaAction::abortByUndoBuffer(context, table, resources);
+        // Clean detach parts for s3 aborted
+        S3DetachMetaAction::abortByUndoBuffer(context, table, resources);
+
+        auto intermediate_parts = getDataPartsByNames(names.parts, table, 0);
+        auto undo_bitmaps = getDeleteBitmapByKeys(table, names.bitmaps);
+        auto staged_parts = getStagedDataPartsByNames(names.staged_parts, table, 0);
+        clearParts(table, CommitItems{intermediate_parts, undo_bitmaps, staged_parts});
+
+        return intermediate_parts.size() + undo_bitmaps.size();
     }
 
     std::unordered_map<UInt64, UndoResources> Catalog::getAllUndoBuffer()
@@ -3582,7 +3947,6 @@ namespace Catalog
             return false;
 
         bool ret = false;
-        const String ub_prefix{UNDO_BUFFER_PREFIX};
         while (true)
         {
             ret = metastore_iter->next();
@@ -3590,14 +3954,12 @@ namespace Catalog
                 break;
             cur_undo_resource = UndoResource::deserialize(metastore_iter->value());
             const String & key = metastore_iter->key();
-            auto pos = key.find(ub_prefix);
-            if (pos == std::string::npos || pos + ub_prefix.size() > key.size())
+            UInt64 txn_id;
+            if (!parseTxnIdFromUndoBufferKey(key, txn_id))
             {
                 LOG_ERROR(log, "Invalid undobuffer key: {}", metastore_iter->key());
                 continue;
             }
-
-            UInt64 txn_id = std::stoull(key.substr(pos + ub_prefix.size()));
             cur_undo_resource->txn_id = txn_id;
             valid = true;
             break;
@@ -3794,7 +4156,6 @@ namespace Catalog
             [&] {
                 auto db = storage.getDatabaseName();
                 auto table = storage.getTableName();
-                auto uuid = storage.getStorageUUID();
                 if (dir.empty() || db.empty() || table.empty())
                 {
                     throw Exception(
@@ -3843,7 +4204,7 @@ namespace Catalog
 
                 /// Write the undo resouce for the lock
                 UndoResource ub(txn_id, UndoResourceType::KVFSLockKey, normalized_dir);
-                writeUndoBuffer(UUIDHelpers::UUIDToString(uuid), txn_id, {ub});
+                writeUndoBuffer(storage.getCnchStorageID(), txn_id, {ub});
                 /// Write the lock
                 meta_proxy->writeFilesysLock(name_space, txn_id, normalized_dir, db, table);
                 res = txn_id;
@@ -4093,17 +4454,17 @@ namespace Catalog
         return res;
     }
 
-    Catalog::DataModelUDFs Catalog::getAllUDFs(const String & database_name, const String & function_name)
+    Catalog::DataModelUDFs Catalog::getAllUDFs(const String & prefix_name, const String & function_name)
     {
         DataModelUDFs res;
         runWithMetricSupport(
             [&] {
-                if (!database_name.empty() && !function_name.empty())
+                if (!prefix_name.empty() && !function_name.empty())
                 {
-                    res = getUDFByName({database_name + "." + function_name});
+                    res = getUDFByName({prefix_name + "." + function_name});
                     return;
                 }
-                const auto & it = meta_proxy->getAllUDFsMeta(name_space, database_name);
+                const auto & it = meta_proxy->getAllUDFsMeta(name_space, prefix_name);
                 while (it->next())
                 {
                     DB::Protos::DataModelUDF model;
@@ -4313,11 +4674,11 @@ namespace Catalog
             ProfileEvents::ClearTableMetaForGCFailed);
     }
 
-    void Catalog::clearDataPartsMeta(const StoragePtr & storage, const DataPartsVector & parts, const bool skip_part_cache)
+    void Catalog::clearDataPartsMeta(const StoragePtr & storage, const DataPartsVector & parts)
     {
         runWithMetricSupport(
             [&] {
-                clearParts(storage, CommitItems{parts, {}, {}}, skip_part_cache);
+                clearParts(storage, CommitItems{parts, {}, {}});
             },
             ProfileEvents::ClearDataPartsMetaSuccess,
             ProfileEvents::ClearDataPartsMetaFailed);
@@ -4338,9 +4699,9 @@ namespace Catalog
                 String table_uuid = UUIDHelpers::UUIDToString(storage->getStorageUUID());
                 String key_prefix = MetastoreProxy::stagedDataPartPrefix(name_space, table_uuid);
 
-                for (size_t beg = 0; beg < parts.size(); beg += max_drop_size_one_batch)
+                for (size_t beg = 0; beg < parts.size(); beg += settings.max_drop_size_one_batch)
                 {
-                    size_t end = std::min(beg + max_drop_size_one_batch, parts.size());
+                    size_t end = std::min(beg + settings.max_drop_size_one_batch, parts.size());
 
                     Strings drop_keys;
                     for (auto it = parts.begin() + beg; it != parts.begin() + end; ++it)
@@ -4414,15 +4775,31 @@ namespace Catalog
             ProfileEvents::ClearDeleteBitmapsMetaForTableFailed);
     }
 
-    TrashItems Catalog::getDataItemsInTrash(const StoragePtr & storage, const size_t & limit)
+    TrashItems Catalog::getDataItemsInTrash(const StoragePtr & storage, const size_t & limit, String * start_key)
     {
         TrashItems res;
         auto & merge_tree_storage = dynamic_cast<MergeTreeMetaBase &>(*storage);
         String uuid = UUIDHelpers::UUIDToString(storage->getStorageUUID());
         size_t prefix_length = MetastoreProxy::trashItemsPrefix(name_space, uuid).length();
 
-        auto it = meta_proxy->getItemsInTrash(name_space, uuid, limit);
-        while (it->next())
+        /// Try iterate from the last checkpoint.
+        auto it = meta_proxy->getItemsInTrash(name_space, uuid, limit, start_key != nullptr ? *start_key : "");
+
+        if (!it->next())
+        {
+            if (start_key == nullptr || start_key->empty())
+                return res;
+
+            /// If we encounter the empty range, try to iterate from the start.
+            if (start_key)
+                *start_key = "";
+            it = meta_proxy->getItemsInTrash(name_space, uuid, limit, "");
+
+            if (!it->next())
+                return res;
+        }
+
+        do
         {
             const auto & key = it->key();
             String meta_key = key.substr(prefix_length, String::npos);
@@ -4440,12 +4817,60 @@ namespace Catalog
                 res.delete_bitmaps.push_back(std::make_shared<DeleteBitmapMeta>(merge_tree_storage, model_ptr));
             }
             // not handling staged parts because we never move them to trash
-        }
+
+            // Save key so we can resume iteration in the next call.
+            if (start_key)
+                *start_key = key;
+        } while (it->next());
+
+        if (start_key && (res.size() < limit || limit == 0))
+            *start_key = "";
 
         return res;
     }
 
-    void Catalog::moveDataItemsToTrash(const StoragePtr & table, const TrashItems & items, const bool skip_part_cache, bool is_zombie_with_staging_txn_id)
+    void Catalog::markPartitionDeleted(const StoragePtr & table, const Strings & partitions)
+    {
+        if (partitions.empty() || !context.getPartCacheManager())
+            return;
+
+        StorageCnchMergeTree & merge_tree = dynamic_cast<StorageCnchMergeTree &>(*table);
+        String table_uuid = UUIDHelpers::UUIDToString(table->getStorageUUID());
+        auto current_ts = UInt32(time(nullptr));
+        // firstly, change the in-memory partition GC status into deleting
+        auto deleting_partitions = context.getPartCacheManager()->updatePartitionGCTime(table, partitions, UInt32(current_ts));
+        if (deleting_partitions.empty())
+            return;
+        // then, update the partition metadata
+
+        BatchCommitRequest batch_write;
+        for (auto it = deleting_partitions.begin(); it != deleting_partitions.end(); it++)
+        {
+            Protos::PartitionMeta partition_model;
+            partition_model.set_id(it->first);
+            partition_model.set_gctime(current_ts);
+            WriteBufferFromString buffer(*partition_model.mutable_partition_minmax());
+            it->second->partition_ptr->store(merge_tree, buffer);
+            batch_write.AddPut(SinglePutRequest(MetastoreProxy::tablePartitionInfoKey(name_space, table_uuid, it->first), partition_model.SerializeAsString()));
+        }
+
+        BatchCommitResponse resp;
+        meta_proxy->batchWrite(batch_write, resp);
+        LOG_DEBUG(log, "Deleting {} partition records in table {} with gc time {}", deleting_partitions.size(), table->getStorageID().getNameForLogs(), current_ts);
+    }
+
+    void Catalog::deletePartitionsMetadata(const StoragePtr & table, const PartitionWithGCStatus & partitions)
+    {
+        if (partitions.empty() || !context.getPartCacheManager())
+            return;
+
+        // remove the partition metadata with CAS
+        Strings deleted_partitions = meta_proxy->removePartitions(name_space, UUIDHelpers::UUIDToString(table->getStorageUUID()), partitions);
+        LOG_DEBUG(log, "Removed {} partition records in table {} from metastore. Now remove them from cache.", deleted_partitions.size(), table->getStorageID().getNameForLogs());
+        context.getPartCacheManager()->removeDeletedPartitions(table, deleted_partitions);
+    }
+
+    void Catalog::moveDataItemsToTrash(const StoragePtr & table, const TrashItems & items, bool is_zombie_with_staging_txn_id)
     {
         if (items.empty())
             return;
@@ -4466,9 +4891,8 @@ namespace Catalog
         String table_uuid = UUIDHelpers::UUIDToString(table->getStorageUUID());
         String part_meta_prefix = MetastoreProxy::dataPartPrefix(name_space, table_uuid);
         String staged_part_meta_prefix = MetastoreProxy::stagedDataPartPrefix(name_space, table_uuid);
-        String trash_item_prefix = MetastoreProxy::trashItemsPrefix(name_space, table_uuid);
 
-        bool need_invalid_cache = context.getPartCacheManager() && !skip_part_cache;
+        bool need_invalid_part_cache = context.getPartCacheManager() != nullptr;
 
         BatchCommitRequest batch_writes(false);
 
@@ -4522,11 +4946,11 @@ namespace Catalog
 
         meta_proxy->getMetastore()->adaptiveBatchWrite(batch_writes);
 
-        if (need_invalid_cache)
+        if (need_invalid_part_cache)
         {
             context.getPartCacheManager()->invalidPartCache(table->getStorageUUID(), items.data_parts);
-            context.getPartCacheManager()->invalidDeleteBitmapCache(table->getStorageUUID(), items.delete_bitmaps);
         }
+        context.getPartCacheManager()->invalidDeleteBitmapCache(table->getStorageUUID(), items.delete_bitmaps);
 
         LOG_INFO(
             log,
@@ -5019,16 +5443,33 @@ namespace Catalog
     {
         std::vector<std::shared_ptr<Protos::VersionedPartitions>> res;
         runWithMetricSupport(
-            [&] { res = meta_proxy->getMvBaseTables(name_space, uuid); },
+            [&] {
+                    meta_proxy->getMvMetaVersion(name_space, uuid);
+                    res = meta_proxy->getMvBaseTables(name_space, uuid);
+                },
             ProfileEvents::GetMvBaseTableIDSuccess,
             ProfileEvents::GetMvBaseTableIDFailed);
         return res;
     }
 
-    BatchCommitRequest Catalog::constructMvMetaRequests(const String & uuid,
-        std::vector<std::shared_ptr<Protos::VersionedPartition>> add_partitions, std::vector<std::shared_ptr<Protos::VersionedPartition>> drop_partitions)
+    String Catalog::getMvMetaVersion(const String & uuid)
     {
-        return meta_proxy->constructMvMetaRequests(name_space, uuid, add_partitions, drop_partitions);
+        String res;
+        runWithMetricSupport(
+            [&] {
+                    res = meta_proxy->getMvMetaVersion(name_space, uuid);
+                },
+            ProfileEvents::GetMvBaseTableVersionSuccess,
+            ProfileEvents::GetMvBaseTableVersionFailed);
+        return res;
+    }
+
+    BatchCommitRequest Catalog::constructMvMetaRequests(const String & uuid,
+        std::vector<std::shared_ptr<Protos::VersionedPartition>> add_partitions,
+        std::vector<std::shared_ptr<Protos::VersionedPartition>> drop_partitions,
+        String mv_version_ts)
+    {
+        return meta_proxy->constructMvMetaRequests(name_space, uuid, add_partitions, drop_partitions, mv_version_ts);
     }
 
     void Catalog::updateMvMeta(const String & uuid, std::vector<std::shared_ptr<Protos::VersionedPartitions>> versioned_partitions)
@@ -5046,6 +5487,13 @@ namespace Catalog
             ProfileEvents::UpdateMvMetaIDFailed);
     }
 
+    void Catalog::cleanMvMeta(const String & uuid)
+    {
+        runWithMetricSupport(
+            [&] { meta_proxy->cleanMvMeta(name_space, uuid); },
+            ProfileEvents::UpdateMvMetaIDSuccess,
+            ProfileEvents::UpdateMvMetaIDFailed);
+    }
 
     std::vector<UInt64> Catalog::getTrashDBVersions(const String & database)
     {
@@ -5156,6 +5604,7 @@ namespace Catalog
         latest_version.ParseFromString(tables_meta.back());
         const String & latest_db_name = latest_version.database();
         const String & latest_table_name = latest_version.name();
+        const UInt64 & latest_version_commit_ts =  latest_version.commit_time();
 
         std::vector<std::shared_ptr<DB::Protos::DataModelTable>> table_versions;
         for (auto & table_meta : tables_meta)
@@ -5176,6 +5625,7 @@ namespace Catalog
             return {};
 
         auto & table = table_versions.back();
+        table->set_latest_version(latest_version_commit_ts);
 
         /// collect all previous version's definition
         if (with_prev_versions)
@@ -5389,32 +5839,6 @@ namespace Catalog
     StoragePtr Catalog::createTableFromDataModel(const Context & context, const Protos::DataModelTable & data_model)
     {
         StoragePtr res = CatalogFactory::getTableByDataModel(Context::createCopy(context.shared_from_this()), &data_model);
-
-        /// set worker group for StorageCnchMergeTree if virtual warehouse is exists.
-        ///FIXME: if StorageCnchMergeTree is ready
-        // if (data_model.has_vw_name())
-        // {
-        //     if (auto * table = dynamic_cast<StorageCnchMergeTree *>(res.get()))
-        //     {
-        //         String vw_name = data_model.vw_name();
-        //         String worker_group_name = data_model.worker_group_name();
-        //         UInt64 worker_topology_hash = data_model.worker_topology_hash();
-
-        //         HostWithPortsVec workers;
-
-        //         try
-        //         {
-        //             workers = getWorkersInWorkerGroup(worker_group_name);
-        //         }
-        //         catch (...)
-        //         {
-        //             tryLogDebugCurrentException(__PRETTY_FUNCTION__);
-        //         }
-
-        //         table->setWorkerGroupInfo(vw_name, worker_group_name, worker_topology_hash);
-        //     }
-        // }
-
         return res;
     }
 
@@ -5543,18 +5967,18 @@ namespace Catalog
         return res;
     }
 
-    DeleteBitmapMetaPtrVector Catalog::getDeleteBitmapsInPartitionsFromMetastore(const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts, bool execute_filter)
+    DeleteBitmapMetaPtrVector Catalog::getDeleteBitmapsInPartitionsFromMetastore(const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts, VisibilityLevel visibility)
     {
-        return getDeleteBitmapsInPartitionsImpl(storage, partitions, ts, /*from_trash*/ false, execute_filter);
+        return getDeleteBitmapsInPartitionsImpl(storage, partitions, ts, /*from_trash*/ false, visibility);
     }
 
-    DeleteBitmapMetaPtrVector Catalog::getTrashedDeleteBitmapsInPartitions(const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts, bool execute_filter)
+    DeleteBitmapMetaPtrVector Catalog::getTrashedDeleteBitmapsInPartitions(const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts, VisibilityLevel visibility)
     {
-        return getDeleteBitmapsInPartitionsImpl(storage, partitions, ts, /*from_trash*/ true, execute_filter);
+        return getDeleteBitmapsInPartitionsImpl(storage, partitions, ts, /*from_trash*/ true, visibility);
     }
 
     DeleteBitmapMetaPtrVector
-    Catalog::getDeleteBitmapsInPartitionsImpl(const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts, bool from_trash, bool execute_filter)
+    Catalog::getDeleteBitmapsInPartitionsImpl(const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts, bool from_trash, VisibilityLevel visibility)
     {
         DeleteBitmapMetaPtrVector res;
         runWithMetricSupport(
@@ -5583,25 +6007,17 @@ namespace Catalog
                     create_func,
                     ts);
 
-                if (execute_filter)
+                if (visibility != VisibilityLevel::All)
                 {
+                    auto * txn_record_cache =
+                        context.getServerType() == ServerType::cnch_server ? context.getCnchTransactionCoordinator().getFinishedOrFailedTxnRecordCache() : nullptr;
                     /// filter out invisible bitmaps (uncommitted or invisible to current txn)
-                    getVisibleBitmaps(res, ts, this, nullptr);
+                    getVisibleBitmaps(res, ts, this, nullptr, txn_record_cache);
                 }
             },
             ProfileEvents::GetDeleteBitmapsInPartitionsSuccess,
             ProfileEvents::GetDeleteBitmapsInPartitionsFailed);
         return res;
-    }
-
-    void Catalog::removeDeleteBitmaps(const StoragePtr & storage, const DeleteBitmapMetaPtrVector & bitmaps)
-    {
-        runWithMetricSupport(
-            [&] {
-                clearParts(storage, CommitItems{{}, bitmaps, {}}, /*skip_part_cache*/ true);
-            },
-            ProfileEvents::RemoveDeleteBitmapsSuccess,
-            ProfileEvents::RemoveDeleteBitmapsFailed);
     }
 
     void Catalog::getKafkaOffsets(const String & consumer_group, cppkafka::TopicPartitionList & tpl)
@@ -6231,8 +6647,8 @@ namespace Catalog
             getPartitionIDs(to_tbl, nullptr),
             detached_bitmaps,
             bitmaps,
-            max_commit_size_one_batch,
-            max_drop_size_one_batch);
+            settings.max_commit_size_one_batch,
+            settings.max_drop_size_one_batch);
 
         if (context.getPartCacheManager())
         {
@@ -6341,8 +6757,8 @@ namespace Catalog
             commit_parts,
             attached_bitmaps,
             bitmaps,
-            max_commit_size_one_batch,
-            max_drop_size_one_batch);
+            settings.max_commit_size_one_batch,
+            settings.max_drop_size_one_batch);
 
         if (context.getPartCacheManager())
         {
@@ -6419,8 +6835,8 @@ namespace Catalog
             detached_visible_part_size,
             detached_staged_part_size,
             bitmap_names,
-            max_commit_size_one_batch,
-            max_drop_size_one_batch);
+            settings.max_commit_size_one_batch,
+            settings.max_drop_size_one_batch);
 
         Protos::DataModelPartVector attached_parts;
         for (const auto& [meta, version] : attached_metas)
@@ -6500,8 +6916,8 @@ namespace Catalog
             detached_part_metas,
             attached_bitmap_names,
             detached_bitmap_metas,
-            max_commit_size_one_batch,
-            max_drop_size_one_batch);
+            settings.max_commit_size_one_batch,
+            settings.max_drop_size_one_batch);
 
         if (context.getPartCacheManager())
         {
@@ -6611,7 +7027,12 @@ namespace Catalog
             ProfileEvents::DropAccessEntitySuccess,
             ProfileEvents::DropAccessEntityFailed);
         if (isSuccessful)
-            notifyOtherServersOnAccessEntityChange(context, type, name, uuid, log);
+        {
+            auto ctx = context.getGlobalContext();
+            ThreadFromGlobalPool([=] {
+                notifyOtherServersOnAccessEntityChange(*ctx, type, name, uuid);
+            }).detach();
+        }
     }
 
     void Catalog::putAccessEntity(EntityType type, AccessEntityModel & new_access_entity, AccessEntityModel & old_access_entity, bool replace_if_exists)
@@ -6630,11 +7051,20 @@ namespace Catalog
             ProfileEvents::PutAccessEntitySuccess,
             ProfileEvents::PutAccessEntityFailed);
         if (isSuccessful)
-            notifyOtherServersOnAccessEntityChange(context, type, new_access_entity.name(), RPCHelpers::createUUID(new_access_entity.uuid()), log);
+        {
+            auto ctx = context.getGlobalContext();
+            ThreadFromGlobalPool([=, old_name = old_access_entity.name(), new_name = new_access_entity.name(),
+             old_uuid = old_access_entity.uuid(), new_uuid = new_access_entity.uuid()] {
+                if (old_name != new_name)
+                    notifyOtherServersOnAccessEntityChange(*ctx, type, old_name, RPCHelpers::createUUID(old_uuid));
+                notifyOtherServersOnAccessEntityChange(*ctx, type, new_name, RPCHelpers::createUUID(new_uuid));
+            }).detach();
+        }
     }
 
-    void notifyOtherServersOnAccessEntityChange(const Context & context, EntityType type, const String & name, const UUID & uuid, Poco::Logger * log)
+    void notifyOtherServersOnAccessEntityChange(const Context & context, EntityType type, const String & name, const UUID & uuid)
     {
+        static Poco::Logger * log = &Poco::Logger::get("Catalog::notifyOtherServersOnAccessEntityChange");
         std::shared_ptr<CnchTopologyMaster> topology_master = context.getCnchTopologyMaster();
         if (!topology_master)
         {
@@ -6967,25 +7397,34 @@ namespace Catalog
     {
         meta_proxy->updatePartitionMetricsSnapshot(name_space, table_uuid, partition_id, snapshot.SerializeAsString());
     }
-    TableMetrics::TableMetricsData Catalog::getTableTrashItemsMetricsDataFromMetastore(const String & table_uuid, const TxnTimestamp ts)
+    TableMetrics::TableMetricsData
+    Catalog::getTableTrashItemsMetricsDataFromMetastore(const String & table_uuid, const TxnTimestamp ts, std::function<bool()> need_abort)
     {
         TableMetrics::TableMetricsData res;
         runWithMetricSupport(
             [&] {
                 auto storage = getTableByUUID(context, table_uuid, TxnTimestamp::maxTS());
-                const auto trash_items = getDataItemsInTrash(storage, 0);
+                String uuid = UUIDHelpers::UUIDToString(storage->getStorageUUID());
+                size_t prefix_length = MetastoreProxy::trashItemsPrefix(name_space, uuid).length();
 
-                for (const auto & part : trash_items.data_parts)
+                auto it = meta_proxy->getItemsInTrash(name_space, uuid, 0);
+                while (it->next() && !need_abort())
                 {
-                    res.update(part, ts);
-                }
-                for (const auto & part : trash_items.staged_parts)
-                {
-                    res.update(part, ts);
-                }
-                for (const auto & bitmap : trash_items.delete_bitmaps)
-                {
-                    res.update(bitmap, ts);
+                    const auto & key = it->key();
+                    String meta_key = key.substr(prefix_length, String::npos);
+                    if (startsWith(meta_key, PART_STORE_PREFIX))
+                    {
+                        Protos::DataModelPart part_model;
+                        part_model.ParseFromString(it->value());
+                        res.update(part_model, ts);
+                    }
+                    else if (startsWith(meta_key, DELETE_BITMAP_PREFIX))
+                    {
+                        Protos::DataModelDeleteBitmap delete_bitmap_model;
+                        delete_bitmap_model.ParseFromString(it->value());
+                        res.update(delete_bitmap_model, ts);
+                    }
+                    // not handling staged parts because we never move them to trash
                 }
             },
             ProfileEvents::GetTableTrashItemsMetricsDataFromMetastoreSuccess,
@@ -7067,23 +7506,22 @@ namespace Catalog
         return ret;
     }
 
-    DeleteBitmapMetaPtrVector Catalog::getDeleteBitmapsInPartitionsImpl(
+    DataModelDeleteBitmapPtrVector Catalog::getDeleteBitmapsInPartitionsImpl(
         const ConstStoragePtr & storage, const Strings & required_partitions, const Strings & full_partitions, const TxnTimestamp & ts)
     {
-        const auto & merge_tree_storage = dynamic_cast<const MergeTreeMetaBase &>(*storage);
-        auto create_func = [&](const String &, const String & meta) -> DeleteBitmapMetaPtr {
+        auto create_func = [&](const String &, const String & meta) -> DataModelDeleteBitmapPtr {
             DataModelDeleteBitmapPtr model_ptr = std::make_shared<Protos::DataModelDeleteBitmap>();
             model_ptr->ParseFromString(meta);
             if (ts.toUInt64() && model_ptr->has_commit_time() && TxnTimestamp{model_ptr->commit_time()} > ts)
                 return nullptr;
-            return std::make_shared<DeleteBitmapMeta>(merge_tree_storage, model_ptr);
+            return model_ptr;
         };
 
         String uuid = UUIDHelpers::UUIDToString(storage->getStorageUUID());
         String meta_prefix = MetastoreProxy::deleteBitmapPrefix(name_space, uuid);
 
-        DeleteBitmapMetaPtrVector res
-            = getDataModelsByPartitions<DeleteBitmapMetaPtr>(storage, meta_prefix, required_partitions, full_partitions, create_func, ts);
+        auto res = getDataModelsByPartitions<DataModelDeleteBitmapPtr>(
+            storage, meta_prefix, required_partitions, full_partitions, create_func, ts);
         return res;
     }
 }

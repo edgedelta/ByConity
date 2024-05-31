@@ -201,7 +201,7 @@ void CnchWorkerServiceImpl::submitMVRefreshTask(
         params.task_id = request->task_id();
         params.rpc_port = static_cast<UInt16>(request->rpc_port());
         params.txn_id = txn_id;
-        params.mv_refresh_param = std::make_shared <AsyncRefreshParam>(); 
+        params.mv_refresh_param = std::make_shared <AsyncRefreshParam>();
         params.mv_refresh_param->drop_partition_query = request->drop_partition_query();
         params.mv_refresh_param->insert_select_query = request->insert_select_query();
 
@@ -304,13 +304,14 @@ void CnchWorkerServiceImpl::submitManipulationTask(
         auto remote_address
             = addBracketsIfIpv6(rpc_context->getClientInfo().current_address.host().toString()) + ':' + toString(params.rpc_port);
         auto all_parts = createPartVectorFromModelsForSend<IMutableMergeTreeDataPartPtr>(*data, request->source_parts());
-        params.assignParts(all_parts);
+        params.assignParts(all_parts, [&]() {return rpc_context->getTimestamp(); });
 
         LOG_DEBUG(log, "Received manipulation from {} :{}", remote_address, params.toDebugString());
 
         auto task = data->manipulate(params, rpc_context);
         auto event = std::make_shared<Poco::Event>();
 
+        // TODO(shiyuze): limit running tasks by soft limit (using canEnqueueBackgroundTask)
         ThreadFromGlobalPool([task = std::move(task), all_parts = std::move(all_parts), event]() mutable {
             try
             {
@@ -421,7 +422,7 @@ void CnchWorkerServiceImpl::getManipulationTasksStatus(
                 task_info->set_rows_read(e.rows_read.load(std::memory_order_relaxed));
                 task_info->set_rows_written(e.rows_written.load(std::memory_order_relaxed));
                 task_info->set_columns_written(e.columns_written.load(std::memory_order_relaxed));
-                task_info->set_memory_usage(e.memory_tracker.get());
+                task_info->set_memory_usage(e.getMemoryTracker().get());
                 task_info->set_thread_id(e.thread_id);
             }
         });
@@ -568,31 +569,36 @@ void CnchWorkerServiceImpl::checkDataParts(
 
         LOG_DEBUG(log, "Receiving parts for table {} to check.", cloud_merge_tree.getStorageID().getNameForLogs());
 
-        // auto data_parts = createPartVectorFromModelsForSend<MutableDataPartPtr>(cloud_merge_tree, request->parts());
-        MutableMergeTreeDataPartsCNCHVector data_parts = {};
+        auto data_parts = createPartVectorFromModelsForSend<MutableMergeTreeDataPartCNCHPtr>(cloud_merge_tree, request->parts());
 
-        bool is_passed = false;
-        String message;
+        ThreadPool check_pool(std::min<UInt64>(query_context->getSettingsRef().parts_preallocate_pool_size, data_parts.size()));
+        std::mutex mutex;
 
         for (auto & part : data_parts)
         {
-            try
-            {
-                // TODO: checkDataParts(part);
-                // dynamic_cast<MergeTreeDataPartCNCH*>(part.get())->loadFromFileSystem(storage.get());
-                is_passed = true;
-                message.clear();
-            }
-            catch (const Exception & e)
-            {
-                is_passed = false;
-                message = e.message();
-            }
-
-            *response->mutable_part_path()->Add() = part->name;
-            *response->mutable_is_passed()->Add() = is_passed;
-            *response->mutable_message()->Add() = message;
+            check_pool.scheduleOrThrowOnError([&, part]() {
+                bool is_passed = false;
+                String message;
+                try
+                {
+                    // TODO: checkDataParts(part);
+                    dynamic_cast<MergeTreeDataPartCNCH*>(part.get())->loadFromFileSystem(storage.get());
+                    is_passed = true;
+                    message.clear();
+                }
+                catch (const Exception & e)
+                {
+                    is_passed = false;
+                    message = e.message();
+                }
+                std::lock_guard lock(mutex);
+                *response->mutable_part_path()->Add() = part->name;
+                *response->mutable_is_passed()->Add() = is_passed;
+                *response->mutable_message()->Add() = message;
+            });
         }
+
+        check_pool.wait();
 
         session->release();
         LOG_DEBUG(log, "Send check results back for {} parts.", data_parts.size());
@@ -898,12 +904,13 @@ void CnchWorkerServiceImpl::createDedupWorker(
         auto storage_id = RPCHelpers::createStorageID(request->table());
         const auto & query = request->create_table_query();
         auto host_ports = RPCHelpers::createHostWithPorts(request->host_ports());
+        size_t deduper_index = request->deduper_index();
 
         auto rpc_context = RPCHelpers::createSessionContextForRPC(getContext(), *cntl);
         rpc_context->setSessionContext(rpc_context);
         rpc_context->setCurrentQueryId(toString(UUIDHelpers::generateV4()));
 
-        ThreadFromGlobalPool([log = this->log, storage_id, query, host_ports = std::move(host_ports), context = std::move(rpc_context)] {
+        ThreadFromGlobalPool([log = this->log, storage_id, query, host_ports = std::move(host_ports), deduper_index, context = std::move(rpc_context)] {
             try
             {
                 // CurrentThread::attachQueryContext(*context);
@@ -912,15 +919,13 @@ void CnchWorkerServiceImpl::createDedupWorker(
                 LOG_INFO(log, "Created local table {}", storage_id.getFullTableName());
 
                 auto storage = DatabaseCatalog::instance().getTable(storage_id, context);
-                if (!storage)
-                    throw Exception("Unique cloud table " + storage_id.getFullTableName() + " doesn't exist.", ErrorCodes::LOGICAL_ERROR);
                 auto * cloud_table = dynamic_cast<StorageCloudMergeTree *>(storage.get());
                 if (!cloud_table)
                     throw Exception(
                         "convert to StorageCloudMergeTree from table failed: " + storage_id.getFullTableName(), ErrorCodes::LOGICAL_ERROR);
 
                 auto * deduper = cloud_table->getDedupWorker();
-                deduper->setServerHostWithPorts(host_ports);
+                deduper->setServerIndexAndHostPorts(deduper_index, host_ports);
                 LOG_DEBUG(log, "Success to create deduper table: {}", storage->getStorageID().getNameForLogs());
             }
             catch (...)
@@ -930,6 +935,29 @@ void CnchWorkerServiceImpl::createDedupWorker(
         }).detach();
     })
 }
+
+void CnchWorkerServiceImpl::assignHighPriorityDedupPartition(
+    [[maybe_unused]] google::protobuf::RpcController * ,
+    [[maybe_unused]] const Protos::AssignHighPriorityDedupPartitionReq * request,
+    [[maybe_unused]] Protos::AssignHighPriorityDedupPartitionResp * response,
+    [[maybe_unused]] google::protobuf::Closure * done)
+{
+    SUBMIT_THREADPOOL({
+        auto storage_id = RPCHelpers::createStorageID(request->table());
+        auto storage = DatabaseCatalog::instance().getTable(storage_id, getContext());
+
+        auto * cloud_table = dynamic_cast<StorageCloudMergeTree *>(storage.get());
+        if (!cloud_table)
+            throw Exception("convert to StorageCloudMergeTree from table failed: " + storage_id.getFullTableName(), ErrorCodes::LOGICAL_ERROR);
+
+        auto * deduper = cloud_table->getDedupWorker();
+        NameSet high_priority_dedup_partition;
+        for (const auto & entry : request->partition_id())
+            high_priority_dedup_partition.emplace(entry);
+        deduper->assignHighPriorityDedupPartition(high_priority_dedup_partition);
+    })
+}
+
 void CnchWorkerServiceImpl::dropDedupWorker(
     google::protobuf::RpcController * cntl,
     const Protos::DropDedupWorkerReq * request,
@@ -946,7 +974,6 @@ void CnchWorkerServiceImpl::dropDedupWorker(
         drop_query->if_exists = true;
         drop_query->database = storage_id.database_name;
         drop_query->table = storage_id.table_name;
-        drop_query->uuid = storage_id.uuid;
 
         ThreadFromGlobalPool([log = this->log, storage_id, q = std::move(query), c = std::move(rpc_context)] {
             LOG_DEBUG(log, "Dropping table: {}", storage_id.getNameForLogs());
@@ -969,8 +996,6 @@ void CnchWorkerServiceImpl::getDedupWorkerStatus(
         auto storage_id = RPCHelpers::createStorageID(request->table());
         auto storage = DatabaseCatalog::instance().getTable(storage_id, getContext());
 
-        if (!storage)
-            throw Exception("Unique cloud table " + storage_id.getFullTableName() + " doesn't exist.", ErrorCodes::LOGICAL_ERROR);
         auto * cloud_table = dynamic_cast<StorageCloudMergeTree *>(storage.get());
         if (!cloud_table)
             throw Exception(
@@ -992,6 +1017,8 @@ void CnchWorkerServiceImpl::getDedupWorkerStatus(
             response->set_last_task_visible_part_cnt(status.last_task_visible_part_cnt);
             response->set_last_task_staged_part_total_rows(status.last_task_staged_part_total_rows);
             response->set_last_task_visible_part_total_rows(status.last_task_visible_part_total_rows);
+            for (const auto & task_progress : status.dedup_tasks_progress)
+                response->add_dedup_tasks_progress(task_progress);
             response->set_last_exception(status.last_exception);
             response->set_last_exception_time(status.last_exception_time);
         }
@@ -1037,6 +1064,8 @@ void CnchWorkerServiceImpl::submitKafkaConsumeTask(
                 throw Exception("TopicPartitionList is required for starting consume", ErrorCodes::BAD_ARGUMENTS);
             for (const auto & tpl : request->tpl())
                 command->tpl.emplace_back(tpl.topic(), tpl.partition(), tpl.offset());
+            for (const auto & tpl: request->sample_partitions())
+                command->sample_partitions.emplace(tpl.topic(), tpl.partition());
         }
 
         auto rpc_context = RPCHelpers::createSessionContextForRPC(getContext(), *cntl);

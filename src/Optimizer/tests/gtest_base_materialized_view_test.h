@@ -67,7 +67,7 @@ public:
             tester->execute("DROP TABLE IF EXISTS " + mv_name);
             tester->execute("DROP TABLE IF EXISTS " + target_table_name);
             // TODO: CREATE TABLE SELECT will throw exception: Context has expired. Use ATTACH TABLE as work around.
-            tester->execute("ATTACH TABLE " + target_table_name + " ENGINE=Memory() AS " + materialized_views[i]);
+            tester->execute("ATTACH TABLE " + target_table_name + " ENGINE=CnchMergeTree() order by tuple() AS " + materialized_views[i]);
             auto create_mv = String("CREATE MATERIALIZED VIEW ")
                                  .append(mv_name)
                                  .append(" TO ")
@@ -101,7 +101,8 @@ public:
     MaterializedViewRewriteTester & checkingThatResultContains(const T &... expected_results)
     {
         return withChecker([&](QueryPlan & plan) {
-            auto explain = PlanPrinter::textLogicalPlan(plan, tester->createQueryContext(), false, true);
+            QueryPlanSettings settings{.stats = false};
+            auto explain = PlanPrinter::textLogicalPlan(plan, tester->createQueryContext(), {}, {}, settings);
             for (auto & expected_result : std::vector<String>{expected_results...})
             {
                 bool contains = explain.find(expected_result) != std::string::npos;
@@ -131,17 +132,17 @@ public:
                 "  name Nullable(String),"
                 "  salary Nullable(Float64),"
                 "  commission Nullable(UInt32)"
-                ") ENGINE=Memory();");
+                ") ENGINE=CnchMergeTree() order by empid;");
 
         execute("CREATE TABLE IF NOT EXISTS depts("
                 "  deptno UInt32,"
                 "  name Nullable(String)"
-                ") ENGINE=Memory();");
+                ") ENGINE=CnchMergeTree() order by deptno;");
 
         execute("CREATE TABLE IF NOT EXISTS locations("
                 "  locationid UInt32,"
                 "  name Nullable(String)"
-                ") ENGINE=Memory();");
+                ") ENGINE=CnchMergeTree() order by locationid;");
 
         execute("CREATE TABLE IF NOT EXISTS dependents("
                 "  empid UInt32,"
@@ -162,13 +163,13 @@ public:
                         "  store_sales Float64,\n"
                         "  store_cost Float64,\n"
                         "  unit_sales Int32"
-                        ") ENGINE=Memory();");
+                        ") ENGINE=CnchMergeTree() order by product_id;");
         execute("CREATE TABLE IF NOT EXISTS foodmart.time_by_day (\n"
                         "  time_id Int32,\n"
                         "  the_month String,\n"
                         "  quater String,\n"
                         "  the_year Int32"
-                        ") ENGINE=Memory();");
+                        ") ENGINE=CnchMergeTree() order by product_id;");
     }
 
     MaterializedViewRewriteTester sql(String materialize, String query)

@@ -34,10 +34,13 @@
 #include <Optimizer/SymbolUtils.h>
 #include <Optimizer/Utils.h>
 #include <Optimizer/makeCastFunction.h>
+#include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTTablesInSelectQuery.h>
 #include <Parsers/formatAST.h>
+#include <QueryPlan/ArrayJoinStep.h>
 #include <QueryPlan/FilterStep.h>
 #include <QueryPlan/JoinStep.h>
+#include <QueryPlan/MarkDistinctStep.h>
 #include <QueryPlan/ProjectionStep.h>
 #include <QueryPlan/SymbolMapper.h>
 #include <QueryPlan/UnionStep.h>
@@ -149,6 +152,9 @@ PlanNodePtr PredicateVisitor::visitProjectionNode(ProjectionNode & node, Predica
     }
 
     auto pushdown_predicate = PredicateUtils::combineConjuncts(inlined_deterministic_conjuncts);
+    LOG_DEBUG(
+        &Poco::Logger::get("Debugger"), "node {}, pushdown_predicate : {}", node.getId(), pushdown_predicate->formatForErrorMessage());
+
     pushdown_predicate = ExpressionInterpreter::optimizePredicate(pushdown_predicate, step.getInputStreams()[0].getNamesToTypes(), context);
     PredicateContext expression_context{
         .predicate = pushdown_predicate,
@@ -342,10 +348,20 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
     ConstASTPtr new_join_predicate;
 
     ASTTableJoin::Kind kind = step->getKind();
+
+    LOG_TRACE(
+        logger,
+        "join node {}, inherited_predicate : {}, left effective predicate: {} , right effective predicate: {}, join_predicate : {}",
+        node.getId(),
+        inherited_predicate->formatForErrorMessage(),
+        left_effective_predicate->formatForErrorMessage(),
+        right_effective_predicate->formatForErrorMessage(),
+        join_predicate->formatForErrorMessage());
+
     if (kind == ASTTableJoin::Kind::Inner || kind == ASTTableJoin::Kind::Cross)
     {
         InnerJoinResult inner_result = processInnerJoin(
-            inherited_predicate, left_effective_predicate, right_effective_predicate, join_predicate, left_symbols, right_symbols, context);
+            inherited_predicate, left_effective_predicate, right_effective_predicate, join_predicate, left_symbols, right_symbols);
         left_predicate = inner_result.left_predicate;
         right_predicate = inner_result.right_predicate;
         post_join_predicate = inner_result.post_join_predicate;
@@ -354,7 +370,7 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
     else if (kind == ASTTableJoin::Kind::Left)
     {
         OuterJoinResult left_result = processOuterJoin(
-            inherited_predicate, left_effective_predicate, right_effective_predicate, join_predicate, left_symbols, right_symbols, context);
+            inherited_predicate, left_effective_predicate, right_effective_predicate, join_predicate, left_symbols, right_symbols);
         left_predicate = left_result.outer_predicate;
         right_predicate = left_result.inner_predicate;
         post_join_predicate = left_result.post_join_predicate;
@@ -363,7 +379,7 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
     else if (kind == ASTTableJoin::Kind::Right)
     {
         OuterJoinResult left_result = processOuterJoin(
-            inherited_predicate, right_effective_predicate, left_effective_predicate, join_predicate, right_symbols, left_symbols, context);
+            inherited_predicate, right_effective_predicate, left_effective_predicate, join_predicate, right_symbols, left_symbols);
         left_predicate = left_result.inner_predicate;
         right_predicate = left_result.outer_predicate;
         post_join_predicate = left_result.post_join_predicate;
@@ -583,7 +599,7 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
     auto strictness = step->getStrictness();
     if (strictness != ASTTableJoin::Strictness::Unspecified && strictness != ASTTableJoin::Strictness::All
         && (kind == ASTTableJoin::Kind::Inner || kind == ASTTableJoin::Kind::Cross)
-        && (!(step->getFilter() && !PredicateUtils::isTruePredicate(step->getFilter()))))
+        && (!step->getFilter() || PredicateUtils::isTruePredicate(step->getFilter())))
     {
         auto join_conj = PredicateUtils::extractConjuncts<ConstASTPtr>(new_join_filter);
         auto post_conj = PredicateUtils::extractConjuncts<ConstASTPtr>(post_join_predicate);
@@ -703,6 +719,64 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
         output_node = output_expression_node;
     }
     return output_node;
+}
+
+PlanNodePtr PredicateVisitor::visitArrayJoinNode(ArrayJoinNode & node, PredicateContext & predicate_context)
+{
+    const auto & step = *node.getStep();
+
+    ConstASTPtr inherited_predicate = predicate_context.predicate;
+    EqualityInference equality_inference = EqualityInference::newInstance(inherited_predicate, context);
+
+    // filter with array join result column, can't push down
+    std::vector<String> array_join_columns;
+    for (const auto & input : step.getResultNameSet())
+    {
+        array_join_columns.emplace_back(input);
+    }
+
+    std::vector<ConstASTPtr> pushdown_array_join_conjuncts;
+    std::vector<ConstASTPtr> post_array_join_conjuncts;
+
+    for (auto & conjunct : PredicateUtils::extractConjuncts(inherited_predicate))
+    {
+        // Strip out non-deterministic conjuncts
+        if (!ExpressionDeterminism::isDeterministic(conjunct, context))
+        {
+            post_array_join_conjuncts.emplace_back(conjunct);
+            continue;
+        }
+
+        /// for predicate contains array join column, can't preform push down.
+        std::set<String> predicate_symbols = SymbolsExtractor::extract(conjunct);
+        if (PredicateUtils::containsAny(array_join_columns, predicate_symbols))
+        {
+            post_array_join_conjuncts.emplace_back(conjunct);
+        }
+        else
+        {
+            pushdown_array_join_conjuncts.emplace_back(conjunct);
+        }
+    }
+
+    PredicateContext array_join_context{
+        .predicate = PredicateUtils::combineConjuncts(pushdown_array_join_conjuncts),
+        .extra_predicate_for_simplify_outer_join = PredicateConst::TRUE_VALUE,
+        .context = predicate_context.context};
+    PlanNodePtr rewritten = process(*node.getChildren()[0], array_join_context);
+
+    PlanNodePtr output = node.shared_from_this();
+    if (rewritten != node.getChildren()[0])
+    {
+        output = PlanNodeBase::createPlanNode(context->nextNodeId(), node.getStep(), PlanNodes{rewritten}, node.getStatistics());
+    }
+    if (!post_array_join_conjuncts.empty())
+    {
+        auto filter_step = std::make_shared<FilterStep>(
+            output->getStep()->getOutputStream(), PredicateUtils::combineConjuncts(post_array_join_conjuncts));
+        output = PlanNodeBase::createPlanNode(context->nextNodeId(), std::move(filter_step), PlanNodes{output});
+    }
+    return output;
 }
 
 PlanNodePtr PredicateVisitor::visitExchangeNode(ExchangeNode & node, PredicateContext & predicate_context)
@@ -914,6 +988,7 @@ PlanNodePtr PredicateVisitor::visitCTERefNode(CTERefNode & node, PredicateContex
 
 PlanNodePtr PredicateVisitor::process(PlanNodeBase & node, PredicateContext & predicate_context)
 {
+    LOG_TRACE(logger, "node {} has inherited predicate: {}", node.getId(), predicate_context.predicate->formatForErrorMessage());
     return VisitorUtil::accept(node, *this, predicate_context);
 }
 
@@ -939,8 +1014,7 @@ InnerJoinResult PredicateVisitor::processInnerJoin(
     ConstASTPtr & right_predicate,
     ConstASTPtr & join_predicate,
     std::set<String> & left_symbols,
-    std::set<String> & right_symbols,
-    ContextMutablePtr & context)
+    std::set<String> & right_symbols)
 {
     std::vector<ConstASTPtr> left_conjuncts;
     std::vector<ConstASTPtr> right_conjuncts;
@@ -983,8 +1057,12 @@ InnerJoinResult PredicateVisitor::processInnerJoin(
     ASTPtr simplified_left_predicate = predicate_inference.rewrite(left_predicate, left_scope);
     ASTPtr simplified_right_predicate = predicate_inference.rewrite(right_predicate, right_scope);
 
+    LOG_TRACE(logger, "predicate_inference : {}", predicate_inference.toString());
+
     // simplify predicate based on known equalities guaranteed by the left/right side
     EqualityInference assertions = EqualityInference::newInstance(std::vector<ConstASTPtr>{left_predicate, right_predicate}, context);
+
+    LOG_TRACE(logger, "assertions : {}", assertions.toString());
 
     std::set<String> union_scope;
     std::set_union(
@@ -1003,6 +1081,10 @@ InnerJoinResult PredicateVisitor::processInnerJoin(
         std::vector<ConstASTPtr>{inherited_predicate, right_predicate, join_predicate, simplified_right_predicate}, context);
     EqualityInference all_inference_without_right_inferred = EqualityInference::newInstance(
         std::vector<ConstASTPtr>{inherited_predicate, left_predicate, join_predicate, simplified_left_predicate}, context);
+
+    LOG_TRACE(logger, "all_inference : {}", all_inference.toString());
+    LOG_TRACE(logger, "all_inference_without_left_inferred : {}", all_inference_without_left_inferred.toString());
+    LOG_TRACE(logger, "all_inference_without_right_inferred : {}", all_inference_without_right_inferred.toString());
 
     // Add equalities from the inference back in
     auto equalities = all_inference.partitionedBy(left_scope).getScopeStraddlingEqualities();
@@ -1105,8 +1187,7 @@ OuterJoinResult PredicateVisitor::processOuterJoin(
     ConstASTPtr & inner_predicate,
     ConstASTPtr & join_predicate,
     std::set<String> & outer_symbols,
-    std::set<String> & inner_symbols,
-    ContextMutablePtr & context)
+    std::set<String> & inner_symbols)
 {
     std::vector<ConstASTPtr> outer_pushdown_conjuncts;
     std::vector<ConstASTPtr> inner_pushdown_conjuncts;
@@ -1143,11 +1224,19 @@ OuterJoinResult PredicateVisitor::processOuterJoin(
     EqualityInference outer_inference
         = EqualityInference::newInstance(std::vector<ConstASTPtr>{inherited_predicate, outer_predicate}, context);
 
+    LOG_TRACE(logger, "inherited_inference : {}", inherited_inference.toString());
+    LOG_TRACE(logger, "outer_inference : {}", outer_inference.toString());
+
     EqualityPartition equality_partition = inherited_inference.partitionedBy(outer_symbols);
+
+    LOG_TRACE(logger, "equality_partition : {}", equality_partition.toString());
+
     const auto & scope_equalities = equality_partition.getScopeEqualities();
     auto outer_only_inherited_equalities = PredicateUtils::combineConjuncts(scope_equalities);
     EqualityInference potential_null_symbol_inference = EqualityInference::newInstance(
         std::vector<ConstASTPtr>{outer_only_inherited_equalities, outer_predicate, inner_predicate, join_predicate}, context);
+
+    LOG_TRACE(logger, "potential_null_symbol_inference : {}", potential_null_symbol_inference.toString());
 
     // Push outer and join equalities into the inner side. For example:
     // SELECT * FROM nation LEFT OUTER JOIN region ON nation.regionkey = region.regionkey and nation.name = region.name WHERE nation.name = 'blah'
@@ -1155,8 +1244,19 @@ OuterJoinResult PredicateVisitor::processOuterJoin(
     EqualityInference potential_null_symbol_inference_without_inner_inferred = EqualityInference::newInstance(
         std::vector<ConstASTPtr>{outer_only_inherited_equalities, outer_predicate, join_predicate}, context);
 
+    LOG_TRACE(
+        logger,
+        "potential_null_symbol_inference_without_inner_inferred : {}",
+        potential_null_symbol_inference_without_inner_inferred.toString());
+
     EqualityPartition potential_null_symbol_inference_without_inner_inferred_partition
         = potential_null_symbol_inference_without_inner_inferred.partitionedBy(inner_symbols);
+
+    LOG_TRACE(
+        logger,
+        "potential_null_symbol_inference_without_inner_inferred_partition : {}",
+        potential_null_symbol_inference_without_inner_inferred_partition.toString());
+
     for (const auto & conjunct : potential_null_symbol_inference_without_inner_inferred_partition.getScopeEqualities())
     {
         inner_pushdown_conjuncts.emplace_back(conjunct);
@@ -1164,6 +1264,8 @@ OuterJoinResult PredicateVisitor::processOuterJoin(
 
     // TODO: we can further improve simplifying the equalities by considering other relationships from the outer side
     EqualityPartition join_equality_partition = EqualityInference::newInstance(join_predicate, context).partitionedBy(inner_symbols);
+
+    LOG_TRACE(logger, "join_equality_partition : {}", join_equality_partition.toString());
 
     for (const auto & conjunct : join_equality_partition.getScopeEqualities())
     {
@@ -1458,9 +1560,44 @@ ASTPtr EffectivePredicateVisitor::visitFilterNode(FilterNode & node, ContextMuta
         }
     }
 
+    /**
+     * Disable extract predicate with inconsistent type. 
+     * 
+     * for predicate : expr#toDate('2023-06-29') = expr#'2023-06-29',
+     * left argument and right argument both ASTIdentifier, but they 
+     * have different type, left type is Date, right type is String.
+     */
+    const NameToType & name_types = step.getOutputStream().getNamesToTypes();
+    auto is_inconsistent = [&](ConstASTPtr & ptr) {
+        if (ptr->as<ASTFunction>())
+        {
+            const auto & fun = ptr->as<ASTFunction &>();
+            if (fun.arguments->children.size() == 2)
+            {
+                auto left = fun.arguments->getChildren()[0];
+                auto right = fun.arguments->getChildren()[1];
+                if (left->as<ASTIdentifier>() && right->as<ASTIdentifier>())
+                {
+                    auto left_type = name_types.at(left->getColumnName());
+                    auto right_type = name_types.at(right->getColumnName());
+                    return left_type->getName() != right_type->getName();
+                }
+            }
+        }
+        return false;
+    };
+
+    std::vector<ConstASTPtr> removed_inconsistent_type_filters;
+    for (auto & ptr : removed_dynamic_filters)
+    {
+        if (is_inconsistent(ptr))
+            continue;
+        removed_inconsistent_type_filters.emplace_back(ptr);
+    }
+
     // Adds on underlying_predicate
-    removed_dynamic_filters.emplace_back(underlying_predicate);
-    return PredicateUtils::combineConjuncts(removed_dynamic_filters);
+    removed_inconsistent_type_filters.emplace_back(underlying_predicate);
+    return PredicateUtils::combineConjuncts(removed_inconsistent_type_filters);
 }
 
 ASTPtr EffectivePredicateVisitor::visitAggregatingNode(AggregatingNode & node, ContextMutablePtr & context)
@@ -1556,5 +1693,4 @@ ASTPtr EffectivePredicateVisitor::visitCTERefNode(CTERefNode &, ContextMutablePt
 {
     return PredicateConst::TRUE_VALUE;
 }
-
 }

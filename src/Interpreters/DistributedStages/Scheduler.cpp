@@ -34,7 +34,7 @@ bool Scheduler::addBatchTask(BatchTaskPtr batch_task)
 
 bool Scheduler::getBatchTaskToSchedule(BatchTaskPtr & task)
 {
-    return queue.tryPop(task, timespec_to_duration(query_context->getQueryExpirationTimeStamp()).count() / 1000);
+    return queue.tryPop(task, query_expiration_ms);
 }
 
 void Scheduler::dispatchTask(PlanSegment * plan_segment_ptr, const SegmentTask & task, const size_t idx)
@@ -141,9 +141,15 @@ void Scheduler::schedule()
     /// Leave final segment alone.
     while (!dag_graph_ptr->plan_segment_status_ptr->is_final_stage_start)
     {
+        auto curr = time_in_milliseconds(std::chrono::system_clock::now());
         if (stopped.load(std::memory_order_relaxed))
         {
             LOG_INFO(log, "Schedule interrupted");
+            return;
+        }
+        else if (curr > query_expiration_ms)
+        {
+            LOG_INFO(log, "Schedule timeout current ts:{} expire ts:{}", curr, query_expiration_ms);
             return;
         }
         /// nullptr means invalid task
@@ -152,7 +158,7 @@ void Scheduler::schedule()
         {
             for (auto task : *batch_task)
             {
-                LOG_DEBUG(log, "Schedule segment {}", task.task_id);
+                LOG_INFO(log, "Schedule segment {}", task.task_id);
                 if (task.task_id == 0)
                 {
                     prepareFinalTask();
@@ -203,7 +209,7 @@ void Scheduler::genTopology()
             }
             auto depend_id = plan_segment_input->getPlanSegmentId();
             current.emplace(depend_id);
-            LOG_TRACE(log, "{} depends on {} by exchange_id:{}", id, depend_id, plan_segment_input->getExchangeId());
+            LOG_INFO(log, "Segment {} depends on {} by exchange_id {}", id, depend_id, plan_segment_input->getExchangeId());
         }
     }
 }
@@ -242,12 +248,12 @@ void Scheduler::removeDepsAndEnqueueTask(const SegmentTask & task)
     std::lock_guard<std::mutex> guard(plansegment_topology_mutex);
     auto batch_task = std::make_shared<BatchTask>();
     const auto & task_id = task.task_id;
-    LOG_TRACE(log, "Remove dependency {} for segments", task_id);
+    LOG_INFO(log, "Remove dependency {} for segments", task_id);
 
     for (auto & [id, dependencies] : plansegment_topology)
     {
         if (dependencies.erase(task_id))
-            LOG_TRACE(log, "Erase dependency {} for segment {}", task_id, id);
+            LOG_INFO(log, "Erase dependency {} for segment {}", task_id, id);
         if (dependencies.empty())
         {
             batch_task->emplace_back(id);

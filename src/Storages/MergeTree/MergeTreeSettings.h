@@ -23,6 +23,7 @@
 
 #include <Core/Defines.h>
 #include <Core/BaseSettings.h>
+#include <Core/SettingsEnums.h>
 #include <Storages/MergeTree/MergeTreeDataFormatVersion.h>
 
 
@@ -133,6 +134,8 @@ enum StealingCacheMode : UInt64
       0) \
     M(UInt64, gc_remove_bitmap_batch_size, 1000, "Submit a batch of bitmaps to a background thread", 0) \
     M(UInt64, gc_remove_bitmap_thread_pool_size, 16, "Turn up the thread pool size to speed up GC processing of bitmaps", 0) \
+    M(UInt64, gc_partition_batch_size, 100, "The batch size for partition meta GC", 0) \
+    M(Seconds, gc_partition_lifetime_before_remove, 30 * 60, "The duration between mark partition deleted and remove from metastore finally", 0) \
     \
     M(UInt64, max_refresh_materialized_view_task_num, 10, "Max threads to refresh for each materialized view.", 0) \
     \
@@ -342,6 +345,8 @@ enum StealingCacheMode : UInt64
       "Minimal time in seconds, when merge with recompression TTL can be repeated.", \
       0) \
     M(Bool, ttl_only_drop_parts, false, "Only drop altogether the expired parts and not partially prune them.", 0) \
+    M(Bool, enable_partition_ttl_fallback, true, "When TTL expression doesn't match partition expression, Try to calculate partition's TTL value and mark expired partitions by scanning parts' ttl info", 0) \
+    \
     M(Bool, write_final_mark, 1, "Write final mark after end of column (0 - disabled, do nothing if index_granularity_bytes=0)", 0) \
     M(Bool, enable_mixed_granularity_parts, 1, "Enable parts with adaptive and non adaptive granularity", 0) \
     M(MaxThreads, max_part_loading_threads, 0, "The number of threads to load data parts at startup.", 0) \
@@ -468,10 +473,17 @@ enum StealingCacheMode : UInt64
     M(Seconds, unique_acquire_write_lock_timeout, 300, "", 0) \
     M(MaxThreads, cnch_parallel_dumping_threads, 8, "", 0) \
     M(MaxThreads, unique_table_dedup_threads, 8, "", 0) \
+    M(Seconds, dedup_worker_progress_log_interval, 120, "", 0) \
     M(UInt64, max_delete_bitmap_meta_depth, 100, "", 0) \
     M(UInt64, unique_merge_acquire_lock_retry_time, 10, "", 0) \
     M(Bool, enable_bucket_level_unique_keys, false, "", 0) \
     M(MaxThreads, cnch_write_part_threads, 1, "", 0) \
+    M(UInt64, max_dedup_worker_number, 1, "", 0) \
+    M(UInt64, max_staged_part_number_per_task, 100, "", 0) \
+    M(UInt64, max_staged_part_rows_per_task, 15000000, "", 0) \
+    M(Bool, enable_duplicate_check_while_writing, true, "Whether to check duplicate keys while writing for unique table. Although turning it on may have a certain impact on the tps of writing, it is recommended to enable it by default.", 0) \
+    /**Whether block the actual dedup progress, Attention: set this value to true only in ci **/               \
+    M(Bool, disable_dedup_parts, false, "", 0) \
     \
     /* Metastore settings */\
     M(Bool, enable_metastore, false, "Use KV metastore to manage data parts.", 0) \
@@ -518,7 +530,7 @@ enum StealingCacheMode : UInt64
     M(UInt64, gc_trash_part_batch_size, 5000, "Batch size to remove stale parts to trash in background tasks", 0) \
     M(UInt64, gc_trash_part_limit, 0, "Maximum number of stale parts to process per GC round, zero means no limit", 0) \
     M(UInt64, gc_trash_part_thread_pool_size, 4, "Turn up the thread pool size to speed up trashing of parts", 0) \
-    M(UInt64, gc_remove_part_thread_pool_size, 2, "Turn up the thread pool size to speed up trash cleaning of parts", 0) \
+    M(UInt64, gc_remove_part_thread_pool_size, 20, "Turn up the thread pool size to speed up trash cleaning of parts", 0) \
     M(UInt64, gc_remove_part_batch_size, 200, "Batch size to remove trash parts from storage in background tasks", 0) \
 \
     /** uuid of CnchMergeTree, as we won't use uuid in CloudMergeTree */ \
@@ -535,6 +547,10 @@ enum StealingCacheMode : UInt64
     M(Bool, enable_hybrid_allocation, false, "Whether or not enable hybrid allocation, default disabled", 0) \
     M(UInt64, min_rows_per_vp, 2000000, "Minimum size of a virtual part", 0) \
     M(Float, part_to_vw_size_ratio, 0.1, "Part to vw worker size's ration", 0) \
+    \
+    /** MYSQL related settings */ \
+    M(DialectType, storage_dialect_type, DialectType::CLICKHOUSE, "If the storage's dialect_type is not CLICKHOUSE, need to persist the information for creating/running queries on worker", 0) \
+    \
     /** JSON related settings start*/ \
     M(UInt64, json_subcolumns_threshold, 1000, "Max number of json sub columns", 0) \
     M(UInt64, json_partial_schema_assemble_batch_size, 100, "Batch size to assemble dynamic object column schema", 0) \

@@ -246,6 +246,8 @@ public:
     ASTPtr columns;
     /// For Ingestion columns
     ASTPtr keys;
+    /// The INGEST PARTITION query here optionally stores the buckets that going to be ingested
+    ASTPtr buckets;
 
     /// For sample / split / resharding expression
     ASTPtr with_sharding_exp;
@@ -313,6 +315,10 @@ public:
 
     /// Which property user want to remove
     String remove_property;
+
+    /// For DETACH/ATTACH PARTITION commands
+    bool specify_bucket = false;
+    UInt64 bucket_number;
 
     String getID(char delim) const override { return "AlterCommand" + (delim + std::to_string(static_cast<int>(type))); }
 

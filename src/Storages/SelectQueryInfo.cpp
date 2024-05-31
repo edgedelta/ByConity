@@ -15,6 +15,7 @@
 
 #include <IO/ReadHelpers.h>
 #include <IO/WriteHelpers.h>
+#include <Optimizer/PredicateUtils.h>
 #include <Parsers/ASTSerDerHelper.h>
 #include <Protos/PreparedStatementHelper.h>
 #include <Protos/plan_node_utils.pb.h>
@@ -65,26 +66,16 @@ void SelectQueryInfo::fillFromProto(const Protos::SelectQueryInfo & proto)
     input_order_info = proto.has_input_order_info() ? InputOrderInfo::fromProto(proto.input_order_info()) : nullptr;
 }
 
-std::shared_ptr<InterpreterSelectQuery> SelectQueryInfo::buildQueryInfoFromQuery(ContextPtr context, const StoragePtr & storage, const String & query, SelectQueryInfo & query_info)
-{
-    ReadBufferFromString rb(query);
-    ASTPtr query_ptr = deserializeAST(rb);
-    auto interpreter = std::make_shared<InterpreterSelectQuery>(query_ptr, context, storage);
-    query_info.query = query_ptr;
-    query_info.syntax_analyzer_result = interpreter->syntax_analyzer_result;
-    query_info.prewhere_info = interpreter->analysis_result.prewhere_info;
-    query_info.sets = interpreter->query_analyzer->getPreparedSets();
-    query_info.index_context = interpreter->query_analyzer->getIndexContext();
-    return interpreter;
-}
-
 ASTPtr getFilterFromQueryInfo(const SelectQueryInfo & query_info, bool clone)
 {
     const ASTSelectQuery & select = query_info.query->as<ASTSelectQuery &>();
+    ASTs conjuncts;
     if (select.where())
-        return clone ? select.where()->clone() : select.where();
+        conjuncts.emplace_back(clone ? select.where()->clone() : select.where());
     if (select.prewhere())
-        return clone ? select.prewhere()->clone() : select.prewhere();
+        conjuncts.emplace_back(clone ? select.prewhere()->clone() : select.prewhere());
+    if (!conjuncts.empty())
+        return PredicateUtils::combineConjuncts(conjuncts);
     if (!query_info.atomic_predicates_expr.empty())
     {
         ASTPtr filter_query;

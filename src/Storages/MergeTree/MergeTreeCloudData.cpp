@@ -16,6 +16,7 @@
 #include <Storages/MergeTree/MergeTreeCloudData.h>
 #include <Storages/MergeTree/checkDataPart.h>
 #include "Processors/QueryPipeline.h"
+#include <common/scope_guard_safe.h>
 
 namespace DB
 {
@@ -390,9 +391,16 @@ void MergeTreeCloudData::runOverPartsInParallel(
     }
 
     ThreadPool thread_pool(threads_num);
+    auto thread_group = CurrentThread::getGroup();
     for (auto & part : parts)
     {
-        thread_pool.scheduleOrThrowOnError([&part, &op] {
+        thread_pool.scheduleOrThrowOnError([&part, &op, thread_group] {
+            if (thread_group)
+                CurrentThread::attachToIfDetached(thread_group);
+            SCOPE_EXIT_SAFE(
+                if (thread_group)
+                    CurrentThread::detachQueryIfNotDetached();
+            );
             op(part);
         });
     }

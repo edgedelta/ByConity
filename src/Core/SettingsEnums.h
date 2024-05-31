@@ -251,6 +251,23 @@ enum class CTEMode
 
 DECLARE_SETTING_ENUM(CTEMode)
 
+enum class ExpandMode
+{
+    EXPAND,
+    UNION,
+    CTE,
+};
+
+DECLARE_SETTING_ENUM(ExpandMode)
+
+enum class SpillMode
+{
+    MANUAL,
+    AUTO,
+};
+
+DECLARE_SETTING_ENUM(SpillMode)
+
 enum class StatisticsAccurateSampleNdvMode
 {
     NEVER,
@@ -300,6 +317,28 @@ enum class BackupVWMode
 
 DECLARE_SETTING_ENUM(BackupVWMode)
 
+enum class QueueName : uint32_t
+{
+    Highest = 0,
+    High,
+    Normal,
+    Low,
+    Lowest,
+    Count,
+    Auto
+};
+
+DECLARE_SETTING_ENUM(QueueName);
+
+enum class VWQueueMode : uint32_t
+{
+    Skip = 0,
+    Match,
+    Force 
+};
+
+DECLARE_SETTING_ENUM(VWQueueMode);
+
 enum class SpanHierarchy : int
 {
     TRACE = 0,
@@ -332,6 +371,7 @@ enum class DedupKeyMode
 {
     REPLACE,
     THROW,
+    APPEND,
 };
 
 DECLARE_SETTING_ENUM(DedupKeyMode)
@@ -340,15 +380,17 @@ enum class RefreshViewTaskStatus : int8_t
 {
     START = 1,
     FINISH = 2,
-    EXCEPTION = 3,
+    EXCEPTION_EXECUTE_TASK = 3,
+    EXCEPTION_BEFORE_START = 4,
 };
 
 DECLARE_SETTING_ENUM(RefreshViewTaskStatus);
 
 enum class RefreshViewTaskType : int8_t
 {
-    PARTITION_BASED_REFRESH = 1,
-    FULL_REFRESH = 2,
+    NONE = 1,
+    PARTITION_BASED_REFRESH = 2,
+    FULL_REFRESH = 3,
 };
 
 DECLARE_SETTING_ENUM(RefreshViewTaskType);

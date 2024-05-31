@@ -38,6 +38,7 @@ struct ContextAccessParams
     UInt64 readonly = 0;
     bool allow_ddl = false;
     bool allow_introspection = false;
+    bool has_tenant_id_in_username = false;
     String current_database;
     ClientInfo::Interface interface = ClientInfo::Interface::TCP;
     ClientInfo::HTTPMethod http_method = ClientInfo::HTTPMethod::UNKNOWN;
@@ -61,7 +62,7 @@ struct ContextAccessParams
 };
 
 
-class ContextAccess
+class ContextAccess : public std::enable_shared_from_this<ContextAccess>
 {
 public:
     using Params = ContextAccessParams;
@@ -158,6 +159,7 @@ private:
     ContextAccess() {}
     ContextAccess(const AccessControlManager & manager_, const Params & params_);
 
+    void initialize();
     void setUser(const UserPtr & user_) const;
     void setRolesInfo(const std::shared_ptr<const EnabledRolesInfo> & roles_info_) const;
     void setSettingsAndConstraints() const;

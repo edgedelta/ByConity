@@ -27,12 +27,15 @@
 #include <Optimizer/ExpressionInterpreter.h>
 #include <Optimizer/PredicateUtils.h>
 #include <Optimizer/SymbolsExtractor.h>
+#include <Parsers/ASTIdentifier.h>
 #include <QueryPlan/AggregatingStep.h>
 #include <QueryPlan/ApplyStep.h>
 #include <QueryPlan/AssignUniqueIdStep.h>
+#include <QueryPlan/CTEInfo.h>
 #include <QueryPlan/DistinctStep.h>
 #include <QueryPlan/Dummy.h>
 #include <QueryPlan/ExceptStep.h>
+#include <QueryPlan/ExpandStep.h>
 #include <QueryPlan/FilterStep.h>
 #include <QueryPlan/IntersectStep.h>
 #include <QueryPlan/JoinStep.h>
@@ -43,6 +46,8 @@
 #include <QueryPlan/ProjectionStep.h>
 #include <QueryPlan/UnionStep.h>
 #include <QueryPlan/WindowStep.h>
+#include <QueryPlan/OutfileWriteStep.h>
+
 namespace DB
 {
 void ColumnPruning::rewrite(QueryPlan & plan, ContextMutablePtr context) const
@@ -151,17 +156,17 @@ PlanNodePtr ColumnPruningVisitor::visitFinishSortingNode(FinishSortingNode & nod
     return visitPlanNode(node, column_pruning_context);
 }
 
-PlanNodePtr ColumnPruningVisitor::visitFinalSampleNode(FinalSampleNode &, ColumnPruningContext &)
-{
-    throw Exception("Not impl column pruning", ErrorCodes::NOT_IMPLEMENTED);
-}
-
 PlanNodePtr ColumnPruningVisitor::visitOffsetNode(OffsetNode & node, ColumnPruningContext & column_pruning_context)
 {
     return visitDefault<false>(node, column_pruning_context);
 }
 
 PlanNodePtr ColumnPruningVisitor::visitTableFinishNode(TableFinishNode & node, ColumnPruningContext & column_pruning_context)
+{
+    return visitPlanNode(node, column_pruning_context);
+}
+
+PlanNodePtr ColumnPruningVisitor::visitOutfileFinishNode(OutfileFinishNode & node, ColumnPruningContext & column_pruning_context)
 {
     return visitPlanNode(node, column_pruning_context);
 }
@@ -216,12 +221,22 @@ PlanNodePtr ColumnPruningVisitor::visitIntersectOrExceptNode(IntersectOrExceptNo
     return intersect_except_node;
 }
 
-PlanNodePtr ColumnPruningVisitor::visitMultiJoinNode(MultiJoinNode &, ColumnPruningContext &)
+PlanNodePtr ColumnPruningVisitor::visitMultiJoinNode(MultiJoinNode & node, ColumnPruningContext & column_pruning_context)
 {
-    throw Exception("Not impl column pruning", ErrorCodes::NOT_IMPLEMENTED);
+    return visitDefault<false>(node, column_pruning_context);
+}
+
+PlanNodePtr ColumnPruningVisitor::visitFinalSampleNode(FinalSampleNode & node, ColumnPruningContext & column_pruning_context)
+{
+    return visitDefault<false>(node, column_pruning_context);
 }
 
 PlanNodePtr ColumnPruningVisitor::visitEnforceSingleRowNode(EnforceSingleRowNode & node, ColumnPruningContext & column_pruning_context)
+{
+    return visitDefault<false>(node, column_pruning_context);
+}
+
+PlanNodePtr ColumnPruningVisitor::visitLocalExchangeNode(LocalExchangeNode & node, ColumnPruningContext & column_pruning_context)
 {
     return visitDefault<false>(node, column_pruning_context);
 }
@@ -430,6 +445,35 @@ PlanNodePtr ColumnPruningVisitor::visitProjectionNode(ProjectionNode & node, Col
     return expr_node;
 }
 
+PlanNodePtr ColumnPruningVisitor::visitExpandNode(ExpandNode & node, ColumnPruningContext & column_pruning_context)
+{
+    const auto * step = node.getStep().get();
+    NameSet & require = column_pruning_context.name_set;
+
+    NameSet child_require;
+    for (const auto & column : require)
+    {
+        if (column != step->getGroupIdSymbol())
+        {
+            child_require.emplace(column);
+        }
+    }
+
+    ColumnPruningContext child_column_pruning_context{.name_set = child_require};
+    auto child = VisitorUtil::accept(node.getChildren()[0], *this, child_column_pruning_context);
+
+    auto expr_step = std::make_shared<ExpandStep>(
+        child->getStep()->getOutputStream(),
+        step->getAssignments(),
+        step->getNameToType(),
+        step->getGroupIdSymbol(),
+        step->getGroupIdValue(),
+        step->getGroupIdNonNullSymbol());
+    PlanNodes children{child};
+    auto expr_node = ExpandNode::createPlanNode(context->nextNodeId(), std::move(expr_step), children, node.getStatistics());
+    return expr_node;
+}
+
 PlanNodePtr ColumnPruningVisitor::visitApplyNode(ApplyNode & node, ColumnPruningContext & column_pruning_context)
 {
     NameSet right_require;
@@ -472,7 +516,13 @@ PlanNodePtr ColumnPruningVisitor::visitApplyNode(ApplyNode & node, ColumnPruning
     DataStreams input{left->getStep()->getOutputStream(), right->getStep()->getOutputStream()};
 
     auto apply_step = std::make_shared<ApplyStep>(
-        input, correlation, step->getApplyType(), step->getSubqueryType(), step->getAssignment(), step->getOuterColumns());
+        input,
+        correlation,
+        step->getApplyType(),
+        step->getSubqueryType(),
+        step->getAssignment(),
+        step->getOuterColumns(),
+        step->supportSemiAnti());
     PlanNodes children{left, right};
     auto apply_node = ApplyNode::createPlanNode(context->nextNodeId(), std::move(apply_step), children, node.getStatistics());
     return apply_node;
@@ -816,8 +866,17 @@ PlanNodePtr ColumnPruningVisitor::visitDistinctNode(DistinctNode & node, ColumnP
             distinct_requrie_set.emplace(name_type.first);
     }
     bool can_convert_group_by = true;
-    if (distinct_requrie_set.size() > columns.size())
-        can_convert_group_by = false;
+    NameSet distinct_set{columns.begin(), columns.end()};
+    for (const auto & require_column : distinct_requrie_set)
+    {
+        if (!distinct_set.contains(require_column))
+        {
+            can_convert_group_by = false;
+            break;
+        }
+    }
+
+    child_require.insert(columns.begin(), columns.end());
 
     ColumnPruningContext child_column_pruning_context{.name_set = child_require};
     auto child = VisitorUtil::accept(node.getChildren()[0], *this, child_column_pruning_context);
@@ -1013,7 +1072,7 @@ PlanNodePtr ColumnPruningVisitor::visitCTERefNode(CTERefNode & node, ColumnPruni
     auto & cte_require = cte_require_columns[with_step->getId()];
     for (const auto & item : required)
         cte_require.name_set.emplace(with_step->getOutputColumns().at(item));
-    post_order_cte_helper.acceptAndUpdate(with_step->getId(), *this, cte_require);
+    post_order_cte_helper.acceptAndUpdate(with_step->getId(), node.getId(), *this, cte_require);
 
     NamesAndTypes result_columns;
     std::unordered_map<String, String> output_columns;
@@ -1078,6 +1137,20 @@ PlanNodePtr ColumnPruningVisitor::visitTableWriteNode(TableWriteNode & node, Col
 
     NameSet require;
     for (const auto & item : table_write->getInputStreams()[0].header)
+        require.insert(item.name);
+    PlanNodePtr child = node.getChildren()[0];
+    ColumnPruningContext child_column_pruning_context{.name_set = require};
+    PlanNodePtr new_child = VisitorUtil::accept(*child, *this, child_column_pruning_context);
+    node.replaceChildren({new_child});
+    return node.shared_from_this();
+}
+
+PlanNodePtr ColumnPruningVisitor::visitOutfileWriteNode(OutfileWriteNode & node, ColumnPruningContext &)
+{
+    const auto * outfile_write = dynamic_cast<const OutfileWriteStep *>(node.getStep().get());
+
+    NameSet require;
+    for (const auto & item : outfile_write->getInputStreams()[0].header)
         require.insert(item.name);
     PlanNodePtr child = node.getChildren()[0];
     ColumnPruningContext child_column_pruning_context{.name_set = require};

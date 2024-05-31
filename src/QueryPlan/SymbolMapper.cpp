@@ -27,6 +27,8 @@
 #include <QueryPlan/PlanSerDerHelper.h>
 #include <QueryPlan/PlanVisitor.h>
 #include <QueryPlan/SymbolMapper.h>
+#include <Common/Exception.h>
+#include <QueryPlan/ExpandStep.h>
 
 namespace DB
 {
@@ -208,8 +210,8 @@ ASTPtr SymbolMapper::map(const ConstASTPtr & expr)
 Partitioning SymbolMapper::map(const Partitioning & partition)
 {
     return {
-        partition.getPartitioningHandle(),
-        map(partition.getPartitioningColumns()),
+        partition.getHandle(),
+        map(partition.getColumns()),
         partition.isRequireHandle(),
         partition.getBuckets(),
         partition.isEnforceRoundRobin(),
@@ -361,6 +363,7 @@ Aggregator::Params SymbolMapper::map(const Aggregator::Params & params)
         params.group_by_two_level_threshold,
         params.group_by_two_level_threshold_bytes,
         params.max_bytes_before_external_group_by,
+        params.enable_adaptive_spill,
         params.spill_buffer_bytes_before_external_group_by,
         params.empty_result_for_aggregation_by_empty_set,
         params.tmp_volume,
@@ -401,6 +404,16 @@ SortDescription SymbolMapper::map(const SortDescription & sort_desc)
     return res;
 }
 
+std::map<Int32, Names> SymbolMapper::map(const std::map<Int32, Names> & group_id_non_null_symbol) 
+{
+    std::map<Int32, Names> res;
+    for(const auto & entry : group_id_non_null_symbol)
+    {
+        res[entry.first] = map(entry.second);
+    }
+    return res;
+}
+
 std::shared_ptr<AggregatingStep> SymbolMapper::map(const AggregatingStep & agg)
 {
     return std::make_shared<AggregatingStep>(
@@ -426,7 +439,8 @@ std::shared_ptr<ApplyStep> SymbolMapper::map(const ApplyStep & apply)
         apply.getApplyType(),
         apply.getSubqueryType(),
         map(apply.getAssignment()),
-        map(apply.getOuterColumns()));
+        map(apply.getOuterColumns()),
+        apply.supportSemiAnti());
 }
 
 std::shared_ptr<ArrayJoinStep> SymbolMapper::map(const ArrayJoinStep & array_join)
@@ -607,7 +621,8 @@ std::shared_ptr<MergeSortingStep> SymbolMapper::map(const MergeSortingStep & sor
         sorting.getRemergeLoweredMemoryBytesRatio(),
         sorting.getMaxBytesBeforeExternalSort(),
         sorting.getVolumPtr(),
-        sorting.getMinFreeDiskSpace());
+        sorting.getMinFreeDiskSpace(),
+        sorting.isAdaptiveSpillEnabled());
 }
 
 std::shared_ptr<MarkDistinctStep> SymbolMapper::map(const MarkDistinctStep & mark_distinct)
@@ -737,12 +752,28 @@ std::shared_ptr<CTERefStep> SymbolMapper::map(const CTERefStep & cte_ref)
 
 std::shared_ptr<ExplainAnalyzeStep> SymbolMapper::map(const ExplainAnalyzeStep & step)
 {
-    return std::make_shared<ExplainAnalyzeStep>(map(step.getInputStreams()[0]), step.getKind(), step.getContext(), step.getQueryPlan(), step.getSetting());
+    return std::make_shared<ExplainAnalyzeStep>(
+        map(step.getInputStreams()[0]), map(step.getOutputName()), step.getKind(), step.getContext(), step.getQueryPlan(), step.getSetting());
+}
+
+std::shared_ptr<LocalExchangeStep> SymbolMapper::map(const LocalExchangeStep & step)
+{
+    return std::make_shared<LocalExchangeStep>(map(step.getInputStreams()[0]), step.getExchangeMode(), map(step.getSchema()));
 }
 
 std::shared_ptr<TableWriteStep> SymbolMapper::map(const TableWriteStep & step)
 {
     return std::make_shared<TableWriteStep>(map(step.getInputStreams()[0]), step.getTarget());
+}
+
+std::shared_ptr<OutfileWriteStep> SymbolMapper::map(const OutfileWriteStep & step)
+{
+    return std::make_shared<OutfileWriteStep>(map(step.getInputStreams()[0]), step.outfile_target);
+}
+
+std::shared_ptr<OutfileFinishStep> SymbolMapper::map(const OutfileFinishStep & step)
+{
+    return std::make_shared<OutfileFinishStep>(map(step.getInputStreams()[0]));
 }
 
 std::shared_ptr<ReadStorageRowCountStep> SymbolMapper::map(const ReadStorageRowCountStep & step)
@@ -769,6 +800,18 @@ std::shared_ptr<MultiJoinStep> SymbolMapper::map(const MultiJoinStep & step)
 std::shared_ptr<TotalsHavingStep> SymbolMapper::map(const TotalsHavingStep & step)
 {
     return std::make_shared<TotalsHavingStep>(map(step.getInputStreams()[0]), step.isOverflowRow(), map(step.getHavingFilter()), step.getTotalsMode(), step.getAutoIncludeThreshols(), step.isFinal());
+}
+
+std::shared_ptr<ExpandStep> SymbolMapper::map(const ExpandStep & step)
+{
+    return std::make_shared<ExpandStep>(
+        map(step.getOutputStream()), 
+        map(step.getAssignments()),
+        map(step.getNameToType()), 
+        map(step.getGroupIdSymbol()),
+        step.getGroupIdValue(),
+        map(step.getGroupIdNonNullSymbol())
+        );
 }
 
 class SymbolMapper::SymbolMapperVisitor : public StepVisitor<QueryPlanStepPtr, SymbolMapper>

@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <IO/Progress.h>
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/DistributedStages/PlanSegment.h>
 #include <Interpreters/DistributedStages/PlanSegmentInstance.h>
@@ -52,26 +53,32 @@ public:
 
     ~PlanSegmentExecutor() noexcept;
 
-    RuntimeSegmentsStatus execute(std::shared_ptr<ThreadGroupStatus> thread_group = nullptr);
+    void execute();
     BlockIO lazyExecute(bool add_output_processors = false);
 
     static void registerAllExchangeReceivers(const QueryPipeline & pipeline, UInt32 register_timeout_ms);
 
 protected:
-    void doExecute(std::shared_ptr<ThreadGroupStatus> thread_group);
+    void doExecute();
     QueryPipelinePtr buildPipeline();
     void buildPipeline(QueryPipelinePtr & pipeline, BroadcastSenderPtrs & senders);
 
 private:
+    // query_scope needs to be destructed before process_plan_segment_entry, because of memory_tracker
+    PlanSegmentProcessList::EntryPtr process_plan_segment_entry;
+    std::optional<CurrentThread::QueryScope> query_scope;
+
     ContextMutablePtr context;
     PlanSegmentInstancePtr plan_segment_instance;
     PlanSegment * plan_segment;
     PlanSegmentOutputs plan_segment_outputs;
     ExchangeOptions options;
     Poco::Logger * logger;
-    RuntimeSegmentsStatus runtime_segment_status;
+    RuntimeSegmentsMetrics metrics;
     std::unique_ptr<QueryLogElement> query_log_element;
     SenderMetrics sender_metrics;
+    Progress progress;
+    Progress final_progress;
 
     Processors buildRepartitionExchangeSink(BroadcastSenderPtrs & senders, bool keep_order, size_t output_index, const Block &header, OutputPortRawPtrs &ports);
 
@@ -79,10 +86,9 @@ private:
 
     Processors buildLoadBalancedExchangeSink(BroadcastSenderPtrs & senders, size_t output_index, const Block &header, OutputPortRawPtrs &ports);
 
-    void sendSegmentStatus(const RuntimeSegmentsStatus & status) noexcept;
-
     void collectSegmentQueryRuntimeMetric(const QueryStatus * query_status);
     void prepareSegmentInfo() const;
+    void sendProgress();
 };
 
 }

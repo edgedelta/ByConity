@@ -19,6 +19,8 @@
  * All Bytedance's Modifications are Copyright (2023) Bytedance Ltd. and/or its affiliates.
  */
 
+
+#include <Storages/System/StorageSystemHuAllocStats.h>
 #include <Databases/IDatabase.h>
 #include <Storages/System/attachSystemTables.h>
 #include <Storages/System/attachSystemTablesImpl.h>
@@ -74,6 +76,7 @@
 #include <Storages/System/StorageSystemKafkaTables.h>
 #include <Storages/System/StorageSystemCnchKafkaTables.h>
 #endif
+#include <Storages/System/StorageSystemVirtualWarehouseQueryQueue.h>
 #include <Storages/System/StorageSystemCnchTransactions.h>
 #include <Storages/System/StorageSystemCnchFilesystemLock.h>
 #include "Storages/System/StorageSystemExternalTables.h"
@@ -223,6 +226,7 @@ void attachSystemTablesServer(IDatabase & system_database, bool has_zookeeper)
     attach<StorageSystemStoragePolicies>(system_database, "storage_policies");
     attach<StorageSystemProcesses>(system_database, "processes");
     attach<StorageSystemQueryQueue>(system_database, "query_queue");
+    attach<StorageSystemVirtualWarehouseQueryQueue>(system_database, "virtual_warehouse_queue");
     attach<StorageSystemMetrics>(system_database, "metrics");
     attach<StorageSystemMerges>(system_database, "merges");
     attach<StorageSystemMutations>(system_database, "mutations");
@@ -275,6 +279,7 @@ void attachSystemTablesServer(IDatabase & system_database, bool has_zookeeper)
     attach<StorageSystemPersistentBGJobStatus>(system_database, "persistent_bg_job_status");
     attach<StorageSystemGlobalGCManager>(system_database, "global_gc_manager");
     attach<StorageSystemLockMap>(system_database, "lock_map");
+    attach<StorageSystemHuAllocStats>( system_database, "hualloc_stats");
 
     attach<StorageSystemWorkers>(system_database, "workers");
     attach<StorageSystemWorkerGroups>(system_database, "worker_groups");

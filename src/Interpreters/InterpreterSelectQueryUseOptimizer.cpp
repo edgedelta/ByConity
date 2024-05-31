@@ -54,6 +54,7 @@
 #include <DataTypes/ObjectUtils.h>
 #include <Common/ProfileEvents.h>
 #include <common/logger_useful.h>
+#include <QueryPlan/FinalSampleStep.h>
 
 #include <memory>
 
@@ -181,6 +182,7 @@ QueryPlanPtr InterpreterSelectQueryUseOptimizer::getQueryPlan(bool skip_optimize
     {
         if (enable_plan_cache)
         {
+            context->applySettingChange({"enable_evaluate_constant_for_nondeterministic", false});
             if (context->getSettingsRef().enable_auto_prepared_statement)
             {
                 SubstituteLiteralToPreparedParamsMatcher::Data substitude_prepared_param_data(context);
@@ -223,8 +225,8 @@ QueryPlanPtr InterpreterSelectQueryUseOptimizer::getQueryPlan(bool skip_optimize
         }
     }
 
-    if (query_plan->getPlanNodeRoot())
-        block = query_plan->getPlanNodeRoot()->getCurrentDataStream().header;
+    if (query_plan->getPlanNode())
+        block = query_plan->getPlanNode()->getCurrentDataStream().header;
     GraphvizPrinter::printLogicalPlan(*query_plan, context, "3999_final_plan");
     query_plan->addInterpreterContext(context);
     LOG_DEBUG(log, "join order {}", JoinOrderUtils::getJoinOrder(*query_plan));
@@ -277,6 +279,7 @@ std::pair<PlanSegmentTreePtr, std::set<StorageID>> InterpreterSelectQueryUseOpti
         log, "Optimizer total run time: ", "PlanSegment build", std::to_string(stage_watch.elapsedMillisecondsAsDouble()) + "ms");
     ProfileEvents::increment(ProfileEvents::PlanSegmentSplitterTime, stage_watch.elapsedMilliseconds());
 
+    resetFinalSampleSize(plan_segment_tree);
     setPlanSegmentInfoForExplainAnalyze(plan_segment_tree);
     GraphvizPrinter::printPlanSegment(plan_segment_tree, context);
     context->logOptimizerProfile(
@@ -548,13 +551,13 @@ BlockIO InterpreterSelectQueryUseOptimizer::execute()
         //     return executeDDLQueryOnCluster(query_ptr, context);
         return executeCreatePreparedStatementQuery();
     }
-
     if (!plan_segment_tree_ptr)
     {
         std::pair<PlanSegmentTreePtr, std::set<StorageID>> plan_segment_tree_and_used_storage_ids = getPlanSegment();
         plan_segment_tree_ptr = std::move(plan_segment_tree_and_used_storage_ids.first);
     }
     size_t plan_segment_num = plan_segment_tree_ptr->getNodes().size();
+
     UInt64 max_plan_segment_num = context->getSettingsRef().max_plan_segment_num;
     if (max_plan_segment_num != 0 && plan_segment_num > max_plan_segment_num)
         throw Exception(
@@ -584,6 +587,25 @@ void InterpreterSelectQueryUseOptimizer::setPlanSegmentInfoForExplainAnalyze(Pla
     {
         ExplainAnalyzeVisitor explain_visitor;
         VisitorUtil::accept(final_segment->getQueryPlan().getRoot(), explain_visitor, plan_segment_tree->getNodes());
+    }
+}
+
+void InterpreterSelectQueryUseOptimizer::resetFinalSampleSize(PlanSegmentTreePtr & plan_segment_tree)
+{
+    for (auto & plan_segment : plan_segment_tree->getNodes())
+    {
+        if (plan_segment.getPlanSegment())
+        {
+            for (auto & node : plan_segment.getPlanSegment()->getQueryPlan().getNodes())
+            {
+                if (auto * sample = dynamic_cast<FinalSampleStep *>(node.step.get()))
+                {
+                    size_t sample_size = (sample->getSampleSize() + 1) / plan_segment.getPlanSegment()->getParallelSize();
+                    sample->setSampleSize(sample_size);
+                }
+                    
+            }
+        }
     }
 }
 

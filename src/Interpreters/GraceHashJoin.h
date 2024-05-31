@@ -45,9 +45,8 @@ class GraceHashJoin final : public IJoin
 {
     class FileBucket;
     class DelayedBlocks;
-    using InMemoryJoin = HashJoin;
 
-    using InMemoryJoinPtr = std::shared_ptr<InMemoryJoin>;
+    using InMemoryJoinPtr = std::shared_ptr<HashJoin>;
 
 public:
     using BucketPtr = std::shared_ptr<FileBucket>;
@@ -58,7 +57,8 @@ public:
         const Block & left_sample_block_, const Block & right_sample_block_,
         TemporaryDataOnDiskScopePtr tmp_data_,
         int left_side_parallel_,
-        bool any_take_last_row_ = false);
+        bool enable_adaptive_spill,
+        bool any_take_last_row_);
 
     ~GraceHashJoin() override;
 
@@ -96,6 +96,8 @@ private:
     /// Create empty join for in-memory processing.
     InMemoryJoinPtr makeInMemoryJoin();
 
+    void inMemoryJoinBlock(Block & block, ExtraBlockPtr & not_processed);
+
     /// Add right table block to the @join. Calls @rehash on overflow.
     void addJoinedBlockImpl(Block block, bool is_delay_read = false);
 
@@ -113,7 +115,7 @@ private:
     ///
     /// NB: after @rehashBuckets there may be rows that are written to the buckets that they do not belong to.
     /// It is fine; these rows will be written to the corresponding buckets during the third stage.
-    Buckets rehashBuckets();
+    Buckets rehashBuckets(size_t grow_multiplier);
 
     /// Perform some bookkeeping after all calls to @joinBlock.
     void startReadingDelayedBlocks();
@@ -126,6 +128,7 @@ private:
 
     Poco::Logger * log;
     ContextPtr context;
+    bool adaptive_spill_mode = false;
     std::shared_ptr<TableJoin> table_join;
     Block left_sample_block;
     Block right_sample_block;
@@ -151,6 +154,9 @@ private:
     Block hash_join_sample_block;
     mutable std::mutex hash_join_mutex;
     int left_side_parallel;
+    size_t max_allowed_mem_size_in_spill = 512 * 1024 * 1024; //512MB default
+    mutable size_t last_mem_size_triger_spill = 0;
+
 };
 
 }

@@ -222,6 +222,60 @@ void CnchWorkerClient::sendCreateQueries(
     RPCHelpers::checkResponse(response);
 }
 
+brpc::CallId CnchWorkerClient::sendCnchFileDataParts(
+    const ContextPtr & context,
+    const StoragePtr & storage,
+    const String & local_table_name,
+    const DB::FileDataPartsCNCHVector & parts,
+    const ExceptionHandlerPtr & handler)
+{
+    Protos::SendCnchFileDataPartsReq request;
+    request.set_txn_id(context->getCurrentTransactionID());
+    request.set_database_name(storage->getDatabaseName());
+    request.set_table_name(local_table_name);
+    fillCnchFilePartsModel(parts, *request.mutable_parts());
+
+    auto * cntl = new brpc::Controller;
+    const auto call_id = cntl->call_id();
+    auto * response = new Protos::SendCnchFileDataPartsResp;
+    stub->sendCnchFileDataParts(cntl, &request, response, brpc::NewCallback(RPCHelpers::onAsyncCallDone, response, cntl, handler));
+    return call_id;
+}
+
+CheckResults CnchWorkerClient::checkDataParts(
+    const ContextPtr & context,
+    const IStorage & storage,
+    const String & local_table_name,
+    const String & create_query,
+    const ServerDataPartsVector & parts)
+{
+    brpc::Controller cntl;
+    Protos::CheckDataPartsReq request;
+    Protos::CheckDataPartsResp response;
+
+    const auto & settings = context->getSettingsRef();
+    auto timeout = settings.max_execution_time.value.totalSeconds();
+    cntl.set_timeout_ms(timeout ? timeout*1000 : 180000);
+
+    request.set_txn_id(context->getCurrentTransactionID());
+    request.set_database_name(storage.getDatabaseName());
+    request.set_table_name(local_table_name);
+    request.set_create_query(create_query);
+
+    fillPartsModelForSend(storage, parts, *request.mutable_parts());
+
+    stub->checkDataParts(&cntl, &request, &response, nullptr);
+    assertController(cntl);
+    RPCHelpers::checkResponse(response);
+
+    CheckResults res;
+
+    for (size_t i = 0, size = response.part_path().size(); i < size; ++i)
+        res.emplace_back(response.part_path()[i], response.is_passed()[i], response.message()[i]);
+
+    return res;
+}
+
 brpc::CallId CnchWorkerClient::preloadDataParts(
     const ContextPtr & context,
     const TxnTimestamp & txn_id,
@@ -439,7 +493,7 @@ void CnchWorkerClient::removeWorkerResource(TxnTimestamp txn_id)
     RPCHelpers::checkResponse(response);
 }
 
-void CnchWorkerClient::createDedupWorker(const StorageID & storage_id, const String & create_table_query, const HostWithPorts & host_ports_)
+void CnchWorkerClient::createDedupWorker(const StorageID & storage_id, const String & create_table_query, const HostWithPorts & host_ports_, const size_t & deduper_index)
 {
     brpc::Controller cntl;
     Protos::CreateDedupWorkerReq request;
@@ -448,8 +502,24 @@ void CnchWorkerClient::createDedupWorker(const StorageID & storage_id, const Str
     RPCHelpers::fillStorageID(storage_id, *request.mutable_table());
     request.set_create_table_query(create_table_query);
     RPCHelpers::fillHostWithPorts(host_ports_, *request.mutable_host_ports());
+    request.set_deduper_index(deduper_index);
 
     stub->createDedupWorker(&cntl, &request, &response, nullptr);
+    assertController(cntl);
+    RPCHelpers::checkResponse(response);
+}
+
+void CnchWorkerClient::assignHighPriorityDedupPartition(const StorageID & storage_id, const Names & high_priority_partition)
+{
+    brpc::Controller cntl;
+    Protos::AssignHighPriorityDedupPartitionReq request;
+    Protos::AssignHighPriorityDedupPartitionResp response;
+
+    RPCHelpers::fillStorageID(storage_id, *request.mutable_table());
+    for (const auto & entry : high_priority_partition)
+        request.add_partition_id(entry);
+
+    stub->assignHighPriorityDedupPartition(&cntl, &request, &response, nullptr);
     assertController(cntl);
     RPCHelpers::checkResponse(response);
 }
@@ -493,6 +563,8 @@ DedupWorkerStatus CnchWorkerClient::getDedupWorkerStatus(const StorageID & stora
         status.last_task_visible_part_cnt = response.last_task_visible_part_cnt();
         status.last_task_staged_part_total_rows = response.last_task_staged_part_total_rows();
         status.last_task_visible_part_total_rows = response.last_task_visible_part_total_rows();
+        for (const auto & task_progress : response.dedup_tasks_progress())
+            status.dedup_tasks_progress.emplace_back(task_progress);
         status.last_exception = response.last_exception();
         status.last_exception_time = response.last_exception_time();
     }
@@ -546,6 +618,13 @@ void CnchWorkerClient::submitKafkaConsumeTask(const KafkaTaskCommand & command)
     for (const auto & tpl : command.tpl)
     {
         auto * cur_tpl = request.add_tpl();
+        cur_tpl->set_topic(toString(tpl.get_topic()));
+        cur_tpl->set_partition(tpl.get_partition());
+        cur_tpl->set_offset(tpl.get_offset());
+    }
+    for (const auto & tpl : command.sample_partitions)
+    {
+        auto * cur_tpl = request.add_sample_partitions();
         cur_tpl->set_topic(toString(tpl.get_topic()));
         cur_tpl->set_partition(tpl.get_partition());
         cur_tpl->set_offset(tpl.get_offset());

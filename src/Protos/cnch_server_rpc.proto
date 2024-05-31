@@ -184,6 +184,7 @@ message FetchDataPartsReq {
   required uint64 table_commit_time = 4;
   repeated string partitions = 5;
   required uint64 timestamp = 6;
+  repeated int64 bucket_numbers = 7;
 }
 
 message FetchDataPartsResp {
@@ -198,6 +199,7 @@ message FetchDeleteBitmapsReq {
   required uint64 table_commit_time = 4;
   repeated string partitions = 5;
   required uint64 timestamp = 6;
+  repeated int64 bucket_numbers = 7;
 }
 
 message FetchDeleteBitmapsResp {
@@ -360,6 +362,17 @@ message RedirectCommitPartsReq {
 
 message RedirectCommitPartsResp { optional string exception = 1; }
 
+message RedirectClearPartsReq {
+  required string database = 1;
+  required string table = 2;
+  required UUID uuid = 3;
+  repeated DataModelPart parts = 5;
+  repeated DataModelPart staged_parts = 6;
+  repeated DataModelDeleteBitmap delete_bitmaps = 7;
+}
+
+message RedirectClearPartsResp { optional string exception = 1; }
+
 enum DetachAttachType {
   ATTACH_DETACHED_PARTS = 1; DETACH_ATTACHED_PARTS = 2; ATTACH_DETACHED_RAW = 3;
   DETACH_ATTACHED_RAW = 4;
@@ -475,6 +488,10 @@ message getLastModificationTimeHintsResp {
   repeated LastModificationTimeHint last_modification_time_hints = 2;
 }
 
+message notifyTableCreatedReq { required UUID storage_uuid = 1; }
+
+message notifyTableCreatedResp { optional string exception = 1; }
+
 message handleRefreshTaskOnFinishReq
 {
   required string task_id = 1;
@@ -582,6 +599,9 @@ service CnchServerService {
   rpc redirectCommitParts(RedirectCommitPartsReq)
       returns(RedirectCommitPartsResp);
 
+  rpc redirectClearParts(RedirectClearPartsReq)
+      returns(RedirectClearPartsResp);
+
   rpc redirectSetCommitTime(RedirectCommitPartsReq)
       returns(RedirectCommitPartsResp);
 
@@ -616,6 +636,7 @@ service CnchServerService {
       returns(notifyAccessEntityChangeResp);
   rpc getLastModificationTimeHints(getLastModificationTimeHintsReq)
       returns(getLastModificationTimeHintsResp);
+  rpc notifyTableCreated(notifyTableCreatedReq) returns(notifyTableCreatedResp);
 
   rpc handleRefreshTaskOnFinish(handleRefreshTaskOnFinishReq) 
       returns (handleRefreshTaskOnFinishResp);

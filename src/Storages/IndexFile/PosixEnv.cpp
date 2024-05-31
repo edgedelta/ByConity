@@ -7,7 +7,6 @@
  * All Bytedance's Modifications are Copyright (2023) Bytedance Ltd. and/or its affiliates.
  */
 
-#include <Storages/HDFS/ReadBufferFromByteHDFS.h>
 #include <Storages/IndexFile/Env.h>
 #include <Common/Exception.h>
 #include <Common/Slice.h>
@@ -96,10 +95,7 @@ namespace
                 try
                 {
                     std::unique_ptr<ReadBufferFromFileBase> buffer = file.disk->readFile(
-                        file.rel_path, ReadSettings {
-                            .buffer_size = n,
-                            .byte_hdfs_pread = true,
-                        }
+                        file.rel_path, ReadSettings().initializeReadSettings(n)
                     );
 
                     auto seek_off = static_cast<off_t>(file.start_offset + offset);

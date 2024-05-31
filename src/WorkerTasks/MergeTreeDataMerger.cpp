@@ -423,11 +423,7 @@ MergeTreeMutableDataPartPtr MergeTreeDataMerger::mergePartsToTemporaryPartImpl(
     // create merge prefetcher if necessary
     if (context->getSettingsRef().cnch_enable_merge_prefetch)
     {
-        if (std::any_of(merging_columns.begin(), merging_columns.end(), [](auto & c) { return c.type->isMap(); }))
-        {
-            LOG_DEBUG(log, "Prefetcher is disabled as there is some Map column in merging_columns");
-        }
-        else if (std::any_of(gathering_columns.cbegin(), gathering_columns.cend(), [](auto & c) { return isBitEngineDataType(c.type); }))
+        if (std::any_of(gathering_columns.cbegin(), gathering_columns.cend(), [](auto & c) { return isBitEngineDataType(c.type); }))
         {
             LOG_DEBUG(log, "Prefetcher is disabled as there is some BitEngine column in gathering_columns");
         }
@@ -835,7 +831,7 @@ MergeTreeMutableDataPartPtr MergeTreeDataMerger::mergePartsToTemporaryPartImpl(
         // we use a new merge_entry for projection merge
         // Here, projection_manipulation_entry use the parent_parent's params to initilize itself, which is not accurate.
         // THe most accurate way is to construct a new params by the projection_parts.
-        ManipulationListElement projection_manipulation_entry(params, false);
+        ManipulationListElement projection_manipulation_entry(params, false, context);
 
         auto merged_projection_part = mergePartsToTemporaryPartImpl(
             std::move(projection_parts), projection.metadata, projection_merging_params, &projection_manipulation_entry, new_data_part.get());

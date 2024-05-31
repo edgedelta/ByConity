@@ -198,6 +198,9 @@ public:
     /// A global unique id for the storage. If storage UUID is not empty, use the storage UUID. Otherwise, use the address of current object.
     String getStorageUniqueID() const;
 
+    /// If uuid is empty, throw exception
+    UUID getCnchStorageUUID() const;
+
     //// Data parts
     /// Returns a copy of the list so that the caller shouldn't worry about locks.
     DataParts getDataParts(const DataPartStates & affordable_states) const;
@@ -249,6 +252,8 @@ public:
     {
         auto lock = lockPartsRead();
         const auto it = column_sizes.find(name);
+        if (it == std::end(column_sizes))
+            LOG_TRACE(log, "Can not get column compressed size:{}", name);
         return it == std::end(column_sizes) ? 0 : it->second.data_compressed;
     }
 
@@ -258,12 +263,16 @@ public:
         return column_sizes;
     }
 
+    std::pair<DataPartsVector, double> getCalculatedPartsAndRatio() const;
+
     /// Calculates column sizes in compressed form for the current state of data_parts. Call with data_parts mutex locked.
     void calculateColumnSizesImpl();
 
     /// Adds or subtracts the contribution of the part to compressed column sizes.
     void addPartContributionToColumnSizes(const DataPartPtr & part);
     void removePartContributionToColumnSizes(const DataPartPtr & part);
+    ColumnSize getMapColumnSizes(const DataPartPtr & part, const String & map_implicit_column_name) const;
+
 
     /// For ATTACH/DETACH/DROP PARTITION.
     String getPartitionIDFromQuery(const ASTPtr & ast, ContextPtr context) const;
@@ -400,7 +409,8 @@ public:
     virtual bool unlockSharedData(const IMergeTreeDataPart &) const { return true; }
 
     bool isBucketTable() const override { return getInMemoryMetadata().isClusterByKeyDefined(); }
-    UInt64 getTableHashForClusterBy() const override; // to compare table engines efficiently
+    TableDefinitionHash getTableHashForClusterBy() const override; // to compare table engines efficiently
+    bool isTableClustered(ContextPtr context_) const override;
 
     /// Snapshot for MergeTree contains the current set of data parts
     /// at the moment of the start of query.
@@ -418,6 +428,10 @@ public:
 
     virtual bool supportsOptimizer() const override { return true; }
 
+    bool commitTxnFromWorkerSide(const StorageMetadataPtr & metadata_snapshot, ContextPtr query_context) const;
+
+     ColumnSize calculateMapColumnSizesImpl(const String & map_implicit_column_name) const;
+
     void resetObjectColumns(const ColumnsDescription & object_columns_) { object_columns = object_columns_; }
 
     // TODO: @lianwenlong not thread safe if storage cache enabled
@@ -425,6 +439,8 @@ public:
 
     /// The same as above but does not hold vector of data parts.
     virtual StorageSnapshotPtr getStorageSnapshotWithoutParts(const StorageMetadataPtr & metadata_snapshot) const;
+
+    ASTPtr applyFilter(ASTPtr query_filter, SelectQueryInfo & query_info, ContextPtr, PlanNodeStatisticsPtr) const override;
 
 protected:
     friend class IMergeTreeDataPart;

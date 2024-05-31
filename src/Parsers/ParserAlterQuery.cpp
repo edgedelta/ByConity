@@ -20,6 +20,7 @@
  */
 
 #include <Common/typeid_cast.h>
+#include <Storages/DataDestinationType.h>
 #include <Parsers/ParserAlterQuery.h>
 #include <Parsers/CommonParsers.h>
 #include <Parsers/ExpressionElementParsers.h>
@@ -158,6 +159,7 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
 
     ParserKeyword s_to_disk("TO DISK");
     ParserKeyword s_to_volume("TO VOLUME");
+    ParserKeyword s_to_bytecool("TO BYTECOOL");
     ParserKeyword s_to_table("TO TABLE");
     ParserKeyword s_to_shard("TO SHARD");
 
@@ -576,6 +578,8 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
                     command->move_destination_type = DataDestinationType::DISK;
                 else if (s_to_volume.ignore(pos))
                     command->move_destination_type = DataDestinationType::VOLUME;
+                else if (s_to_bytecool.ignore(pos))
+                    command->move_destination_type = DataDestinationType::BYTECOOL;
                 else if (s_to_table.ignore(pos))
                 {
                     if (!parseDatabaseAndTableName(pos, expected, command->to_database, command->to_table))
@@ -617,6 +621,8 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
                         command->move_destination_type = DataDestinationType::DISK;
                     else if (s_to_volume.ignore(pos))
                         command->move_destination_type = DataDestinationType::VOLUME;
+                    else if (s_to_bytecool.ignore(pos))
+                        command->move_destination_type = DataDestinationType::BYTECOOL;
                     else if (s_to_table.ignore(pos))
                     {
                         if (!parseDatabaseAndTableName(pos, expected, command->to_database, command->to_table))
@@ -717,6 +723,15 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
                 if (!parser_partition.parse(pos, command->partition, expected))
                     return false;
 
+                if (ParserKeyword{"BUCKET"}.ignore(pos, expected))
+                {
+                    ASTPtr ast;
+                    if (!ParserUnsignedInteger().parse(pos, ast, expected))
+                        return false;
+                    command->specify_bucket = true;
+                    command->bucket_number = safeGet<UInt64>(ast->as<ASTLiteral>()->value);
+                }
+
                 command->type = ASTAlterCommand::DROP_PARTITION;
                 command->detach = true;
             }
@@ -796,6 +811,15 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
             {
                 if (!parser_partition.parse(pos, command->partition, expected))
                     return false;
+
+                if (ParserKeyword{"BUCKET"}.ignore(pos, expected))
+                {
+                    ASTPtr ast;
+                    if (!ParserUnsignedInteger().parse(pos, ast, expected))
+                        return false;
+                    command->specify_bucket = true;
+                    command->bucket_number = safeGet<UInt64>(ast->as<ASTLiteral>()->value);
+                }
 
                 if (s_from.ignore(pos))
                 {
@@ -881,6 +905,14 @@ bool ParserAlterCommand::parseImpl(Pos & pos, ASTPtr & node, Expected & expected
 
                 if (!parseDatabaseAndTableName(pos, expected, command->from_database, command->from_table))
                     return false;
+
+                if (ParserKeyword("BUCKETS").ignore(pos, expected))
+                {   
+                    ParserList parser_bucket_num_list(std::make_unique<ParserLiteral>(), std::make_unique<ParserToken>(TokenType::Comma), false);
+            
+                    if (!parser_bucket_num_list.parse(pos, command->buckets, expected))
+                        return false;
+                }
 
                 command->type = ASTAlterCommand::INGEST_PARTITION;
             }

@@ -139,12 +139,22 @@ PlanNodePtr UnifyNullableVisitor::visitTableWriteNode(TableWriteNode & node, Con
     return visitPlanNode(node, context);
 }
 
+PlanNodePtr UnifyNullableVisitor::visitOutfileWriteNode(OutfileWriteNode & node, ContextMutablePtr & context)
+{
+    return visitPlanNode(node, context);
+}
+
 PlanNodePtr UnifyNullableVisitor::visitApplyNode(ApplyNode & node, ContextMutablePtr & context)
 {
     return visitPlanNode(node, context);
 }
 
 PlanNodePtr UnifyNullableVisitor::visitIntersectOrExceptNode(IntersectOrExceptNode & node, ContextMutablePtr & context)
+{
+    return visitPlanNode(node, context);
+}
+
+PlanNodePtr UnifyNullableVisitor::visitLocalExchangeNode(LocalExchangeNode & node, ContextMutablePtr & context)
 {
     return visitPlanNode(node, context);
 }
@@ -229,6 +239,11 @@ PlanNodePtr UnifyNullableVisitor::visitTableFinishNode(TableFinishNode & node, C
     return visitPlanNode(node, context);
 }
 
+PlanNodePtr UnifyNullableVisitor::visitOutfileFinishNode(OutfileFinishNode & node, ContextMutablePtr & context)
+{
+    return visitPlanNode(node, context);
+}
+
 PlanNodePtr UnifyNullableVisitor::visitReadNothingNode(ReadNothingNode & node, ContextMutablePtr & context)
 {
     return visitPlanNode(node, context);
@@ -245,6 +260,11 @@ PlanNodePtr UnifyNullableVisitor::visitTableScanNode(TableScanNode & node, Conte
 }
 
 PlanNodePtr UnifyNullableVisitor::visitValuesNode(ValuesNode & node, ContextMutablePtr & context)
+{
+    return visitPlanNode(node, context);
+}
+
+PlanNodePtr UnifyNullableVisitor::visitExpandNode(ExpandNode & node, ContextMutablePtr & context)
 {
     return visitPlanNode(node, context);
 }

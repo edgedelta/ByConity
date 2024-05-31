@@ -15,15 +15,17 @@
 
 #include <Transaction/CnchServerTransaction.h>
 
+#include <atomic>
+#include <mutex>
 #include <Catalog/Catalog.h>
-#include <common/scope_guard.h>
+#include <IO/WriteBuffer.h>
+#include <Transaction/TransactionCleaner.h>
+#include <Transaction/TransactionCommon.h>
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
 #include <common/logger_useful.h>
-#include <IO/WriteBuffer.h>
-#include <Transaction/TransactionCommon.h>
-#include <Transaction/TransactionCleaner.h>
-#include <mutex>
+#include <common/scope_guard.h>
+#include <common/scope_guard_safe.h>
 
 namespace ProfileEvents
 {
@@ -152,22 +154,18 @@ TxnTimestamp CnchServerTransaction::commitV2()
         if (!(getContext()->getSettings().ignore_duplicate_insertion_label && e.code() == ErrorCodes::INSERTION_LABEL_ALREADY_EXISTS))
             tryLogCurrentException(log, __PRETTY_FUNCTION__);
 
-        if (e.code() == ErrorCodes::BRPC_TIMEOUT)
+        try
         {
-            try
-            {
-                auto commit_ts = abort();
-                /// the txn has been sucessfully committed for the timeout case
-                if (txn_record.status() == CnchTransactionStatus::Finished)
-                    return commit_ts;
-            }
-            catch (...)
-            {
-                tryLogCurrentException(log, __PRETTY_FUNCTION__);
-            }
+            auto commit_ts = abort();
+            /// the txn has been sucessfully committed for the timeout case
+            if (txn_record.status() == CnchTransactionStatus::Finished)
+                return commit_ts;
+        }
+        catch (...)
+        {   
+            tryLogCurrentException(log, __PRETTY_FUNCTION__);
         }
 
-        rollback();
         throw;
     }
     catch (...)
@@ -339,6 +337,9 @@ TxnTimestamp CnchServerTransaction::commit()
                     ProfileEvents::increment(ProfileEvents::CnchTxnFinishedTransactionRecord);
                     LOG_DEBUG(log, "Successfully committed transaction {} at {}\n", txn_record.txnID().toUInt64(), commit_ts);
                     commitModifiedCount(this->modified_counter);
+
+                    /// Clean merging_mutating_parts after txn succeed.
+                    tryCleanMergeTagger();
                     return commit_ts;
                 }
                 else // CAS failed
@@ -400,14 +401,19 @@ TxnTimestamp CnchServerTransaction::rollback()
         tryLogCurrentException(log, __PRETTY_FUNCTION__);
     }
 
+    tryCleanMergeTagger();
     return ts;
 }
 
 TxnTimestamp CnchServerTransaction::abort()
 {
     LOG_DEBUG(log, "Start abort transaction {}\n", txn_record.txnID().toUInt64());
+
+    SCOPE_EXIT_SAFE({ tryCleanMergeTagger(); });
+
     auto lock = getLock();
-    if (isReadOnly())
+    // Abort successful primary txn shouldn't be allowed unless we mean to do so with rollback.
+    if (isReadOnly() || (txn_record.isPrimary() && txn_record.status() == CnchTransactionStatus::Finished))
         throw Exception("Invalid commit operation", ErrorCodes::LOGICAL_ERROR);
 
     TransactionRecord target_record = getTransactionRecord();
@@ -429,7 +435,7 @@ TxnTimestamp CnchServerTransaction::abort()
         }
         success = getContext()->getCnchCatalog()->setTransactionRecordWithRequests(txn_record, target_record, requests, response);
     }
-    else 
+    else
         success = global_context->getCnchCatalog()->setTransactionRecord(txn_record, target_record);
     txn_record = std::move(target_record);
 
@@ -443,11 +449,11 @@ TxnTimestamp CnchServerTransaction::abort()
         // Don't abort committed txn, treat committed
         if (txn_record.status() == CnchTransactionStatus::Finished)
         {
-            LOG_WARNING(log, "Transaction {} has been committed\n", txn_record.txnID().toUInt64());
+            LOG_WARNING(log, "Transaction {} has been committed\n", txn_record.toString());
         }
         else if (txn_record.status() == CnchTransactionStatus::Aborted)
         {
-            LOG_WARNING(log, "Transaction {} has been aborted\n", txn_record.txnID().toUInt64());
+            LOG_WARNING(log, "Transaction {} has been aborted\n", txn_record.toString());
         }
         else
         {
@@ -490,10 +496,7 @@ void CnchServerTransaction::clean(TxnCleanTask & task)
                 undo_size += action->getSize();
             }
 
-            {
-                std::lock_guard lk(task.mutex);
-                task.undo_size = undo_size;
-            }
+            task.undo_size.store(undo_size, std::memory_order_relaxed);
 
             for (auto & action : actions)
                 action->postCommit(getCommitTime());
@@ -517,10 +520,7 @@ void CnchServerTransaction::clean(TxnCleanTask & task)
             for (const auto & buffer : undo_buffer)
                 undo_size += buffer.second.size();
 
-            {
-                std::lock_guard lk(task.mutex);
-                task.undo_size = undo_size;
-            }
+            task.undo_size.store(undo_size, std::memory_order_relaxed);
 
             std::set<String> kvfs_lock_keys;
             for (const auto & [uuid, resources] : undo_buffer)

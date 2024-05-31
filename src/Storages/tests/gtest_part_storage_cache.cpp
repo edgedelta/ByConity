@@ -146,6 +146,57 @@ TEST_F(CacheManagerTest, GetTableFromCache)
     cache_manager->shutDown();
 }
 
+TEST_F(CacheManagerTest, GetTableWithTSFromCache)
+{
+    UInt64 ts_1 = 1, ts_2 =2;
+    std::shared_ptr<PartCacheManager> cache_manager = std::make_shared<PartCacheManager>(getContext().context, 0, true);
+    String query = "create table gztest.test UUID '61f0c404-5cb3-11e7-907b-a6006ad3dba0' (id Int32) ENGINE=CnchMergeTree order by id";
+    StoragePtr storage_v1 = CacheTestMock::createTable(query, getContext().context);
+    storage_v1->commit_time = TxnTimestamp(ts_1);
+
+    String query_new = "create table gztest.test UUID '61f0c404-5cb3-11e7-907b-a6006ad3dba0' (id Int32, s String) ENGINE=CnchMergeTree order by id";
+    StoragePtr storage_v2 = CacheTestMock::createTable(query_new, getContext().context);
+    storage_v2->commit_time = TxnTimestamp(ts_2);
+
+    auto current_topology_version = PairInt64{1, 1};
+
+    // mock some logic in Catalog::getTablexxx
+    auto get_storage_from_cache_with_ts = [&cache_manager](const UUID & uuid, const PairInt64 & topology_version, const TxnTimestamp & ts)
+    {
+        StoragePtr res;
+        auto cached = cache_manager->getStorageFromCache(uuid, topology_version);
+        if (cached && cached->commit_time <= ts)
+            res = cached;
+        return res;
+    };
+
+    // load active tables into CacheManager
+    cache_manager->mayUpdateTableMeta(*storage_v1, current_topology_version);
+    auto entry = cache_manager->getTableMeta(storage_v1->getStorageUUID());
+
+    // insert storage v1 into cache
+    cache_manager->insertStorageCache(storage_v1->getStorageID(), storage_v1, ts_1, current_topology_version);
+
+    StoragePtr storage_from_cache;
+    // try get storage v1 from cache
+    storage_from_cache = get_storage_from_cache_with_ts(storage_v1->getStorageUUID(), current_topology_version, ts_1);
+    EXPECT_NE(storage_from_cache, nullptr);
+    auto column_size = storage_from_cache->getInMemoryMetadataPtr()->getColumns().getAllPhysical().size();
+    EXPECT_EQ(column_size, 1);
+
+    // insert storage v2 into cache
+    cache_manager->insertStorageCache(storage_v2->getStorageID(), storage_v2, ts_2, current_topology_version);
+    // mock get storage with an earier ts.
+    storage_from_cache = get_storage_from_cache_with_ts(storage_v2->getStorageUUID(), current_topology_version, ts_1);
+    EXPECT_EQ(storage_from_cache, nullptr);
+
+    // mock get storage from cache with latest commit ts.
+    storage_from_cache = get_storage_from_cache_with_ts(storage_v2->getStorageUUID(), current_topology_version, ts_2);
+    EXPECT_NE(storage_from_cache, nullptr);
+    auto column_size_new = storage_from_cache->getInMemoryMetadataPtr()->getColumns().getAllPhysical().size();
+    EXPECT_EQ(column_size_new, 2);
+}
+
 /***
  * @brief Storage cache test 2
  * Test contensions between get storage from cache and alter table.
@@ -192,6 +243,50 @@ TEST_F(CacheManagerTest, AlterTableContention)
 
 
 /***
+ * @brief Storage cache test 3
+ * Test reject cache non-latest version storage.
+ * The storage cache only accept storage with latest commit ts.
+*/
+TEST_F(CacheManagerTest, RejectCacheOldStorageTest)
+{
+    auto context = getContext().context;
+    std::shared_ptr<PartCacheManager> cache_manager = std::make_shared<PartCacheManager>(context, 0, true);
+    auto current_topology_version = PairInt64{1, 1};
+    UInt64 ts_commit = 1, ts_latest = 2;
+
+
+    String query = "create table gztest.test UUID '61f0c404-5cb3-11e7-907b-a6006ad3dba0' (id Int32) ENGINE=CnchMergeTree order by id";
+    StoragePtr storage = CacheTestMock::createTable(query, context);
+
+    // load active tables into CacheManager
+    cache_manager->mayUpdateTableMeta(*storage, current_topology_version);
+    auto entry = cache_manager->getTableMeta(storage->getStorageUUID());
+
+    // mock get storage with an earlier ts. Will get an old version storage with latest version set
+    storage->commit_time = TxnTimestamp{ts_commit};
+    storage->latest_version = TxnTimestamp{ts_latest};
+
+    cache_manager->insertStorageCache(storage->getStorageID(), storage, ts_commit, current_topology_version);
+
+    // get storate from cache. It should get nothing
+    auto storage_from_cache = cache_manager->getStorageFromCache(storage->getStorageUUID(), current_topology_version);
+    EXPECT_EQ(storage_from_cache, nullptr);
+
+    // update storage commit ts to latest. mock get latest storage from metastore.
+    storage->commit_time = TxnTimestamp{ts_latest};
+
+    // storage cache accept the new storage with latest commit ts
+    cache_manager->insertStorageCache(storage->getStorageID(), storage, storage->commit_time, current_topology_version);
+
+    // now should get storage from cache
+    auto storage_from_cache_2 = cache_manager->getStorageFromCache(storage->getStorageUUID(), current_topology_version);
+
+    EXPECT_NE(storage_from_cache_2, nullptr);
+
+    cache_manager->shutDown();
+}
+
+/***
  * @brief part cache test
  * 1. Test insert into part cache
  * 2. Test get parts from part cache
@@ -223,18 +318,18 @@ TEST_F(CacheManagerTest, GetPartsFromCache)
     // mock insert part into cache
     Protos::DataModelPartVector parts_models = CacheTestMock::createPartBatch("1001", 10, 0);
     EXPECT_EQ(parts_models.parts().size(), 10);
-    (*it_p1)->cache_status = CacheStatus::LOADING;
+    (*it_p1)->part_cache_status.setToLoading();
     cache_manager->insertDataPartsIntoCache(*storage, parts_models.parts(), false, false, topology_version);
-    (*it_p1)->cache_status = CacheStatus::LOADED;
+    (*it_p1)->part_cache_status.setToLoaded();
 
     // `getTableLastUpdateTime` should return a non-zero value after insert a valid part.
     EXPECT_GT(cache_manager->getTableLastUpdateTime(storage->getStorageUUID()), ts1);
 
     parts_models = CacheTestMock::createPartBatch("1002", 20, 0);
     EXPECT_EQ(parts_models.parts().size(), 20);
-    (*it_p2)->cache_status = CacheStatus::LOADING;
+    (*it_p2)->part_cache_status.setToLoading();
     cache_manager->insertDataPartsIntoCache(*storage, parts_models.parts(), false, false, topology_version);
-    (*it_p2)->cache_status = CacheStatus::LOADED;
+    (*it_p2)->part_cache_status.setToLoaded();
 
     bool load_from_func = false;
     auto load_func = [&](const Strings &, const Strings &) -> DataModelPartWrapperVector {
@@ -359,9 +454,9 @@ TEST_F(CacheManagerTest, getAndSetStatus) {
     TableMetaEntryPtr entry = cache_manager->getTableMeta(storage_1->getStorageUUID());
     auto it_p0 = entry->partitions.emplace("1000", std::make_shared<CnchPartitionInfo>(storage_1_uuid, nullptr, "1000")).first;
     Protos::DataModelPartVector parts_models = CacheTestMock::createPartBatch("1000", 10, 0);
-    (*it_p0)->cache_status = CacheStatus::LOADING;
+    (*it_p0)->part_cache_status.setToLoading();
     cache_manager->insertDataPartsIntoCache(*storage_1, parts_models.parts(), false, false, topology_version);
-    (*it_p0)->cache_status = CacheStatus::LOADED;
+    (*it_p0)->part_cache_status.setToLoaded();
 
     bool load_from_func = false;
     auto load_func = [&](const Strings &, const Strings &) -> DataModelPartWrapperVector {
@@ -414,9 +509,9 @@ TEST_F(CacheManagerTest, InvalidPartCache) {
 
     Protos::DataModelPartVector parts_models = CacheTestMock::createPartBatch("1000", 10, 0);
     EXPECT_EQ(parts_models.parts().size(), 10);
-    (*it_p0)->cache_status = CacheStatus::LOADING;
+    (*it_p0)->part_cache_status.setToLoading();
     cache_manager->insertDataPartsIntoCache(*storage, parts_models.parts(), false, false, current_topology_version);
-    (*it_p0)->cache_status = CacheStatus::LOADED;
+    (*it_p0)->part_cache_status.setToLoaded();
 
     bool load_from_func = false;
     auto load_func = [&](const Strings &, const Strings &) -> DataModelPartWrapperVector {
@@ -445,12 +540,12 @@ TEST_F(CacheManagerTest, InvalidPartCache) {
     };
     EXPECT_EQ(parts_models.parts().size(), 10);
 
-    (*it_p0)->cache_status = CacheStatus::LOADING;
+    (*it_p0)->part_cache_status.setToLoading();
     /// Cannot insert into the cache because the parts are from the old topology.
     cache_manager->insertDataPartsIntoCache(*storage, parts_models.parts(), false, false, PairInt64{1, 1});
     /// Cannot insert into the cache because cache is not loaded.
     cache_manager->insertDataPartsIntoCache(*storage, parts_models.parts(), false, false, current_topology_version);
-    (*it_p0)->cache_status = CacheStatus::LOADED;
+    (*it_p0)->part_cache_status.setToLoaded();
     load_from_func = false;
 
     EXPECT_EQ(cache_manager->getOrSetServerDataPartsInPartitions(
@@ -557,7 +652,7 @@ TEST_F(CacheManagerTest, RawStorageCacheRenameTest)
 {
     // init storage cache
     auto context = getContext().context;
-    CnchStorageCachePtr storageCachePtr = std::make_shared<CnchStorageCache>(1000);
+    CnchStorageCachePtr storage_cache_ptr = std::make_shared<CnchStorageCache>(1000);
 
     String create_query_1 = "create table db_test.test UUID '00000000-0000-0000-0000-000000000001' (id Int32) ENGINE=CnchMergeTree order by id";
     String create_query_2 = "create table db_test.test UUID '00000000-0000-0000-0000-000000000002' (id Int32) ENGINE=CnchMergeTree order by id";
@@ -567,9 +662,9 @@ TEST_F(CacheManagerTest, RawStorageCacheRenameTest)
     StoragePtr get_by_name = nullptr, get_by_uuid = nullptr;
 
     // test insert into storage cache and get
-    storageCachePtr->insert(storage1->getStorageID(), TxnTimestamp{UInt64{1}}, storage1);
-    get_by_name = storageCachePtr->get("db_test", "test");
-    get_by_uuid = storageCachePtr->get(UUIDHelpers::toUUID("00000000-0000-0000-0000-000000000001"));
+    storage_cache_ptr->insert(storage1->getStorageID(), TxnTimestamp{UInt64{1}}, storage1);
+    get_by_name = storage_cache_ptr->get("db_test", "test");
+    get_by_uuid = storage_cache_ptr->get(UUIDHelpers::toUUID("00000000-0000-0000-0000-000000000001"));
     EXPECT_NE(get_by_name, nullptr);
     EXPECT_NE(get_by_uuid, nullptr);
     EXPECT_EQ(get_by_name->getStorageUUID(), UUIDHelpers::toUUID("00000000-0000-0000-0000-000000000001"));
@@ -577,9 +672,9 @@ TEST_F(CacheManagerTest, RawStorageCacheRenameTest)
     EXPECT_EQ(get_by_uuid->getStorageID().table_name, "test");
 
     // test insert storage with different uuid but the same table name (mock rename).
-    storageCachePtr->insert(storage2->getStorageID(), TxnTimestamp{UInt64{2}}, storage2);
-    get_by_name = storageCachePtr->get("db_test", "test");
-    get_by_uuid = storageCachePtr->get(UUIDHelpers::toUUID("00000000-0000-0000-0000-000000000002"));
+    storage_cache_ptr->insert(storage2->getStorageID(), TxnTimestamp{UInt64{2}}, storage2);
+    get_by_name = storage_cache_ptr->get("db_test", "test");
+    get_by_uuid = storage_cache_ptr->get(UUIDHelpers::toUUID("00000000-0000-0000-0000-000000000002"));
     EXPECT_NE(get_by_name, nullptr);
     EXPECT_NE(get_by_uuid, nullptr);
     EXPECT_EQ(get_by_name->getStorageUUID(), UUIDHelpers::toUUID("00000000-0000-0000-0000-000000000002"));
@@ -587,9 +682,9 @@ TEST_F(CacheManagerTest, RawStorageCacheRenameTest)
     EXPECT_EQ(get_by_uuid->getStorageID().table_name, "test");
 
     // test insert old storage again. should fail to update cache.
-    storageCachePtr->insert(storage1->getStorageID(), TxnTimestamp{UInt64{1}}, storage1);
-    get_by_name = storageCachePtr->get("db_test", "test");
-    get_by_uuid = storageCachePtr->get(UUIDHelpers::toUUID("00000000-0000-0000-0000-000000000001"));
+    storage_cache_ptr->insert(storage1->getStorageID(), TxnTimestamp{UInt64{1}}, storage1);
+    get_by_name = storage_cache_ptr->get("db_test", "test");
+    get_by_uuid = storage_cache_ptr->get(UUIDHelpers::toUUID("00000000-0000-0000-0000-000000000001"));
     EXPECT_EQ(get_by_uuid, nullptr);
     EXPECT_NE(get_by_name, nullptr);
     EXPECT_EQ(get_by_name->getStorageUUID(), UUIDHelpers::toUUID("00000000-0000-0000-0000-000000000002"));
@@ -611,9 +706,11 @@ TEST_F(CacheManagerTest, DeleteBitmapsWithExtraPartitionMinmax) {
     /// It is because we need extra info for partition_info to build,
     /// and partition_info is responsible to index delete bitmaps when querys come.
     bool load_from_func = false;
-    auto load_func = [&](const Strings &, const Strings &) -> DeleteBitmapMetaPtrVector {
+    auto load_func = [&](const Strings &, const Strings &) -> DataModelDeleteBitmapPtrVector {
         load_from_func = true;
-        return bitmaps;
+        DataModelDeleteBitmapPtrVector ret;
+        std::transform(bitmaps.begin(), bitmaps.end(), std::back_inserter(ret), [](DeleteBitmapMetaPtr meta) { return meta->getModel(); });
+        return ret;
     };
 
     auto bitmaps_from_cache
@@ -636,4 +733,50 @@ TEST_F(CacheManagerTest, DeleteBitmapsWithExtraPartitionMinmax) {
         = cache_manager->getOrSetDeleteBitmapInPartitions(*storage, {"123"}, load_func, TxnTimestamp::maxTS(), topology_version);
 
     EXPECT_EQ(bitmaps_from_cache.size(), 5);
+}
+
+TEST_F(CacheManagerTest, DeleteBitmapsCacheShouldBeImmutable) {
+    std::shared_ptr<PartCacheManager> cache_manager = std::make_shared<PartCacheManager>(getContext().context, 0, true);
+    String query = "create table gztest.test UUID '61f0c404-5cb3-11e7-907b-a6006ad3dba0' (id Int32) ENGINE=CnchMergeTree order by id";
+    StoragePtr storage = CacheTestMock::createTable(query, getContext().context);
+    const auto & merge_tree = dynamic_cast<const MergeTreeMetaBase &>(*storage);
+    String storage_uuid = UUIDHelpers::UUIDToString(storage->getStorageUUID());
+    auto topology_version = PairInt64{1, 1};
+    cache_manager->mayUpdateTableMeta(*storage, topology_version);
+    auto entry = cache_manager->getTableMeta(storage->getStorageUUID());
+    auto it_p0 = entry->partitions.emplace("123", std::make_shared<CnchPartitionInfo>(storage_uuid, nullptr, "123")).first;
+
+    auto bitmaps = CacheTestMock::createDeleteBitmaps(merge_tree, "123");
+
+    bool load_from_func = false;
+    auto load_func = [&](const Strings &, const Strings &) -> DataModelDeleteBitmapPtrVector {
+        load_from_func = true;
+        DataModelDeleteBitmapPtrVector ret;
+        std::transform(bitmaps.begin(), bitmaps.end(), std::back_inserter(ret), [](DeleteBitmapMetaPtr meta) { return meta->getModel(); });
+        return ret;
+    };
+    auto parts = CacheTestMock::createPartBatch("123", 5);
+
+    (*it_p0)->delete_bitmap_cache_status.setToLoading();
+    cache_manager->insertDeleteBitmapsIntoCache(*storage, bitmaps, topology_version, parts);
+    (*it_p0)->delete_bitmap_cache_status.setToLoaded();
+
+    auto bitmaps_from_cache
+        = cache_manager->getOrSetDeleteBitmapInPartitions(*storage, {"123"}, load_func, TxnTimestamp::maxTS(), topology_version);
+
+    EXPECT_EQ(bitmaps_from_cache.size(), 5);
+    EXPECT_EQ(load_from_func, false);
+
+    bitmaps_from_cache[0]->setPrevious(bitmaps_from_cache[1]);
+    bitmaps_from_cache[1]->setPrevious(bitmaps_from_cache[2]);
+    bitmaps_from_cache[2]->setPrevious(bitmaps_from_cache[3]);
+
+    bitmaps_from_cache
+        = cache_manager->getOrSetDeleteBitmapInPartitions(*storage, {"123"}, load_func, TxnTimestamp::maxTS(), topology_version);
+    EXPECT_EQ(bitmaps_from_cache.size(), 5);
+    EXPECT_EQ(load_from_func, false);
+
+    EXPECT_EQ(bitmaps_from_cache[0]->tryGetPrevious(), nullptr);
+    EXPECT_EQ(bitmaps_from_cache[1]->tryGetPrevious(), nullptr);
+    EXPECT_EQ(bitmaps_from_cache[2]->tryGetPrevious(), nullptr);
 }

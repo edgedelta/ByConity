@@ -49,10 +49,12 @@
 #include <Parsers/formatAST.h>
 #include <Parsers/parseQuery.h>
 #include <Parsers/IParserBase.h>
+#include <Parsers/formatTenantDatabaseName.h>
 
 #include <Storages/StorageFactory.h>
 #include <Storages/StorageInMemoryMetadata.h>
 #include <Storages/MergeTree/MergeTreeData.h>
+#include <Storages/StorageMaterializedView.h>
 
 #include <Interpreters/Context.h>
 #include <Interpreters/executeDDLQueryOnCluster.h>
@@ -67,6 +69,7 @@
 #include <Access/AccessRightsElement.h>
 
 #include <DataTypes/DataTypeFactory.h>
+#include <DataTypes/IDataType.h>
 #include <DataTypes/NestedUtils.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <DataTypes/DataTypeLowCardinality.h>
@@ -110,6 +113,7 @@
 #include <Optimizer/QueryUseOptimizerChecker.h>
 
 #include <fmt/format.h>
+
 
 namespace DB
 {
@@ -574,12 +578,22 @@ ColumnsDescription InterpreterCreateQuery::getColumnsDescription(
         {
             column_type = DataTypeFactory::instance().get(col_decl.type);
 
+            if (col_decl.unsigned_modifier)
+            {
+                if (!isInteger(column_type))
+                    throw Exception("Can only use SIGNED/UNSIGNED modifier with integer type", ErrorCodes::ILLEGAL_SYNTAX_FOR_DATA_TYPE);
+                if (isSignedInteger(column_type) && *col_decl.unsigned_modifier)
+                    column_type = makeUnsigned(column_type);
+                if (isUnsignedInteger(column_type) && !(*col_decl.unsigned_modifier))
+                    column_type = makeSigned(column_type);
+            }
+
             if (col_decl.null_modifier)
             {
                 if (column_type->isNullable())
                     throw Exception("Can't use [NOT] NULL modifier with Nullable type", ErrorCodes::ILLEGAL_SYNTAX_FOR_DATA_TYPE);
                 if (*col_decl.null_modifier)
-                    column_type = makeNullable(column_type);
+                    column_type = JoinCommon::convertTypeToNullable(column_type);
             }
             else if (make_columns_nullable)
             {
@@ -1011,6 +1025,8 @@ void InterpreterCreateQuery::setEngine(ASTCreateQuery & create) const
                 as_create.storage->ttl_table = nullptr;
 
             create.set(create.storage, as_create.storage->ptr());
+            if (as_create.comment)
+                create.set(create.comment, as_create.comment->ptr());
         }
         else if (as_create.as_table_function)
             create.as_table_function = as_create.as_table_function->clone();
@@ -1125,6 +1141,9 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
     // Make sure names in foreign key exist.
     if (create.columns_list && create.columns_list->foreign_keys)
     {
+        // When the reference column does not exist, foreign keys are still created
+        bool force_create_foreign_key = getContext()->getSettingsRef().force_create_foreign_key;
+
         if (create.database.empty())
             create.database = getContext()->getCurrentDatabase();
 
@@ -1157,20 +1176,25 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
                     used_fk_names.insert(foreign_key.fk_name);
                 else
                     throw Exception("FOREIGN KEY constraint name duplicated with " + foreign_key.fk_name, ErrorCodes::ILLEGAL_COLUMN);
-
-                auto ref_storage_ptr = DatabaseCatalog::instance().tryGetTable({create.database, foreign_key.ref_table_name}, getContext());
-                if (!ref_storage_ptr)
-                    throw Exception("FOREIGN KEY references unknown table " + foreign_key.ref_table_name, ErrorCodes::UNKNOWN_TABLE);
-
+ 
+                
                 auto check_res = contains_columns(foreign_key.column_names->as<ASTExpressionList &>(), columns);
-                auto ref_check_res = contains_columns(
-                    foreign_key.ref_column_names->as<ASTExpressionList &>(),
-                    ref_storage_ptr->getInMemoryMetadataPtr()->getColumns().getAll().getNames());
-
                 if (!check_res.empty())
-                    throw Exception("FOREIGN KEY references unknown column " + check_res, ErrorCodes::ILLEGAL_COLUMN);
-                if (!ref_check_res.empty())
-                    throw Exception("FOREIGN KEY references unknown column " + ref_check_res, ErrorCodes::ILLEGAL_COLUMN);
+                    throw Exception("FOREIGN KEY references unknown self column " + check_res, ErrorCodes::ILLEGAL_COLUMN);
+
+                if (!force_create_foreign_key)
+                {
+                    auto ref_storage_ptr = DatabaseCatalog::instance().tryGetTable({create.database, foreign_key.ref_table_name}, getContext());
+                    if (!ref_storage_ptr)
+                        throw Exception("FOREIGN KEY references unknown table " + foreign_key.ref_table_name, ErrorCodes::UNKNOWN_TABLE);
+
+                    auto ref_check_res = contains_columns(
+                        foreign_key.ref_column_names->as<ASTExpressionList &>(),
+                        ref_storage_ptr->getInMemoryMetadataPtr()->getColumns().getAll().getNames());
+
+                    if (!ref_check_res.empty())
+                        throw Exception("FOREIGN KEY references unknown column " + ref_check_res, ErrorCodes::ILLEGAL_COLUMN);
+                }
             }
         }
     }
@@ -1380,6 +1404,31 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
 
     if (create.replace_table)
         return doCreateOrReplaceTable(create, properties);
+    
+    /// when create materialized view and tenant id is not empty add setting tenant_id to select query
+    if (create.is_materialized_view && !getCurrentTenantId().empty())
+    {
+        ASTPtr settings = std::make_shared<ASTSetQuery>();
+        settings->as<ASTSetQuery &>().is_standalone = false;
+        settings->as<ASTSetQuery &>().changes.push_back({"tenant_id", getCurrentTenantId()});
+        ASTPtr select = create.select->clone();
+        if (select && select->as<ASTSelectWithUnionQuery &>().settings_ast)
+        {
+            if (!select->as<ASTSelectWithUnionQuery &>().settings_ast->as<ASTSetQuery &>().changes.tryGet("tenant_id"))
+            {
+                settings->as<ASTSetQuery &>().changes.merge(select->as<ASTSelectWithUnionQuery &>().settings_ast->as<ASTSetQuery &>().changes);
+                ASTSetQuery * setting_ptr = select->as<ASTSelectWithUnionQuery &>().settings_ast->as<ASTSetQuery>();
+                select->setOrReplace(setting_ptr, settings);
+                create.setOrReplace(create.select, select);
+            }
+        }   
+        else
+        {
+            select->as<ASTSelectWithUnionQuery &>().settings_ast = settings;
+            select->children.push_back(settings);
+            create.setOrReplace(create.select, select);
+        }
+    }
 
     /// Actually creates table
     bool created = doCreateTable(create, properties);
@@ -1523,6 +1572,23 @@ bool InterpreterCreateQuery::doCreateTable(ASTCreateQuery & create,
     try
     {
         res->checkColumnsValidity(properties.columns);
+        if (auto * view = dynamic_cast<StorageMaterializedView *>(res.get()))
+        {
+            // if (view->async() && getContext()->getSettingsRef().enable_non_partitioned_base_refresh_throw_exception)
+            //     view->validatePartitionBased(getContext());
+
+            if (view->tryGetTargetTable() && !view->hasInnerTable())
+            {
+                StoragePtr target_table = view->tryGetTargetTable();
+                if (!target_table->getInMemoryMetadataPtr()->getColumns().getMaterialized().empty())
+                    throw Exception(
+                        ErrorCodes::ILLEGAL_COLUMN,
+                        "Cannot create materialized view {} to target table {} with materialized columns {}",
+                        view->getStorageID().getNameForLogs(),
+                        target_table->getStorageID().getNameForLogs(),
+                        target_table->getInMemoryMetadataPtr()->getColumns().getMaterialized().toString());
+            }
+        }
     }
     catch (...)
     {

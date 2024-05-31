@@ -235,6 +235,7 @@ void MySQLHandler::run()
         if (!(client_capabilities & CLIENT_PROTOCOL_41))
             throw Exception("Required capability: CLIENT_PROTOCOL_41.", ErrorCodes::MYSQL_CLIENT_INSUFFICIENT_CAPABILITIES);
 
+        handshake_response.username = connection_context->formatUserName(handshake_response.username);
         authenticate(handshake_response.username, handshake_response.auth_plugin_name, handshake_response.auth_response);
 
         connection_context->getClientInfo().initial_user = handshake_response.username;
@@ -262,9 +263,10 @@ void MySQLHandler::run()
                 if (!default_database.empty())
                     connection_context->setCurrentDatabase(default_database);
             }
-            connection_context->setSetting("dialect_type", String("MYSQL"));
-            /// Temporay fix, need to default enable it under mysql dialect
-            connection_context->setSetting("enable_implicit_arg_type_convert", 1);
+            SettingsChanges setting_changes;
+            setting_changes.emplace_back("dialect_type", String("MYSQL"));
+            connection_context->applySettingsChanges(setting_changes);
+
             connection_context->setCurrentQueryId(fmt::format("mysql:{}", connection_id));
 
         }
@@ -533,7 +535,7 @@ void MySQLHandler::comQuery(ReadBuffer & payload, bool binary_protocol)
         format_settings.mysql_wire.sequence_id = &sequence_id;
         format_settings.mysql_wire.binary_protocol = binary_protocol;
 
-        auto set_result_details = [&with_output](const String &, const String &, const String &, const String &)
+        auto set_result_details = [&with_output](const String &, const String &, const String &, const String &, MPPQueryCoordinatorPtr)
         {
             with_output = true;
         };

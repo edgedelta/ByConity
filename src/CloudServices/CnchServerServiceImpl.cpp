@@ -33,6 +33,9 @@
 #include <Statistics/AutoStatisticsManager.h>
 #include <Common/Exception.h>
 #include <DataTypes/ObjectUtils.h>
+#include <Parsers/ASTSerDerHelper.h>
+#include <IO/ReadBufferFromString.h>
+#include <Optimizer/SelectQueryInfoHelper.h>
 #include <Interpreters/DatabaseCatalog.h>
 #include <CloudServices/CnchMergeMutateThread.h>
 #include <CloudServices/CnchRefreshMaterializedViewThread.h>
@@ -582,13 +585,18 @@ void CnchServerServiceImpl::fetchDataParts(
             for (const auto & partition : request->partitions())
                 partition_list.emplace_back(partition);
 
+            std::set<Int64> bucket_numbers;
+            for (const auto & bucket_number : request->bucket_numbers())
+                bucket_numbers.insert(bucket_number);
+
             auto parts = gc->getCnchCatalog()->getServerDataPartsInPartitions(
                 storage,
                 partition_list,
                 TxnTimestamp{request->timestamp()},
                 nullptr,
                 /*visibility=*/Catalog::VisibilityLevel::All,
-                /*execute_filter=*/false);
+                bucket_numbers);
+
             auto & mutable_parts = *response->mutable_parts();
             for (const auto & part : parts)
                 *mutable_parts.Add() = part->part_model();
@@ -631,8 +639,11 @@ void CnchServerServiceImpl::fetchDeleteBitmaps(
             for (const auto & partition : request->partitions())
                 partition_list.emplace_back(partition);
 
+            std::set<Int64> bucket_numbers;
+            for (const auto & bucket_number : request->bucket_numbers())
+                bucket_numbers.insert(bucket_number);
             auto bitmaps = gc->getCnchCatalog()->getDeleteBitmapsInPartitions(
-                storage, partition_list, TxnTimestamp{request->timestamp()}, nullptr, /*execute_filter=*/false);
+                storage, partition_list, TxnTimestamp{request->timestamp()}, nullptr, Catalog::VisibilityLevel::All, bucket_numbers);
             auto & mutable_parts = *response->mutable_delete_bitmaps();
             for (const auto & bitmap : bitmaps)
                 *mutable_parts.Add() = *bitmap->getModel();
@@ -675,10 +686,11 @@ void CnchServerServiceImpl::fetchPartitions(
             Names column_names;
             for (const auto & name : request->column_name_filter())
                 column_names.push_back(name);
-            SelectQueryInfo query_info;
             auto session_context = Context::createCopy(gc);
             session_context->setCurrentDatabase(request->database());
-            auto interpreter = SelectQueryInfo::buildQueryInfoFromQuery(session_context, storage, request->predicate(), query_info);
+            ReadBufferFromString rb(request->predicate());
+            ASTPtr query_ptr = deserializeAST(rb);
+            SelectQueryInfo query_info = buildSelectQueryInfoForQuery(query_ptr, session_context);
 
             session_context->setTemporaryTransaction(TxnTimestamp(request->has_txnid() ? request->txnid() : session_context->getTimestamp()), 0, false);
             auto required_partitions = gc->getCnchCatalog()->getPartitionsByPredicate(session_context, storage, query_info, column_names);
@@ -1208,6 +1220,44 @@ void CnchServerServiceImpl::redirectCommitParts(
     handleRedirectCommitRequest(controller, request, response, done, false);
 }
 
+void CnchServerServiceImpl::redirectClearParts(
+    [[maybe_unused]] google::protobuf::RpcController * controller,
+    const Protos::RedirectClearPartsReq * request,
+    Protos::RedirectClearPartsResp * response,
+    google::protobuf::Closure * done)
+{
+    RPCHelpers::serviceHandler(
+        done, response, [request = request, response = response, done = done, global_context = getContext(), log = log] {
+            brpc::ClosureGuard done_guard(done);
+            try
+            {
+                String table_uuid = UUIDHelpers::UUIDToString(RPCHelpers::createUUID(request->uuid()));
+                StoragePtr storage
+                    = global_context->getCnchCatalog()->tryGetTableByUUID(*global_context, table_uuid, TxnTimestamp::maxTS());
+
+                if (!storage)
+                    throw Exception("Table with uuid " + table_uuid + " not found.", ErrorCodes::UNKNOWN_TABLE);
+
+                auto * cnch = dynamic_cast<MergeTreeMetaBase *>(storage.get());
+                if (!cnch)
+                    throw Exception("Table is not of MergeTree class", ErrorCodes::BAD_ARGUMENTS);
+
+                auto parts = createPartVectorFromModels<MergeTreeDataPartCNCHPtr>(*cnch, request->parts(), nullptr);
+                auto staged_parts = createPartVectorFromModels<MergeTreeDataPartCNCHPtr>(*cnch, request->staged_parts(), nullptr);
+                DeleteBitmapMetaPtrVector delete_bitmaps;
+                delete_bitmaps.reserve(request->delete_bitmaps_size());
+                for (const auto & bitmap_model : request->delete_bitmaps())
+                    delete_bitmaps.emplace_back(createFromModel(*cnch, bitmap_model));
+                global_context->getCnchCatalog()->clearParts(storage, Catalog::CommitItems{parts, delete_bitmaps, staged_parts});
+            }
+            catch (...)
+            {
+                tryLogCurrentException(log, __PRETTY_FUNCTION__);
+                RPCHelpers::handleException(response->mutable_exception());
+            }
+        });
+}
+
 void CnchServerServiceImpl::redirectSetCommitTime(
     [[maybe_unused]] google::protobuf::RpcController* controller,
     [[maybe_unused]] const Protos::RedirectCommitPartsReq * request,
@@ -1724,6 +1774,36 @@ void CnchServerServiceImpl::getLastModificationTimeHints(
             std::vector<Protos::LastModificationTimeHint> hints = gc->getCnchCatalog()->getLastModificationTimeHints(istorage);
 
             *response->mutable_last_modification_time_hints() = {hints.begin(), hints.end()};
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log, __PRETTY_FUNCTION__);
+            RPCHelpers::handleException(response->mutable_exception());
+        }
+    });
+}
+
+void CnchServerServiceImpl::notifyTableCreated(
+    google::protobuf::RpcController *,
+    const Protos::notifyTableCreatedReq * request,
+    Protos::notifyTableCreatedResp * response,
+    google::protobuf::Closure * done)
+{
+    RPCHelpers::serviceHandler(done, response, [request = request, response = response, done = done, gc = getContext(), log = log] {
+        brpc::ClosureGuard done_guard(done);
+        try
+        {
+            if (auto pcm = gc->getPartCacheManager())
+            {
+                UUID uuid = RPCHelpers::createUUID(request->storage_uuid());
+                auto storage = gc->getCnchCatalog()->getTableByUUID(*gc, UUIDHelpers::UUIDToString(uuid), TxnTimestamp::maxTS());
+                if (storage)
+                {
+                    auto host_port = gc->getCnchTopologyMaster()->getTargetServer(
+                        UUIDHelpers::UUIDToString(storage->getStorageID().uuid), storage->getServerVwName(), true);
+                    pcm->mayUpdateTableMeta(*storage, host_port.topology_version, true);
+                }
+            }
         }
         catch (...)
         {

@@ -1139,6 +1139,17 @@ bool ParserCastAsExpression::parseImpl(Pos & pos, ASTPtr & node, Expected & expe
         return true;
     }
 
+    if (ParserKeyword("CONVERT").ignore(pos, expected)
+        && ParserToken(TokenType::OpeningRoundBracket).ignore(pos, expected)
+        && ParserExpression(dt).parse(pos, expr_node, expected)
+        && ParserToken(TokenType::Comma).ignore(pos, expected)
+        && ParserDataType(dt).parse(pos, type_node, expected)
+        && ParserToken(TokenType::ClosingRoundBracket).ignore(pos, expected))
+    {
+        node = createFunctionCast(expr_node, type_node);
+        return true;
+    }
+
     return false;
 }
 
@@ -2900,6 +2911,7 @@ bool ParserTTLElement::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
 {
     ParserKeyword s_to_disk("TO DISK");
     ParserKeyword s_to_volume("TO VOLUME");
+    ParserKeyword s_to_bytecool("TO BYTECOOL");
     ParserKeyword s_delete("DELETE");
     ParserKeyword s_where("WHERE");
     ParserKeyword s_group_by("GROUP BY");
@@ -2936,6 +2948,11 @@ bool ParserTTLElement::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
         mode = TTLMode::MOVE;
         destination_type = DataDestinationType::VOLUME;
     }
+    else if (s_to_bytecool.ignore(pos))
+    {
+        mode = TTLMode::MOVE;
+        destination_type = DataDestinationType::BYTECOOL;
+    }
     else if (s_group_by.ignore(pos))
     {
         mode = TTLMode::GROUP_BY;
@@ -2959,6 +2976,9 @@ bool ParserTTLElement::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
     {
         ASTPtr ast_space_name;
         if (!parser_string_literal.parse(pos, ast_space_name, expected))
+            return false;
+        
+        if(s_where.ignore(pos) && !parser_exp.parse(pos, where_expr, expected))
             return false;
 
         destination_name = ast_space_name->as<ASTLiteral &>().value.get<const String &>();

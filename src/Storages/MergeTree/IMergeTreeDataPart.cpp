@@ -49,6 +49,7 @@
 #include <DataTypes/NestedUtils.h>
 #include <DataTypes/DataTypeMap.h>
 #include <DataTypes/MapHelpers.h>
+#include <Interpreters/CnchSystemLog.h>
 
 namespace CurrentMetrics
 {
@@ -87,7 +88,7 @@ namespace ErrorCodes
 
 static std::unique_ptr<ReadBufferFromFileBase> openForReading(const DiskPtr & disk, const String & path)
 {
-    return disk->readFile(path, {.buffer_size = std::min(size_t(DBMS_DEFAULT_BUFFER_SIZE), disk->getFileSize(path))});
+    return disk->readFile(path, ReadSettings().initializeReadSettings(disk->getFileSize(path)));
 }
 
 void IMergeTreeDataPart::MinMaxIndex::load(const MergeTreeMetaBase & data, const DiskPtr & disk_, const String & part_path)
@@ -821,7 +822,7 @@ void IMergeTreeDataPart::setProjectionPartsNames(const NameSet & projection_part
 void IMergeTreeDataPart::gatherProjections()
 {
     IMergeTreeDataPartPtr part = shared_from_this();
-    auto checksums = getChecksums();
+    ChecksumsPtr checksums_ptr_ = nullptr;
     while (part->isPartial())
     {
         if (part = part->tryGetPreviousPart(); !part)
@@ -829,8 +830,12 @@ void IMergeTreeDataPart::gatherProjections()
 
         for (const auto & [projection_name, projection_part] : part->projection_parts)
         {
+            /// Calling getChecksums() will store checksums smart pointer in part, so we do this lazy.
+            if (checksums_ptr_ == nullptr)
+                checksums_ptr_ = getChecksums();
+
             // if proj_with_name is absent in head part's checksums, it means that this projection is deleted and should not be loaded
-            if (auto it = checksums->files.find(projection_name + ".proj"); it != checksums->files.end())
+            if (auto it = checksums_ptr_->files.find(projection_name + ".proj"); it != checksums_ptr_->files.end())
             {
                 auto ret = projection_parts.emplace(projection_name, projection_part);
                 if (ret.second)
@@ -1658,7 +1663,7 @@ void IMergeTreeDataPart::projectionRemove(const String & parent_to, bool keep_sh
      }
  }
 
-String IMergeTreeDataPart::getRelativePathForPrefix(const String & prefix) const
+String IMergeTreeDataPart::getRelativePathForPrefix(const String & prefix, bool is_detach) const
 {
     String res;
 
@@ -1669,9 +1674,9 @@ String IMergeTreeDataPart::getRelativePathForPrefix(const String & prefix) const
         */
     for (int try_no = 0; try_no < 10; try_no++)
     {
-        res = (prefix.empty() ? "" : prefix + "_") + info.getPartNameWithHintMutation() + (try_no ? "_try" + DB::toString(try_no) : "");
+        res = (is_detach ? "detached/" : "") + (prefix.empty() ? "" : prefix + "_") + info.getPartNameWithHintMutation() + (try_no ? "_try" + DB::toString(try_no) : "");
 
-        if (!volume->getDisk()->exists(fs::path(getFullRelativePath()) / res))
+        if (!volume->getDisk()->exists(fs::path(storage.getRelativeDataPath(location)) / res))
             return res;
 
         LOG_WARNING(storage.log, "Directory {} (to detach to) already exists. Will detach to directory with '_tryN' suffix.", res);
@@ -1702,7 +1707,16 @@ void IMergeTreeDataPart::setDeleteBitmapMeta(DeleteBitmapMetaPtr bitmap_meta, bo
     if (!found_base)
     {
         if (force_set)
+        {
+            if (auto unique_table_log = storage.getContext()->getCloudUniqueTableLog())
+            {
+                auto current_log = UniqueTable::createUniqueTableLog(UniqueTableLogElement::ERROR, storage.getCnchStorageID());
+                current_log.metric = ErrorCodes::LOGICAL_ERROR;
+                current_log.event_msg = "Base delete bitmap of part " + name + " is not found";
+                unique_table_log->add(current_log);
+            }
             throw Exception("Base delete bitmap of part " + name + " is not found", ErrorCodes::LOGICAL_ERROR);
+        }
         else
         {
             LOG_ERROR(storage.log, "Base delete bitmap of part " + name + " is not found");
@@ -1744,10 +1758,10 @@ String IMergeTreeDataPart::getRelativePathForDetachedPart(const String & prefix)
     assert(prefix.empty() || std::find(DetachedPartInfo::DETACH_REASONS.begin(),
                                        DetachedPartInfo::DETACH_REASONS.end(),
                                        prefix) != DetachedPartInfo::DETACH_REASONS.end());
-    return "detached/" + getRelativePathForPrefix(prefix);
+    return getRelativePathForPrefix(prefix, /*is_detach*/true);
 }
 
-String IMergeTreeDataPart::getRelativePathToDiskForDetachedPart(const String & prefix) const
+String IMergeTreeDataPart::getFullRelativePathForDetachedPart(const String & prefix) const
 {
     return fs::path(storage.getRelativeDataPath(location)) / getRelativePathForDetachedPart(prefix);
 }
@@ -1759,7 +1773,7 @@ void IMergeTreeDataPart::renameToDetached(const String & prefix) const
 
 void IMergeTreeDataPart::makeCloneInDetached(const String & prefix, const StorageMetadataPtr & /*metadata_snapshot*/) const
 {
-    String destination_path = getRelativePathToDiskForDetachedPart(prefix);
+    String destination_path = getFullRelativePathForDetachedPart(prefix);
 
     /// Backup is not recursive (max_level is 0), so do not copy inner directories
     localBackup(volume->getDisk(), getFullRelativePath(), destination_path, 0);
@@ -1831,7 +1845,7 @@ LocalDeleteBitmapPtr IMergeTreeDataPart::createNewBaseDeleteBitmap(const UInt64 
     }
 
     auto new_bitmap = std::make_shared<Roaring>(*bitmap);
-    auto base_delete_bitmap = LocalDeleteBitmap::createBase(info, new_bitmap, txn_id);
+    auto base_delete_bitmap = LocalDeleteBitmap::createBase(info, new_bitmap, txn_id, bucket_number);
     LOG_DEBUG(storage.log, "Generate a new base delete bitmap for part {}", name);
     return base_delete_bitmap;
 }
@@ -1956,6 +1970,40 @@ ColumnSize IMergeTreeDataPart::getColumnSize(const String & column_name, const I
         return it->second;
 
     return ColumnSize{};
+}
+
+ColumnSize IMergeTreeDataPart::getMapColumnSize(const String & map_implicit_column_name, const IDataType & type) const
+{
+    auto checksums = getChecksums();
+    ColumnSize size;
+    if (checksums->empty())
+        return size;
+
+    // special handling flattened map type
+    if (type.isByteMap())
+    {
+        const auto & implicit_map_type = typeid_cast<const DataTypeMap &>(type).getValueTypeForImplicitColumn();
+        implicit_map_type->getDefaultSerialization()->enumerateStreams([&](const ISerialization::SubstreamPath & substream_path) {
+            auto filename = ISerialization::getFileNameForStream({map_implicit_column_name, implicit_map_type}, substream_path);
+            const String & implicit_col_name_bin = filename + DATA_FILE_EXTENSION;
+            const String & implicit_col_name_mrk = filename + getMarksFileExtension();
+
+            // we get name, and we direct find in map
+            auto pos1 = checksums->files.find(implicit_col_name_bin);
+            auto pos2 = checksums->files.find(implicit_col_name_mrk);
+            if (pos1 != checksums->files.end())
+            {
+                size.data_compressed += pos1->second.file_size;
+                size.data_uncompressed += pos1->second.uncompressed_size;
+            }
+            if (pos2 != checksums->files.end())
+            {
+                size.marks += pos2->second.file_size;
+            }
+
+        });
+    }
+    return size;
 }
 
 void IMergeTreeDataPart::accumulateColumnSizes(ColumnToSize & column_to_size) const

@@ -20,7 +20,7 @@
  */
 
 #include <iomanip>
-#include "common/types.h"
+#include <common/types.h>
 #include <common/scope_guard.h>
 #include <Poco/Net/NetException.h>
 #include <Poco/Util/LayeredConfiguration.h>
@@ -864,6 +864,11 @@ void TCPHandler::processOrdinaryQuery()
         sendData({});
     }
 
+    auto coordinator = state.io.coordinator;
+    if (coordinator && query_context->getSettings().enable_wait_for_post_processing)
+    {
+        coordinator->waitUntilAllPostProcessingRPCReceived();
+    }
     sendProgress();
 }
 
@@ -941,6 +946,11 @@ void TCPHandler::processOrdinaryQueryWithProcessors()
         sendData({});
     }
 
+    auto coordinator = state.io.coordinator;
+    if (coordinator && query_context->getSettings().enable_wait_for_post_processing)
+    {
+        coordinator->waitUntilAllPostProcessingRPCReceived();
+    }
     sendProgress();
 }
 
@@ -1252,16 +1262,16 @@ void TCPHandler::receiveUnexpectedHello()
 void TCPHandler::sendHello()
 {
     writeVarUInt(Protocol::Server::Hello, *out);
-    writeStringBinary(DBMS_NAME, *out);
-    writeVarUInt(DBMS_VERSION_MAJOR, *out);
-    writeVarUInt(DBMS_VERSION_MINOR, *out);
+    writeStringBinary(VERSION_NAME, *out);
+    writeVarUInt(VERSION_MAJOR, *out);
+    writeVarUInt(VERSION_MINOR, *out);
     writeVarUInt(DBMS_TCP_PROTOCOL_VERSION, *out);
     if (client_tcp_protocol_version >= DBMS_MIN_REVISION_WITH_SERVER_TIMEZONE)
         writeStringBinary(DateLUT::instance().getTimeZone(), *out);
     if (client_tcp_protocol_version >= DBMS_MIN_REVISION_WITH_SERVER_DISPLAY_NAME)
         writeStringBinary(server_display_name, *out);
     if (client_tcp_protocol_version >= DBMS_MIN_REVISION_WITH_VERSION_PATCH)
-        writeVarUInt(DBMS_VERSION_PATCH, *out);
+        writeVarUInt(VERSION_PATCH, *out);
     out->next();
 }
 
@@ -2108,12 +2118,14 @@ void TCPHandler::updateProgress(const Progress & value)
 
 void TCPHandler::sendProgress()
 {
-    writeVarUInt(Protocol::Server::Progress, *out);
     auto increment = state.progress.fetchAndResetPiecewiseAtomically();
-    increment.write(*out, client_tcp_protocol_version);
-    out->next();
+    if (!increment.empty())
+    {
+        writeVarUInt(Protocol::Server::Progress, *out);
+        increment.write(*out, client_tcp_protocol_version);
+        out->next();
+    }
 }
-
 
 void TCPHandler::sendLogs()
 {

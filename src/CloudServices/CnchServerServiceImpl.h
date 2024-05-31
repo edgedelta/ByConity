@@ -275,6 +275,12 @@ public:
         Protos::RedirectCommitPartsResp * response,
         google::protobuf::Closure * done) override;
 
+    void redirectClearParts(
+        google::protobuf::RpcController * controller,
+        const Protos::RedirectClearPartsReq * request,
+        Protos::RedirectClearPartsResp * response,
+        google::protobuf::Closure * done) override;
+
     void redirectSetCommitTime(
         google::protobuf::RpcController * controller,
         const Protos::RedirectCommitPartsReq * request,
@@ -359,6 +365,12 @@ public:
         google::protobuf::RpcController * cntl,
         const Protos::getLastModificationTimeHintsReq * request,
         Protos::getLastModificationTimeHintsResp * response,
+        google::protobuf::Closure * done) override;
+
+    void notifyTableCreated(
+        google::protobuf::RpcController * cntl,
+        const Protos::notifyTableCreatedReq * request,
+        Protos::notifyTableCreatedResp * response,
         google::protobuf::Closure * done) override;
 
 private:

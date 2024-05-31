@@ -17,6 +17,7 @@
 #include <CloudServices/CnchDedupHelper.h>
 #include <CloudServices/CnchPartsHelper.h>
 #include <CloudServices/CnchDataWriter.h>
+#include <Interpreters/CnchSystemLog.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include <Storages/StorageCloudMergeTree.h>
 #include <Transaction/Actions/MergeMutateAction.h>
@@ -70,7 +71,16 @@ CloudUniqueMergeTreeMergeTask::getDeleteBitmapMetas(Catalog::Catalog & catalog, 
             bitmap_it++;
 
         if (bitmap_it == bitmaps.end())
+        {
+            if (auto unique_table_log = getContext()->getCloudUniqueTableLog())
+            {
+                auto current_log = UniqueTable::createUniqueTableLog(UniqueTableLogElement::ERROR, params.storage->getCnchStorageID());
+                current_log.metric = ErrorCodes::LOGICAL_ERROR;
+                current_log.event_msg = "Missing delete bitmap metadata for part " + part->name;
+                unique_table_log->add(current_log);
+            }
             throw Exception("Missing delete bitmap metadata for part " + part->name, ErrorCodes::LOGICAL_ERROR);
+        }
 
         res.push_back(*bitmap_it);
         bitmap_it++;
@@ -228,7 +238,7 @@ void CloudUniqueMergeTreeMergeTask::executeImpl()
         drop_part->covered_parts_size = part->bytes_on_disk;
 
         parts_to_dump.push_back(std::move(drop_part));
-        bitmaps_to_dump.push_back(LocalDeleteBitmap::createTombstone(drop_part_info, txn_id.toUInt64()));
+        bitmaps_to_dump.push_back(LocalDeleteBitmap::createTombstone(drop_part_info, txn_id.toUInt64(), part->bucket_number));
     }
     parts_to_dump.push_back(merged_part);
 
@@ -310,7 +320,7 @@ void CloudUniqueMergeTreeMergeTask::executeImpl()
     updateDeleteBitmap(*catalog, merger, merged_part_bitmap);
 
     /// dump merged part's bitmap
-    auto final_bitmap_to_dump = LocalDeleteBitmap::createBase(merged_part->info, merged_part_bitmap, txn_id.toUInt64());
+    auto final_bitmap_to_dump = LocalDeleteBitmap::createBase(merged_part->info, merged_part_bitmap, txn_id.toUInt64(), merged_part->bucket_number);
     auto new_dumped_data = cnch_writer.dumpCnchParts(/*parts*/ {}, {final_bitmap_to_dump}, /*staged parts*/ {});
     dumped_data.bitmaps.push_back(new_dumped_data.bitmaps.front());
 

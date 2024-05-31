@@ -41,8 +41,7 @@ namespace
         return res;
     }
 
-
-    AccessRights addImplicitAccessRights(const AccessRights & access, const AccessControlManager & manager)
+    AccessRights addImplicitAccessRights(const AccessRights & access, const AccessControlManager & manager, bool has_tenant_id_in_username)
     {
         AccessFlags max_flags;
 
@@ -130,7 +129,7 @@ namespace
         res.modifyFlags(modifier);
 
         /// If "select_from_system_db_requires_grant" is enabled we provide implicit grants only for a few tables in the system database.
-        if (manager.doesSelectFromSystemDatabaseRequireGrant())
+        if (manager.doesSelectFromSystemDatabaseRequireGrant() || has_tenant_id_in_username)
         {
             const char * always_accessible_tables[] = {
                 /// Constant tables
@@ -157,12 +156,18 @@ namespace
                 "databases",
                 "tables",
                 "columns",
+                "cnch_parts",
 
                 /// Specific to the current session
                 "settings",
                 "current_roles",
                 "enabled_roles",
-                "quota_usage"
+                "quota_usage",
+
+                /// For IDE tools to get schema info
+                "cnch_columns",
+                "cnch_parts",
+                "cnch_tables"
             };
 
             for (const auto * table_name : always_accessible_tables)
@@ -218,19 +223,29 @@ ContextAccess::ContextAccess(const AccessControlManager & manager_, const Params
     : manager(&manager_)
     , params(params_)
 {
+}
+
+void ContextAccess::initialize()
+{
+    if (!params.user_id)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "No user in current context, it's a bug");
+
     std::lock_guard lock{mutex};
 
     subscription_for_user_change = manager->subscribeForChanges(
-        *params.user_id, [this](const UUID &, const AccessEntityPtr & entity)
-    {
-        UserPtr changed_user = entity ? typeid_cast<UserPtr>(entity) : nullptr;
-        std::lock_guard lock2{mutex};
-        setUser(changed_user);
-    });
+        *params.user_id,
+        [weak_ptr = weak_from_this()](const UUID &, const AccessEntityPtr & entity)
+        {
+            auto ptr = weak_ptr.lock();
+            if (!ptr)
+                return;
+            UserPtr changed_user = entity ? typeid_cast<UserPtr>(entity) : nullptr;
+            std::lock_guard lock2{ptr->mutex};
+            ptr->setUser(changed_user);
+        });
 
     setUser(manager->read<User>(*params.user_id));
 }
-
 
 void ContextAccess::setUser(const UserPtr & user_) const
 {
@@ -294,7 +309,7 @@ void ContextAccess::setRolesInfo(const std::shared_ptr<const EnabledRolesInfo> &
 void ContextAccess::calculateAccessRights() const
 {
     access = std::make_shared<AccessRights>(mixAccessRightsFromUserAndRoles(*user, *roles_info));
-    access_with_implicit = std::make_shared<AccessRights>(addImplicitAccessRights(*access, *manager));
+    access_with_implicit = std::make_shared<AccessRights>(addImplicitAccessRights(*access, *manager, params.has_tenant_id_in_username));
 
     if (trace_log)
     {

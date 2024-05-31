@@ -150,6 +150,15 @@ IMPLEMENT_SETTING_ENUM(CTEMode, ErrorCodes::BAD_ARGUMENTS,
      {"AUTO", CTEMode::AUTO},
      {"ENFORCED", CTEMode::ENFORCED}})
 
+IMPLEMENT_SETTING_ENUM(ExpandMode, ErrorCodes::BAD_ARGUMENTS,
+    {{"EXPAND", ExpandMode::EXPAND},
+     {"UNION", ExpandMode::UNION},
+     {"CTE", ExpandMode::CTE}})
+
+IMPLEMENT_SETTING_ENUM(SpillMode, ErrorCodes::BAD_ARGUMENTS,
+    {{"manual", SpillMode::MANUAL},
+     {"auto", SpillMode::AUTO}})
+
 IMPLEMENT_SETTING_ENUM(StatisticsAccurateSampleNdvMode, ErrorCodes::BAD_ARGUMENTS,
     {{"NEVER", StatisticsAccurateSampleNdvMode::NEVER},
      {"AUTO", StatisticsAccurateSampleNdvMode::AUTO},
@@ -166,6 +175,20 @@ IMPLEMENT_SETTING_ENUM(BackupVWMode, ErrorCodes::BAD_ARGUMENTS,
     {{"backup", BackupVWMode::BACKUP},
      {"round_robin", BackupVWMode::ROUND_ROBIN},
      {"backup_only", BackupVWMode::BACKUP_ONLY}})
+
+IMPLEMENT_SETTING_ENUM(QueueName, ErrorCodes::BAD_ARGUMENTS,
+    {{"highest", QueueName::Highest},
+     {"high", QueueName::High},
+     {"normal", QueueName::Normal},
+     {"low", QueueName::Low},
+     {"lowest", QueueName::Lowest},
+     {"count", QueueName::Count},
+     {"auto", QueueName::Auto}})
+
+IMPLEMENT_SETTING_ENUM(VWQueueMode, ErrorCodes::BAD_ARGUMENTS,
+    {{"skip", VWQueueMode::Skip},
+     {"match", VWQueueMode::Match},
+     {"force", VWQueueMode::Force}})
 
 IMPLEMENT_SETTING_ENUM(StatisticsCachePolicy, ErrorCodes::BAD_ARGUMENTS,
     {{"default", StatisticsCachePolicy::Default},
@@ -191,18 +214,24 @@ IMPLEMENT_SETTING_ENUM(ShortCircuitFunctionEvaluation, ErrorCodes::BAD_ARGUMENTS
      {"force_enable",    ShortCircuitFunctionEvaluation::FORCE_ENABLE},
      {"disable",         ShortCircuitFunctionEvaluation::DISABLE}})
 
-IMPLEMENT_SETTING_ENUM(DedupKeyMode, ErrorCodes::BAD_ARGUMENTS,
-    {{"replace",      DedupKeyMode::REPLACE},
-     {"throw",        DedupKeyMode::THROW}})
+IMPLEMENT_SETTING_ENUM(
+    DedupKeyMode,
+    ErrorCodes::BAD_ARGUMENTS,
+    {{"replace", DedupKeyMode::REPLACE}, {"append", DedupKeyMode::APPEND}, {"throw", DedupKeyMode::THROW}})
 
-IMPLEMENT_SETTING_ENUM(RefreshViewTaskStatus, ErrorCodes::BAD_ARGUMENTS,
-    {{"START", RefreshViewTaskStatus::START},
-     {"FINISH", RefreshViewTaskStatus::FINISH},
-     {"EXCEPTION", RefreshViewTaskStatus::EXCEPTION}}
-     )
+IMPLEMENT_SETTING_ENUM(
+    RefreshViewTaskStatus,
+    ErrorCodes::BAD_ARGUMENTS,
+    {
+        {"START", RefreshViewTaskStatus::START},
+        {"FINISH", RefreshViewTaskStatus::FINISH},
+        {"EXCEPTION_EXECUTE_TASK", RefreshViewTaskStatus::EXCEPTION_EXECUTE_TASK},
+        {"EXCEPTION_BEFORE_START", RefreshViewTaskStatus::EXCEPTION_BEFORE_START},
+    })
 
 IMPLEMENT_SETTING_ENUM(RefreshViewTaskType, ErrorCodes::BAD_ARGUMENTS,
-    {{"PARTITION_BASED_REFRESH", RefreshViewTaskType::PARTITION_BASED_REFRESH},
+    {{"NONE", RefreshViewTaskType::NONE},
+     {"PARTITION_BASED_REFRESH", RefreshViewTaskType::PARTITION_BASED_REFRESH},
      {"FULL_REFRESH", RefreshViewTaskType::FULL_REFRESH}})
 
 } // namespace DB

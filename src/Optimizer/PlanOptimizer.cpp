@@ -162,6 +162,7 @@ const Rewriters & PlanOptimizer::getFullRewriters()
 
         // rules for remove subquery, the order of subquery rules matters, DO NOT change !!!.
         std::make_shared<IterativeRewriter>(Rules::pushApplyRules(), "PushApply"),
+        std::make_shared<IterativeRewriter>(Rules::unnestingSubqueryRules(), "UnnestingSubquery"),
         std::make_shared<RemoveUnCorrelatedInSubquery>(),
         std::make_shared<RemoveCorrelatedInSubquery>(),
         std::make_shared<RemoveUnCorrelatedExistsSubquery>(),
@@ -175,6 +176,7 @@ const Rewriters & PlanOptimizer::getFullRewriters()
         std::make_shared<IterativeRewriter>(Rules::inlineProjectionRules(), "InlineProjection"),
         std::make_shared<IterativeRewriter>(Rules::pushDownBitmapProjection(), "PushDownBitMapProjection"),
         std::make_shared<ColumnPruning>(),
+        std::make_shared<IterativeRewriter>(Rules::pushIndexProjectionIntoTableScanRules(), "PushIndexProjectionIntoTableScan"),
 
         // rules after subquery removed, DO NOT change !!!.
 
@@ -187,6 +189,8 @@ const Rewriters & PlanOptimizer::getFullRewriters()
         // predicate push down
         std::make_shared<IterativeRewriter>(Rules::simplifyExpressionRules(), "SimplifyExpression"),
         std::make_shared<PredicatePushdown>(true),
+
+        std::make_shared<IterativeRewriter>(Rules::crossJoinToUnion(), "CrossJoinToUnion"),        
 
         // predicate push down may convert outer-join to inner-join, make sure data type is correct.
         std::make_shared<WindowToSortPruning>(),
@@ -216,6 +220,7 @@ const Rewriters & PlanOptimizer::getFullRewriters()
         std::make_shared<IterativeRewriter>(Rules::distinctToAggregateRules(), "DistinctToAggregate"),
         std::make_shared<DistinctToAggregatePruning>(),
         std::make_shared<IterativeRewriter>(Rules::pushAggRules(), "PushAggregateThroughJoin"),
+
 
         std::make_shared<ImplementJoinOrderHints>(),
 
@@ -265,6 +270,9 @@ const Rewriters & PlanOptimizer::getFullRewriters()
         // final UnifyNullableType, make sure type is correct.
         std::make_shared<ColumnPruning>(),
         std::make_shared<UnifyNullableType>(),
+        /// Predicate pushdown (AddRuntimeFilters) may generate redundant filter.
+        std::make_shared<IterativeRewriter>(Rules::normalizeExpressionRules(), "normalizeExpressionRules"),
+        std::make_shared<IterativeRewriter>(Rules::simplifyExpressionRules(), "SimplifyExpression"),
         std::make_shared<IterativeRewriter>(Rules::removeRedundantRules(), "RemoveRedundant"),
         std::make_shared<IterativeRewriter>(Rules::inlineProjectionRules(), "InlineProjection"),
 

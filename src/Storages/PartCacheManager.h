@@ -56,7 +56,8 @@ public:
 
     TableMetaEntryPtr getTableMeta(const UUID & uuid);
 
-    void mayUpdateTableMeta(const IStorage & storage, const PairInt64 & topology_version);
+    /// `on_table_creation` will give the information that there is no need to sync metrics on the new table.
+    void mayUpdateTableMeta(const IStorage & storage, const PairInt64 & topology_version, bool on_table_creation = false);
 
     void updateTableNameInMetaEntry(const String & table_uuid, const String & database_name, const String & table_name);
 
@@ -105,8 +106,28 @@ public:
 
     std::vector<Protos::LastModificationTimeHint>
     getLastModificationTimeHints(const ConstStoragePtr & storage, bool allow_regression = false);
+
+    /**
+     * @brief update the GC time for partitions; mark/unmark deleted
+     *
+     * @param partitions partitions to update
+     * @param ts GC time to update
+     * @return partitions which have been successfully updated
+     */
+    Catalog::PartitionMap updatePartitionGCTime(const StoragePtr table, const Strings & partitions, UInt32 ts);
+    /**
+     * remove deleting partitions entry from table meta entry.
+     *
+     * @param partitions partitions to be removed
+     */
+    void removeDeletedPartitions(const StoragePtr table, const Strings & partitions);
+
+    std::unordered_set<String> getDeletingPartitions(const StoragePtr table);
+
     bool getPartitionList(
-        const IStorage & storage, std::vector<std::shared_ptr<MergeTreePartition>> & partition_list, const PairInt64 & topology_version);
+        const IStorage & table, std::vector<std::shared_ptr<MergeTreePartition>> & partition_list, const PairInt64 & topology_version);
+
+    bool getPartitionInfo(const IStorage & storage, Catalog::PartitionMap & partitions, const PairInt64 & topology_version, const Strings & required_partitions);
 
     bool getPartitionIDs(const IStorage & storage, std::vector<String> & partition_ids, const PairInt64 & topology_version);
 
@@ -156,7 +177,7 @@ public:
 
 
     using LoadPartsFunc = std::function<DataModelPartWrapperVector(const Strings &, const Strings &)>;
-    using LoadDeleteBitmapsFunc = std::function<DeleteBitmapMetaPtrVector(const Strings &, const Strings &)>;
+    using LoadDeleteBitmapsFunc = std::function<DataModelDeleteBitmapPtrVector(const Strings &, const Strings &)>;
 
     ServerDataPartsVector getOrSetServerDataPartsInPartitions(
         const IStorage & table,
@@ -171,8 +192,6 @@ public:
         LoadDeleteBitmapsFunc && load_func,
         const UInt64 & ts,
         const PairInt64 & topology_version);
-
-    void mayUpdateTableMeta(const StoragePtr & table);
 
     bool trySetCachedNHUTForUpdate(const UUID & uuid, const UInt64 & pts);
 
@@ -256,7 +275,8 @@ private:
 
     inline static bool isVisible(const DB::DataModelPartWrapperPtr & part_wrapper_ptr, const UInt64 & ts);
     inline static bool isVisible(const ServerDataPartPtr & data_part, const UInt64 & ts);
-    inline static bool isVisible(const DB::DeleteBitmapMetaPtr & part_wrapper_ptr, const UInt64 & ts);
+    inline static bool isVisible(const DB::DeleteBitmapMetaPtr & bitmap, const UInt64 & ts);
+    inline static bool isVisible(const DB::DataModelDeleteBitmapPtr & bitmap, const UInt64 & ts);
 
     template <
         typename CachePtr,

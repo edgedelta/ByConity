@@ -52,10 +52,10 @@ struct FormatSettings
     bool null_as_default = true;
     bool defaults_for_omitted_fields = true;
     bool decimal_trailing_zeros = false;
-    bool throw_on_date_overflow = false;
-    /// set to true for MYSQL dialect
-    bool check_date_overflow = false;
+    bool check_data_overflow = false;
 
+    bool seekable_read = true;
+    bool avoid_buffering = true;
     enum class DateTimeInputFormat
     {
         Basic,      /// Default format for fast parsing: YYYY-MM-DD hh:mm:ss (ISO-8601 without fractional part and timezone) or NNNNNNNNNN unix timestamp.
@@ -130,7 +130,9 @@ struct FormatSettings
         bool quote_64bit_integers = false;
         bool quote_denormals = true;
         bool escape_forward_slashes = true;
-        bool named_tuples_as_objects = false;
+        bool read_named_tuples_as_objects = false;
+        bool write_named_tuples_as_objects = false;
+        bool defaults_for_missing_elements_in_named_tuple = false;
         bool serialize_as_strings = false;
         bool read_bools_as_numbers = true;
         bool quota_json_string = true;
@@ -146,9 +148,9 @@ struct FormatSettings
         bool output_string_as_string = false;
         bool output_fixed_string_as_fixed_byte_array = true;
         bool preserve_order = false;
-        size_t file_size = 0 ;
         bool case_insensitive_column_matching = false;
         UInt64 max_block_size = 8192;
+        bool filter_push_down = true;
     } parquet;
 
     struct Orc

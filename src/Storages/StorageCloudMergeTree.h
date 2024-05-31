@@ -41,6 +41,7 @@ public:
 
     std::string getName() const override { return "CloudMergeTree"; }
 
+    bool supportsParallelInsert() const override { return !getInMemoryMetadataPtr()->hasUniqueKey(); }
     bool supportsSampling() const override { return true; }
     bool supportsFinal() const override { return true; }
     bool supportsPrewhere() const override { return true; }
@@ -56,7 +57,7 @@ public:
 
     const auto & getCnchDatabase() const { return cnch_database_name; }
     const auto & getCnchTable() const { return cnch_table_name; }
-    StorageID getCnchStorageID() const { return StorageID(cnch_database_name, cnch_table_name, getStorageUUID()); }
+    StorageID getCnchStorageID() const override { return StorageID(cnch_database_name, cnch_table_name, getCnchStorageUUID()); }
 
     Pipe read(
         const Names & column_names,

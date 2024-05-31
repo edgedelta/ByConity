@@ -14,8 +14,12 @@
  */
 
 #include <memory>
+#include <mutex>
 #include <string>
+#include <IO/Progress.h>
 #include <Interpreters/Context_fwd.h>
+#include <Interpreters/DistributedStages/AddressInfo.h>
+#include <Interpreters/DistributedStages/PlanSegmentInstance.h>
 #include <Interpreters/DistributedStages/PlanSegmentManagerRpcService.h>
 #include <Interpreters/DistributedStages/PlanSegmentReport.h>
 #include <Interpreters/DistributedStages/executePlanSegment.h>
@@ -24,9 +28,8 @@
 #include <Protos/plan_segment_manager.pb.h>
 #include <brpc/controller.h>
 #include <butil/iobuf.h>
-#include <mutex>
-#include <common/types.h>
 #include <Common/Exception.h>
+#include <common/types.h>
 
 namespace DB
 {
@@ -68,12 +71,21 @@ void PlanSegmentManagerRpcService::executeQuery(
     brpc::Controller * cntl = static_cast<brpc::Controller *>(controller);
     try
     {
-        LOG_DEBUG(log, "execute plan segment: {}_{}", request->query_id(), request->plan_segment_id());
+        LOG_INFO(
+            log, "execute plan segment: {}_{} parallel index {}", request->query_id(), request->plan_segment_id(), request->parallel_id());
         if (request->brpc_protocol_major_revision() != DBMS_BRPC_PROTOCOL_MAJOR_VERSION)
             throw Exception(
                 "brpc protocol major version different - current is " + std::to_string(request->has_brpc_protocol_major_revision())
                     + "remote is " + std::to_string(DBMS_BRPC_PROTOCOL_MAJOR_VERSION) + ", plan segment is not compatible",
                 ErrorCodes::BRPC_PROTOCOL_VERSION_UNSUPPORT);
+
+        AddressInfo coordinator_address(
+            request->coordinator_host(),
+            request->coordinator_port(),
+            request->user(),
+            request->password(),
+            request->coordinator_exchange_port());
+
         ContextMutablePtr query_context;
         UInt64 txn_id = request->txn_id();
         UInt64 primary_txn_id = request->primary_txn_id();
@@ -90,6 +102,7 @@ void PlanSegmentManagerRpcService::executeQuery(
             query_context = Context::createCopy(context);
             query_context->setTemporaryTransaction(txn_id, primary_txn_id, false);
         }
+        query_context->setCoordinatorAddress(coordinator_address);
 
         /// TODO: Authentication supports inter-server cluster secret, see https://github.com/ClickHouse/ClickHouse/commit/0159c74f217ec764060c480819e3ccc9d5a99a63
         Poco::Net::SocketAddress initial_socket_address(request->coordinator_host(), request->coordinator_port());
@@ -169,17 +182,10 @@ void PlanSegmentManagerRpcService::executeQuery(
         report_metrics_timer->getResourceData().fillProto(*response->mutable_worker_resource_data());
         LOG_DEBUG(log, "adaptive scheduler worker status: {}", response->worker_resource_data().ShortDebugString());
 
-        AddressInfo coordinator_address(
-            request->coordinator_host(),
-            request->coordinator_port(),
-            request->user(),
-            request->password(),
-            request->coordinator_exchange_port());
         ThreadFromGlobalPool async_thread([log = log, query_context = std::move(query_context),
-                                            execution_info = std::move(execution_info),
+                                           execution_info = std::move(execution_info),
                                            plan_segment_buf = std::make_shared<butil::IOBuf>(cntl->request_attachment().movable()),
-                                           segment_id = request->plan_segment_id(),
-                                           coordinator_address = std::move(coordinator_address)]() {
+                                           segment_id = request->plan_segment_id()]() {
             bool before_execute = true;
             try
             {
@@ -208,16 +214,7 @@ void PlanSegmentManagerRpcService::executeQuery(
                     int exception_code = getCurrentExceptionCode();
                     auto exception_message = getCurrentExceptionMessage(false);
 
-                    const auto & host = extractExchangeHostPort(execution_info.execution_address);
-                    RuntimeSegmentsStatus runtime_segment_status;
-                    runtime_segment_status.query_id = query_context->getClientInfo().initial_query_id;
-                    runtime_segment_status.segment_id = segment_id;
-                    runtime_segment_status.is_succeed = false;
-                    runtime_segment_status.is_cancelled = false;
-                    runtime_segment_status.code = exception_code;
-                    runtime_segment_status.message = "Worker host:" + host + ", exception:" + exception_message;
-
-                    reportPlanSegmentStatus(coordinator_address, runtime_segment_status);
+                    reportFailurePlanSegmentStatus(query_context, execution_info.execution_address, exception_code, exception_message);
                 }
             }
         });
@@ -263,6 +260,16 @@ void PlanSegmentManagerRpcService::sendPlanSegmentStatus(
 {
     brpc::ClosureGuard done_guard(done);
     brpc::Controller * cntl = static_cast<brpc::Controller *>(controller);
+
+    LOG_INFO(
+        log,
+        "Received status of query {}, segment {}, parallel index {}, succeed: {}, cancelled: {}, code is {}",
+        request->query_id(),
+        request->segment_id(),
+        request->parallel_index(),
+        request->is_succeed(),
+        request->is_canceled(),
+        request->code());
 
     try
     {
@@ -312,11 +319,26 @@ void PlanSegmentManagerRpcService::sendPlanSegmentStatus(
         }
 
         // this means exception happened during execution.
-        if (!status.is_succeed && !status.is_cancelled)
+        auto coordinator = MPPQueryManager::instance().getCoordinator(request->query_id());
+        if (coordinator && request->metrics().has_progress())
         {
-            auto coodinator = MPPQueryManager::instance().getCoordinator(request->query_id());
-            if (coodinator)
-                coodinator->updateSegmentInstanceStatus(status);
+            Progress progress;
+            progress.fromProto(status.metrics.final_progress);
+            coordinator->onFinalProgress(request->segment_id(), request->parallel_index(), progress);
+        }
+        if (!status.is_succeed)
+        {
+            if (coordinator)
+                coordinator->updateSegmentInstanceStatus(status);
+            else
+            {
+                LOG_INFO(
+                    log,
+                    "cant find coordinator for query_id:{} segment_id:{} parallel_index:{}",
+                    request->query_id(),
+                    request->segment_id(),
+                    request->parallel_index());
+            }
             scheduler->onSegmentFinished(status);
         }
         // todo  scheduler.cancelSchedule
@@ -392,7 +414,9 @@ void PlanSegmentManagerRpcService::reportProcessorProfileMetrics(
     }
     catch (...)
     {
-        controller->SetFailed("Report fail.");
+        auto error_msg = getCurrentExceptionMessage(true);
+        controller->SetFailed(error_msg);
+        LOG_ERROR(log, "reportProcessorProfileMetrics failed: {}", error_msg);
     }
 }
 
@@ -419,7 +443,36 @@ void PlanSegmentManagerRpcService::batchReportProcessorProfileMetrics(
     }
     catch (...)
     {
-        controller->SetFailed("Report fail.");
+        auto error_msg = getCurrentExceptionMessage(true);
+        controller->SetFailed(error_msg);
+        LOG_ERROR(log, "batchReportProcessorProfileMetrics failed: {}", error_msg);
+    }
+}
+
+void PlanSegmentManagerRpcService::sendProgress(
+    ::google::protobuf::RpcController * controller,
+    const ::DB::Protos::SendProgressRequest * request,
+    ::DB::Protos::SendProgressResponse * /*response*/,
+    ::google::protobuf::Closure * done)
+{
+    brpc::ClosureGuard done_guard(done);
+    try
+    {
+        Progress progress;
+        progress.fromProto(request->progress());
+        auto coordinator = MPPQueryManager::instance().getCoordinator(request->query_id());
+        if (coordinator)
+        {
+            coordinator->onProgress(request->segment_id(), request->parallel_id(), progress);
+        }
+        else
+            LOG_INFO(log, "sendProgress cant find coordinator for query_id:{}", request->query_id());
+    }
+    catch (...)
+    {
+        auto error_msg = getCurrentExceptionMessage(true);
+        controller->SetFailed(error_msg);
+        LOG_ERROR(log, "sendProgress failed: {}", error_msg);
     }
 }
 
@@ -458,6 +511,13 @@ void PlanSegmentManagerRpcService::submitPlanSegment(
         if (!res)
             throw Exception("Fail to parse Protos::QueryCommon! ", ErrorCodes::LOGICAL_ERROR);
 
+        LOG_INFO(
+            log,
+            "execute plan segment: {}_{}, parallel index {}",
+            query_common->query_id(),
+            request->plan_segment_id(),
+            request->parallel_id());
+
         /// Create context.
         ContextMutablePtr query_context;
         UInt64 txn_id = query_common->txn_id();
@@ -476,11 +536,10 @@ void PlanSegmentManagerRpcService::submitPlanSegment(
             query_context = Context::createCopy(context);
             query_context->setTemporaryTransaction(txn_id, primary_txn_id, false);
         }
+        query_context->setCoordinatorAddress(query_common->coordinator_address());
 
         /// Authentication
         Poco::Net::SocketAddress current_socket_address(query_common->coordinator_address().host_name(), cntl->remote_side().port);
-        const auto & current_user = request->execution_address().user();
-        query_context->setUser(current_user, request->execution_address().password(), current_socket_address);
 
         PlanSegmentExecutionInfo execution_info;
 
@@ -491,6 +550,8 @@ void PlanSegmentManagerRpcService::submitPlanSegment(
             execution_info.source_task_index = request->source_task_index();
             execution_info.source_task_count = request->source_task_count();
         }
+        if (request->has_retry_id())
+            execution_info.retry_id = request->retry_id();
         query_context->setPlanSegmentInstanceId(PlanSegmentInstanceId{request->plan_segment_id(), request->parallel_id()});
 
         /// Set client info.
@@ -517,9 +578,9 @@ void PlanSegmentManagerRpcService::submitPlanSegment(
         client_info.rpc_port = query_common->coordinator_address().exchange_port();
 
         /// Prepare settings.
+        butil::IOBuf settings_io_buf;
         if (request->query_settings_buf_size() > 0)
         {
-            butil::IOBuf settings_io_buf;
             auto query_settings_buf_size = attachment.cutn(&settings_io_buf, request->query_settings_buf_size());
             if (query_settings_buf_size != request->query_settings_buf_size())
             {
@@ -528,31 +589,7 @@ void PlanSegmentManagerRpcService::submitPlanSegment(
                         + "expected: " + std::to_string(request->query_settings_buf_size()),
                     ErrorCodes::LOGICAL_ERROR);
             }
-            ReadBufferFromBrpcBuf settings_read_buf(settings_io_buf);
-
-            /// Sets an extra row policy based on `client_info.initial_user`.
-            /// Not saft since KVAccessStorage will call rpc inside lock
-            // query_context->setInitialRowPolicy();
-
-            /// apply settings changed
-            const_cast<Settings &>(query_context->getSettingsRef()).read(settings_read_buf, SettingsWriteFormat::BINARY);
         }
-        /// Disable function name normalization when it's a secondary query, because queries are either
-        /// already normalized on initiator node, or not normalized and should remain unnormalized for
-        /// compatibility.
-        query_context->setSetting("normalize_function_names", Field(0));
-
-        if (query_context->getServerType() == ServerType::cnch_worker)
-            query_context->grantAllAccess();
-
-        /// Set quota
-        if (query_common->has_quota())
-            query_context->setQuotaKey(query_common->quota());
-
-        if (!query_context->hasQueryContext())
-            query_context->makeQueryContext();
-
-        query_context->setQueryExpirationTimeStamp();
 
         report_metrics_timer->getResourceData().fillProto(*response->mutable_worker_resource_data());
         LOG_TRACE(log, "adaptive scheduler worker status: {}", response->worker_resource_data().ShortDebugString());
@@ -570,11 +607,42 @@ void PlanSegmentManagerRpcService::submitPlanSegment(
                                            execution_info = std::move(execution_info),
                                            query_common = std::move(query_common),
                                            segment_id = request->plan_segment_id(),
-                                           plan_segment_buf = std::make_shared<butil::IOBuf>(plan_segment_buf.movable()) ]() {
+                                           plan_segment_buf = std::make_shared<butil::IOBuf>(plan_segment_buf.movable()),
+                                           settings_io_buf = std::make_shared<butil::IOBuf>(settings_io_buf.movable())]() {
             bool before_execute = true;
-            auto coordinator_address = query_common->coordinator_address();
             try
             {
+                /// Authentication
+                const auto & current_user = execution_info.execution_address.getUser();
+                query_context->setUser(
+                    current_user, execution_info.execution_address.getPassword(), query_context->getClientInfo().current_address);
+
+                if (!settings_io_buf->empty())
+                {
+                    ReadBufferFromBrpcBuf settings_read_buf(*settings_io_buf);
+                    /// Sets an extra row policy based on `client_info.initial_user`
+                    query_context->setInitialRowPolicy();
+                    /// apply settings changed
+                    const_cast<Settings &>(query_context->getSettingsRef()).read(settings_read_buf, SettingsWriteFormat::BINARY);
+                }
+
+                /// Disable function name normalization when it's a secondary query, because queries are either
+                /// already normalized on initiator node, or not normalized and should remain unnormalized for
+                /// compatibility.
+                query_context->setSetting("normalize_function_names", Field(0));
+
+                if (query_context->getServerType() == ServerType::cnch_worker)
+                    query_context->grantAllAccess();
+
+                /// Set quota
+                if (query_common->has_quota())
+                    query_context->setQuotaKey(query_common->quota());
+
+                if (!query_context->hasQueryContext())
+                    query_context->makeQueryContext();
+
+                query_context->setQueryExpirationTimeStamp();
+
                 /// Plan segment Deserialization can't run in bthread since checkStackSize method is not compatible with all user-space lightweight threads that manually allocated stacks.
                 butil::IOBufAsZeroCopyInputStream plansegment_buf_wrapper(*plan_segment_buf);
                 Protos::PlanSegment plan_segment_proto;
@@ -602,16 +670,7 @@ void PlanSegmentManagerRpcService::submitPlanSegment(
                     int exception_code = getCurrentExceptionCode();
                     auto exception_message = getCurrentExceptionMessage(false);
 
-                    const auto & host = extractExchangeHostPort(execution_info.execution_address);
-                    RuntimeSegmentsStatus runtime_segment_status;
-                    runtime_segment_status.query_id = query_context->getClientInfo().initial_query_id;
-                    runtime_segment_status.segment_id = segment_id;
-                    runtime_segment_status.is_succeed = false;
-                    runtime_segment_status.is_cancelled = false;
-                    runtime_segment_status.code = exception_code;
-                    runtime_segment_status.message = "Worker host:" + host + ", exception:" + exception_message;
-
-                    reportPlanSegmentStatus(coordinator_address, runtime_segment_status);
+                    reportFailurePlanSegmentStatus(query_context, execution_info.execution_address, exception_code, exception_message);
                 }
             }
         });

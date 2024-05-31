@@ -118,6 +118,7 @@
 #include <sstream>
 
 #include <Optimizer/PredicateUtils.h>
+#include <Storages/StorageCloudMergeTree.h>
 
 namespace DB
 {
@@ -495,6 +496,21 @@ InterpreterSelectQuery::InterpreterSelectQuery(
                 SelectQueryInfo current_info;
                 current_info.query = query_ptr;
                 current_info.syntax_analyzer_result = syntax_analyzer_result;
+
+                if (const auto * merge_tree_data = dynamic_cast<const StorageCloudMergeTree *>(storage.get()))
+                {
+                    for (const auto & column_name : current_info.syntax_analyzer_result->requiredSourceColumns())
+                    {
+                        UInt64 size = merge_tree_data->getColumnCompressedSize(column_name);
+                        // Now get implicit column size only for prewhere pushdown
+                        if (size == 0 && context->getSettingsRef().enable_implicit_column_prewhere_push && isMapImplicitKey(column_name))
+                        {
+                            size = merge_tree_data->calculateMapColumnSizesImpl(column_name).data_compressed;
+                        }
+                        column_compressed_sizes[column_name] = size;
+                    }
+
+                }
                 if (storage_support_late_materialize)
                 {
 #ifndef NDEBUG
@@ -2450,6 +2466,7 @@ static Aggregator::Params getAggregatorParams(
         group_by_two_level_threshold,
         group_by_two_level_threshold_bytes,
         settings.max_bytes_before_external_group_by,
+        settings.spill_mode == SpillMode::AUTO,
         settings.spill_buffer_bytes_before_external_group_by,
         settings.empty_result_for_aggregation_by_empty_set || (keys.empty() && query_analyzer.hasConstAggregationKeys()),
         context.getTemporaryVolume(),
@@ -2738,7 +2755,8 @@ void InterpreterSelectQuery::executeWindow(QueryPlan & query_plan)
                 settings.remerge_sort_lowered_memory_bytes_ratio,
                 settings.max_bytes_before_external_sort,
                 context->getTemporaryVolume(),
-                settings.min_free_disk_space_for_temporary_data);
+                settings.min_free_disk_space_for_temporary_data,
+                settings.spill_mode == SpillMode::AUTO);
             merge_sorting_step->setStepDescription("Merge sorted blocks for window '" + w.window_name + "'");
             query_plan.addStep(std::move(merge_sorting_step));
 
@@ -2809,7 +2827,8 @@ void InterpreterSelectQuery::executeOrder(QueryPlan & query_plan, InputOrderInfo
         settings.remerge_sort_lowered_memory_bytes_ratio,
         settings.max_bytes_before_external_sort,
         context->getTemporaryVolume(),
-        settings.min_free_disk_space_for_temporary_data);
+        settings.min_free_disk_space_for_temporary_data,
+        settings.spill_mode == SpillMode::AUTO);
 
     merge_sorting_step->setStepDescription("Merge sorted blocks for ORDER BY");
     query_plan.addStep(std::move(merge_sorting_step));

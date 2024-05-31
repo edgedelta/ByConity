@@ -229,8 +229,7 @@ void AttachContext::writeMetaFilesNameRecord(const DB::DiskPtr & disk, const DB:
     res.rename_map[meta_file_name] = "";
 }
 
-void AttachContext::writeRenameMapToKV(Catalog::Catalog& catalog, const String& uuid,
-    const TxnTimestamp& txn_id)
+void AttachContext::writeRenameMapToKV(Catalog::Catalog & catalog, const StorageID & storage_id, const TxnTimestamp & txn_id)
 {
     UndoResources undo_buffers;
     for (const auto & [disk_name, resource] : resources)
@@ -242,7 +241,7 @@ void AttachContext::writeRenameMapToKV(Catalog::Catalog& catalog, const String& 
             undo_buffers.back().setDiskName(disk_name);
         }
     }
-    catalog.writeUndoBuffer(uuid, txn_id, undo_buffers);
+    catalog.writeUndoBuffer(storage_id, txn_id, undo_buffers);
 }
 
 void AttachContext::commit()
@@ -522,6 +521,38 @@ std::pair<AttachFilter, CnchAttachProcessor::PartsFromSources> CnchAttachProcess
         }
     }
 
+    if (command.specify_bucket)
+    {
+        Int64 bucket_number = static_cast<Int64>(command.bucket_number);
+        UInt64 expected_table_definition_hash = query_ctx->getSettingsRef().expected_table_definition_hash;
+        for (auto & parts_from_source : chained_parts_from_sources)
+        {
+            std::erase_if(parts_from_source, [&](const MutableMergeTreeDataPartCNCHPtr & part) {
+                if (expected_table_definition_hash > 0 && part->table_definition_hash != expected_table_definition_hash)
+                {
+                    LOG_DEBUG(
+                        logger,
+                        "Table definition hash {} of part {} is mismatch with expected_table_definition_hash {}, ignore it.",
+                        part->table_definition_hash,
+                        part->name,
+                        expected_table_definition_hash);
+                    return true;
+                }
+                else if (part->bucket_number != bucket_number)
+                {
+                    LOG_DEBUG(
+                        logger,
+                        "Bucket number {} of part {} is mismatch with acquired bucket number {}, ignore it.",
+                        part->bucket_number,
+                        part->name,
+                        bucket_number);
+                    return true;
+                }
+                return false;
+            });
+        }
+    }
+
     injectFailure(AttachFailurePoint::CHECK_FILTER_RESULT);
 
     filter.checkFilterResult(chained_parts_from_sources, query_ctx->getSettingsRef().cnch_part_attach_limit);
@@ -616,7 +647,7 @@ CnchAttachProcessor::collectPartsFromPath(const String & path, const AttachFilte
         }
         case DiskType::Type::ByteS3:
         {
-            // This is to handle parts generated from part writer. In this way, unique table will not generate bitmap. See more detail in doc: https://xxxxx
+            // This is to handle parts generated from part writer. In this way, unique table will not generate bitmap. See more detail in doc: Unique Table Batch Loading Doc
             // Read info from task meta file
             return collectPartsFromS3TaskMeta(target_tbl, path, filter, attach_ctx);
         }
@@ -792,7 +823,7 @@ CnchAttachProcessor::PartsFromSources CnchAttachProcessor::collectPartsFromS3Tas
         UndoResource attaching_mark_res(txn->getTransactionID(), UndoResourceType::S3AttachMeta, task_id_prefix);
         attaching_mark_res.setDiskName(disk_s3->getName());
         query_ctx->getCnchCatalog()->writeUndoBuffer(
-            UUIDHelpers::UUIDToString(target_tbl.getStorageUUID()), txn->getTransactionID(), {attaching_mark_res});
+            target_tbl.getCnchStorageID(), txn->getTransactionID(), {attaching_mark_res});
     }
 
     S3PartsAttachMeta task_meta(disk_s3->getS3Client(), disk_s3->getS3Bucket(), disk_s3->getPath(), task_id_prefix);
@@ -1310,10 +1341,10 @@ CnchAttachProcessor::PartsWithHistory  CnchAttachProcessor::prepareParts(
             }
             attach_ctx.writeRenameMapToKV(
                 *(query_ctx->getCnchCatalog()),
-                UUIDHelpers::UUIDToString(target_tbl.getStorageUUID()),
+                target_tbl.getCnchStorageID(),
                 query_ctx->getCurrentTransaction()->getTransactionID());
 
-            UInt64 table_def_hash = target_tbl.getTableHashForClusterBy();
+            auto table_def_hash = target_tbl.getTableHashForClusterBy().getDeterminHash();
             bool is_user_defined_cluster_by_expression = target_tbl.getInMemoryMetadataPtr()->getIsUserDefinedExpressionFromClusterByKey();
             size_t offset = 0;
             auto & worker_pool = attach_ctx.getWorkerPool(total_parts_count);
@@ -1342,7 +1373,8 @@ CnchAttachProcessor::PartsWithHistory  CnchAttachProcessor::prepareParts(
                                     // Move delete files
                                     String dir_rel_path = std::filesystem::path(tbl_rel_path)
                                         / DeleteBitmapMeta::deleteBitmapDirRelativePath(part_info.partition_id);
-                                    disk->createDirectories(dir_rel_path);
+                                    if (!disk->exists(dir_rel_path))
+                                        disk->createDirectories(dir_rel_path);
                                     String from_path = std::filesystem::path(tbl_rel_path) / bitmap_rel_path / (part->name + ".bitmap");
                                     String to_path = std::filesystem::path(tbl_rel_path)
                                         / DeleteBitmapMeta::deleteBitmapFileRelativePath(*attach_meta);
@@ -1389,7 +1421,7 @@ CnchAttachProcessor::PartsWithHistory  CnchAttachProcessor::prepareParts(
             TxnTimestamp txn_id = query_ctx->getCurrentTransaction()->getTransactionID();
 
             size_t offset = 0;
-            UInt64 table_def_hash = target_tbl.getTableHashForClusterBy();
+            UInt64 table_def_hash = target_tbl.getTableHashForClusterBy().getDeterminHash();
             bool is_user_defined_cluster_by_expression = target_tbl.getInMemoryMetadataPtr()->getIsUserDefinedExpressionFromClusterByKey();
             String from_storage_uuid = from_storage == nullptr ? "" : UUIDHelpers::UUIDToString(from_storage->getStorageUUID());
 
@@ -1450,7 +1482,7 @@ CnchAttachProcessor::PartsWithHistory  CnchAttachProcessor::prepareParts(
                             /// For convenience, we generate a new bitmap file here.
                             DeleteBitmapPtr bitmap = std::make_shared<Roaring>();
                             deserializeDeleteBitmapInfo(part->storage, attach_meta, bitmap);
-                            auto new_delete_bitmap = LocalDeleteBitmap::createBase(part_info, bitmap, txn_id);
+                            auto new_delete_bitmap = LocalDeleteBitmap::createBase(part_info, bitmap, txn_id, part->bucket_number);
                             auto & new_bitmap_model = new_delete_bitmap->getModel();
                             UndoResource ub(
                                 txn_id,
@@ -1471,7 +1503,7 @@ CnchAttachProcessor::PartsWithHistory  CnchAttachProcessor::prepareParts(
             }
 
             /// Write undo buffer first
-            query_ctx->getCnchCatalog()->writeUndoBuffer(UUIDHelpers::UUIDToString(target_tbl.getStorageUUID()), txn_id, undo_resources);
+            query_ctx->getCnchCatalog()->writeUndoBuffer(target_tbl.getCnchStorageID(), txn_id, undo_resources);
 
             /// Dump new bitmap
             for (const auto & [part_name, new_bitmap] : new_bitmaps)
@@ -1510,11 +1542,11 @@ void CnchAttachProcessor::genPartsDeleteMark(PartsWithHistory & parts_to_write)
             auto table_def_hash = target_tbl.getTableHashForClusterBy();
             for (const auto& part : parts_to_drop)
             {
-                if (part->part_model().bucket_number() < 0 || table_def_hash != part->part_model().table_definition_hash())
+                if (part->part_model().bucket_number() < 0 || !table_def_hash.match(part->part_model().table_definition_hash()))
                 {
                     LOG_ERROR(logger, fmt::format("Part's table_definition_hash [{}] is "
                         "different from target's table_definition_hash [{}]",
-                        part->part_model().table_definition_hash(), table_def_hash));
+                        part->part_model().table_definition_hash(), table_def_hash.toString()));
                     throw Exception("Source parts are not bucket parts or have different CLUSTER BY definition from the target table. ",
                         ErrorCodes::BUCKET_TABLE_ENGINE_MISMATCH);
                 }

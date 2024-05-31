@@ -411,6 +411,18 @@ bool PredicateUtils::containsAll(const Strings & partition_symbols, const std::s
     return contains;
 }
 
+bool PredicateUtils::containsAny(const Strings & partition_symbols, const std::set<String> & unique_symbols)
+{
+    for (const auto & unique : unique_symbols)
+    {
+        if (std::find(partition_symbols.begin(), partition_symbols.end(), unique) != partition_symbols.end())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool PredicateUtils::isInliningCandidate(ConstASTPtr & predicate, ProjectionNode & node)
 {
     // candidate symbols for inlining are
@@ -697,6 +709,12 @@ PredicateUtils::extractEqualPredicates(const std::vector<ConstASTPtr> & predicat
         }
     }
     return {equal_predicates, other_predicates};
+}
+
+void PredicateUtils::subtract(ASTs & left, const ASTs & right)
+{
+    EqualityASTSet set{right.begin(), right.end()};
+    left.erase(std::remove_if(left.begin(), left.end(), [&](const auto & ast) -> bool { return set.count(ast); }), left.end());
 }
 
 template ASTPtr PredicateUtils::combineConjuncts<true, ASTPtr>(const std::vector<ASTPtr> & predicates);

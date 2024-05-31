@@ -144,6 +144,7 @@ public:
     MM(PartialSorting, partial_sorting) \
     MM(PartitionTopN, partition_top_n) \
     MM(Projection, projection) \
+    MM(Expand, expand) \
     MM(ReadNothing, read_nothing) \
     MM(ReadStorageRowCount, read_storage_row_count) \
     MM(RemoteExchangeSource, remote_exchange_source) \
@@ -163,6 +164,9 @@ public:
     MM(Offset, offset) \
     MM(FinishSorting, finish_sorting) \
     MM(TotalsHaving, totals_having) \
+    MM(OutfileWrite, outfile_write) \
+    MM(OutfileFinish, outfile_finish) \
+    MM(LocalExchange, local_exchange) \
     MM(MultiJoin, multi_join)
 
 // macro helpers to convert MM(x, y) to M(x)
@@ -226,7 +230,7 @@ public:
     const DataStreams & getInputStreams() const { return input_streams; }
     virtual void setInputStreams(const DataStreams & input_streams_) = 0;
 
-    void addHints(SqlHints & sql_hints, ContextMutablePtr & context);
+    void addHints(SqlHints & sql_hints, ContextMutablePtr & context, bool check_type = false);
 
     const PlanHints & getHints() const
     {

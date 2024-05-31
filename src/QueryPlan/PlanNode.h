@@ -43,11 +43,13 @@
 #include <QueryPlan/JoinStep.h>
 #include <QueryPlan/LimitByStep.h>
 #include <QueryPlan/LimitStep.h>
+#include <QueryPlan/LocalExchangeStep.h>
 #include <QueryPlan/MarkDistinctStep.h>
 #include <QueryPlan/MergeSortingStep.h>
 #include <QueryPlan/MergingAggregatedStep.h>
 #include <QueryPlan/MergingSortedStep.h>
 #include <QueryPlan/MultiJoinStep.h>
+#include <QueryPlan/ExpandStep.h>
 #include <QueryPlan/OffsetStep.h>
 #include <QueryPlan/PartialSortingStep.h>
 #include <QueryPlan/PartitionTopNStep.h>
@@ -65,6 +67,8 @@
 #include <QueryPlan/TableFinishStep.h>
 #include <QueryPlan/TableScanStep.h>
 #include <QueryPlan/TableWriteStep.h>
+#include <QueryPlan/OutfileWriteStep.h>
+#include <QueryPlan/OutfileFinishStep.h>
 #include <QueryPlan/TopNFilteringStep.h>
 #include <QueryPlan/TotalsHavingStep.h>
 #include <QueryPlan/UnionStep.h>

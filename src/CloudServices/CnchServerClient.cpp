@@ -157,7 +157,7 @@ std::pair<TxnTimestamp, TxnTimestamp> CnchServerClient::createTransactionForKafk
     return {response.txn_id(), response.start_time()};
 }
 
-ServerDataPartsVector CnchServerClient::fetchDataParts(const String & remote_host, const ConstStoragePtr & table, const Strings & partition_list, const TxnTimestamp & ts)
+ServerDataPartsVector CnchServerClient::fetchDataParts(const String & remote_host, const ConstStoragePtr & table, const Strings & partition_list, const TxnTimestamp & ts, const std::set<Int64> & bucket_numbers)
 {
     brpc::Controller cntl;
     if (const auto * storage = dynamic_cast<const MergeTreeMetaBase *>(table.get()))
@@ -176,6 +176,9 @@ ServerDataPartsVector CnchServerClient::fetchDataParts(const String & remote_hos
     for (const auto & partition_id : partition_list)
         request.add_partitions(partition_id);
 
+    for (auto & bucket_number : bucket_numbers)
+        request.add_bucket_numbers(bucket_number);
+
     stub->fetchDataParts(&cntl, &request, &response, nullptr);
 
     assertController(cntl);
@@ -186,7 +189,11 @@ ServerDataPartsVector CnchServerClient::fetchDataParts(const String & remote_hos
 }
 
 DeleteBitmapMetaPtrVector CnchServerClient::fetchDeleteBitmaps(
-    const String & remote_host, const ConstStoragePtr & table, const Strings & partition_list, const TxnTimestamp & ts)
+    const String & remote_host,
+    const ConstStoragePtr & table,
+    const Strings & partition_list,
+    const TxnTimestamp & ts,
+    const std::set<Int64> & bucket_numbers)
 {
     brpc::Controller cntl;
     if (const auto * storage = dynamic_cast<const MergeTreeMetaBase *>(table.get()))
@@ -201,6 +208,9 @@ DeleteBitmapMetaPtrVector CnchServerClient::fetchDeleteBitmaps(
     request.set_table(table->getTableName());
     request.set_table_commit_time(table->commit_time);
     request.set_timestamp(ts.toUInt64());
+
+    for (const auto & bucket_number : bucket_numbers)
+        request.add_bucket_numbers(bucket_number);
 
     for (const auto & partition_id : partition_list)
         request.add_partitions(partition_id);
@@ -260,10 +270,8 @@ PrunedPartitions CnchServerClient::fetchPartitions(
     return PrunedPartitions{fetched_partitions, total_size};
 }
 
-void buildRedirectCommitRequestBase(
-    const StoragePtr & table,
-    const Catalog::CommitItems & commit_data,
-    Protos::RedirectCommitPartsReq & request)
+template <class Request>
+void buildRedirectRequest(const StoragePtr & table, const Catalog::CommitItems & commit_data, Request & request)
 {
     request.set_database(table->getDatabaseName());
     request.set_table(table->getTableName());
@@ -297,13 +305,26 @@ void CnchServerClient::redirectCommitParts(
     Protos::RedirectCommitPartsReq request;
     Protos::RedirectCommitPartsResp response;
 
-    buildRedirectCommitRequestBase(table, commit_data, request);
+    buildRedirectRequest(table, commit_data, request);
 
     request.set_txn_id(txnID.toUInt64());
     request.set_from_merge_task(is_merged_parts);
     request.set_preallocate_mode(preallocate_mode);
 
     stub->redirectCommitParts(&cntl, &request, &response, nullptr);
+
+    assertController(cntl);
+    RPCHelpers::checkResponse(response);
+}
+
+void CnchServerClient::redirectClearParts(const StoragePtr & table, const Catalog::CommitItems & commit_data)
+{
+    brpc::Controller cntl;
+    Protos::RedirectClearPartsReq request;
+    Protos::RedirectClearPartsResp response;
+    buildRedirectRequest(table, commit_data, request);
+
+    stub->redirectClearParts(&cntl, &request, &response, nullptr);
 
     assertController(cntl);
     RPCHelpers::checkResponse(response);
@@ -319,7 +340,7 @@ void CnchServerClient::redirectSetCommitTime(
     Protos::RedirectCommitPartsReq request;
     Protos::RedirectCommitPartsResp response;
 
-    buildRedirectCommitRequestBase(table, commit_data, request);
+    buildRedirectRequest(table, commit_data, request);
 
     request.set_txn_id(txn_id);
     request.set_commit_ts(commitTs.toUInt64());
@@ -1142,6 +1163,22 @@ std::vector<Protos::LastModificationTimeHint> CnchServerClient::getLastModificat
     }
 
     return ret;
+}
+
+void CnchServerClient::notifyTableCreated(const UUID & uuid, const int64_t cnch_notify_table_created_rpc_timeout_ms)
+{
+    brpc::Controller cntl;
+    cntl.set_timeout_ms(cnch_notify_table_created_rpc_timeout_ms);
+
+    Protos::notifyTableCreatedReq req;
+    Protos::notifyTableCreatedResp resp;
+
+    RPCHelpers::fillUUID(uuid, *req.mutable_storage_uuid());
+
+    stub->notifyTableCreated(&cntl, &req, &resp, nullptr);
+
+    assertController(cntl);
+    RPCHelpers::checkResponse(resp);
 }
 
 

@@ -1,7 +1,7 @@
 #pragma once
+#include <Parsers/IAST_fwd.h>
 #include <QueryPlan/IQueryPlanStep.h>
 #include <QueryPlan/ITransformingStep.h>
-#include "Parsers/IAST_fwd.h"
 
 namespace DB
 {
@@ -55,7 +55,6 @@ private:
         Block & header,
         size_t max_threads,
         bool no_destination,
-        bool no_squash,
         ASTPtr query);
 
     TargetPtr target;
