@@ -2434,7 +2434,7 @@ void Context::killCurrentQuery()
 {
     if (process_list_elem)
     {
-        process_list_elem->cancelQuery(true);
+        process_list_elem->cancelQuery(true, false);
     }
 };
 
