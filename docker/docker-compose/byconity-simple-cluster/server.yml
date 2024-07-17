@@ -180,6 +180,11 @@ cnch_kafka_log:
   table: cnch_kafka_log
   flush_max_row_count: 10000
   flush_interval_milliseconds: 7500
+cnch_unique_table_log:
+  database: cnch_system
+  table: cnch_unique_table_log
+  flush_max_row_count: 10000
+  flush_interval_milliseconds: 7500
 query_log:
   database: system
   table: query_log
@@ -203,5 +208,4 @@ consistent_hash_ring:
 cnch_config: "/config/cnch-config.yml"
 hdfs_addr: hdfs://hdfs-namenode:9000
 custom_settings_prefixes: SQL_
-restrict_tenanted_users_to_system_tables: false
-restrict_tenanted_users_to_whitelist_settings: false
+cnch_config: "/config/cnch-config.yml"

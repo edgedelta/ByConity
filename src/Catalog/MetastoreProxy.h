@@ -162,7 +162,7 @@ using SerializedObjectSchema = String;
 
 static std::shared_ptr<MetastoreFDBImpl> getFDBInstance(const String & cluster_config_path)
 {
-    /// Notice: A single process can only have fdb instance
+    /// Notice: A single process can only have one fdb instance
     static std::shared_ptr<MetastoreFDBImpl> metastore_fdb(new MetastoreFDBImpl(cluster_config_path));
     return metastore_fdb;
 }
@@ -172,7 +172,7 @@ inline std::shared_ptr<IMetaStore> getMetastorePtr(const MetastoreConfig & confi
     if (config.type == MetaStoreType::FDB)
         return getFDBInstance(config.fdb_conf.cluster_conf_path);
 
-    throw Exception("Catalog must be correctly configured. Only support foundationdb and bytekv now.", ErrorCodes::METASTORE_EXCEPTION);
+    throw Exception("Catalog must be correctly configured. Only foundationdb and bytekv is supported for now.", ErrorCodes::METASTORE_EXCEPTION);
 }
 
 class MetastoreProxy
