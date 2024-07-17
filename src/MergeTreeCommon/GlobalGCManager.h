@@ -26,9 +26,9 @@ namespace DB
 
 namespace GlobalGCHelpers
 {
-constexpr size_t DEFAULT_THREADPOOL_MAX_SIZE = 3;
-constexpr size_t DEFAULT_THREADPOOL_MAX_FREE_THREAD = 1;
-constexpr size_t DEFAULT_THREADPOOL_MAX_QUEUE_SIZE = 60;
+constexpr size_t DEFAULT_THREADPOOL_MAX_SIZE = 10;
+constexpr size_t DEFAULT_THREADPOOL_MAX_FREE_THREAD = 2;
+constexpr size_t DEFAULT_THREADPOOL_MAX_QUEUE_SIZE = 1500;
 
 /**
  * @return if the table can be cleaned, returns the latest version of metadata.

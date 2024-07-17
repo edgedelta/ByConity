@@ -152,6 +152,7 @@ public:
         bool clear_host_port = false;
     };
     std::optional<BackgroundJob::SyncAction> getSyncAction(const ServerInfo &) const;
+    std::string getSyncActionStr(const BackgroundJob::SyncAction &) const;
 
     BGJobInfo getBGJobInfo() const
     {

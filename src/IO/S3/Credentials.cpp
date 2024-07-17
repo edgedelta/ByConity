@@ -426,7 +426,7 @@ void AwsAuthSTSAssumeRoleWebIdentityCredentialsProvider::Reload()
     }
     else
     {
-        LOG_INFO(logger, "Can't open token file: {}", token_file);
+        LOG_ERROR(logger, "Can't open token file: {}", token_file);
         return;
     }
     Aws::Internal::STSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{session_name, role_arn, token};

@@ -155,8 +155,7 @@ void CnchServerResource::cleanResourceInWorker()
         }
         catch (...)
         {
-            tryLogCurrentException(
-                log, "Error occurs when remove WorkerResource{" + txn_id.toString() + "} in worker " + worker_client->getRPCAddress());
+            tryLogCurrentException(log, "Error occurs when remove WorkerResource{ " + txn_id.toString() + " } in worker: " + worker_client->getRPCAddress());
         }
     }
 }

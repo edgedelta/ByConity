@@ -34,4 +34,5 @@ UInt64 setInActive(const UInt64 & status, const bool is_active);
 bool isInActive(const UInt64 & status);
 
 bool isVisible(const UInt64 status);
+std::string getStatusString(const UInt64 status);
 }

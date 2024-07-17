@@ -255,7 +255,13 @@ void CnchWorkerServiceImpl::submitManipulationTask(
         const auto & settings = getContext()->getSettingsRef();
         UInt64 max_running_task = settings.max_threads * getContext()->getRootConfig().max_ratio_of_cnch_tasks_to_threads;
         if (getContext()->getManipulationList().size() > max_running_task)
-            throw Exception(ErrorCodes::TOO_MANY_SIMULTANEOUS_TASKS, "Too many simultaneous tasks. Maximum: {}", max_running_task);
+            throw Exception(
+                ErrorCodes::TOO_MANY_SIMULTANEOUS_TASKS, 
+                "Too many simultaneous tasks. Maximum: {}, Already Running: {}, Multiplier: {}", 
+                max_running_task, 
+                getContext()->getManipulationList().size(), 
+                getContext()->getRootConfig().max_ratio_of_cnch_tasks_to_threads
+            );
 
         StoragePtr storage = createStorageFromQuery(request->create_table_query(), rpc_context);
         auto * data = dynamic_cast<StorageCloudMergeTree *>(storage.get());

@@ -85,10 +85,10 @@ bool sendToServerForGC(
     ToServerForGCSender sender,
     Poco::Logger * log)
 {
-    LOG_DEBUG(log, "send {} table to server for GC, they are", tables_need_gc.size());
+    LOG_DEBUG(log, "send {} table to {} servers for GC", tables_need_gc.size(), server_clients.size());
     for (size_t i = 0; i < tables_need_gc.size(); ++i)
     {
-        LOG_DEBUG(log, "table {} : {}.{}", i + 1 , tables_need_gc[i].database(), tables_need_gc[i].name());
+        LOG_TRACE(log, "table {} : {}.{}", i + 1 , tables_need_gc[i].database(), tables_need_gc[i].name());
     }
 
     while (!num_of_table_can_send_sorted.empty())
@@ -105,7 +105,7 @@ bool sendToServerForGC(
         CnchServerClientPtr client = findClient(server_clients, server_info.first);
         if (!client)
         {
-            LOG_ERROR(log, "can't find client, logic error!");
+            LOG_ERROR(log, "Failed to find server client for {}, skipping", server_info.first);
             num_of_table_can_send_sorted.pop_back();
             continue;
         }
@@ -122,7 +122,7 @@ bool sendToServerForGC(
         }
         else
         {
-            LOG_WARNING(log, "can't send to server, misconfig or something wrong in server, need investigate");
+            LOG_WARNING(log, "Failed to send tables for gc to server: {}, skipping", client->getRPCAddress());
             num_of_table_can_send_sorted.pop_back();
             continue;
         }
@@ -141,7 +141,7 @@ std::vector<CnchServerClientPtr> getServerClients(
     std::list<CnchServerTopology> server_topologies = topology_master.getCurrentTopology();
     if (server_topologies.empty())
     {
-        LOG_ERROR(log, "Server topology is empty, something wrong with topology, return empty result");
+        LOG_ERROR(log, "Server topology is empty");
         return res;
     }
 
@@ -177,15 +177,15 @@ std::vector<std::pair<String, long>> getNumOfTablesCanSend(
                 continue;
             if (num > static_cast<UInt64>(std::numeric_limits<long>::max()))
             {
-                LOG_ERROR(log, "The number of table can send return from : {} , is too big, programming error",
-                    rpc_address);
+                LOG_WARNING(log, "The number of tables can send return from {} is too big, num_of_tables_can_send: {}", rpc_address, num);
                 num = GlobalGCManager::MAX_BATCH_WORK_SIZE * 10;
             }
+            LOG_DEBUG(log, "The number of tables can send: {} for: {}", num, rpc_address);
+
             res.push_back(std::make_pair(rpc_address, num));
         }
         catch (...)
         {
-            LOG_INFO(log, "Failed to reach server: {}, detail: ", rpc_address);
             tryLogCurrentException(log, "Failed to reach server: " + rpc_address);
         }
     }
@@ -209,7 +209,6 @@ std::set<String> getDeletingTablesFromServers(
         }
         catch (...)
         {
-            LOG_INFO(log, "Failed to reach server: {}, detail: ", rpc_address);
             tryLogCurrentException(log, "Failed to reach server: " + rpc_address);
         }
     }
@@ -245,15 +244,20 @@ DaemonJobGlobalGC::DaemonJobGlobalGC(ContextMutablePtr global_context_)
 void DaemonJobGlobalGC::cleanSnapshotsIfNeeded(TxnTimestamp ts)
 {
     auto context = getContext();
-    if (snapshot_clean_watch.elapsedSeconds() < context->getSettingsRef().snapshot_clean_interval.totalSeconds())
+    auto clean_interval = context->getSettingsRef().snapshot_clean_interval.totalSeconds();
+    auto elapsed = snapshot_clean_watch.elapsedSeconds();
+    if (elapsed < clean_interval)
+    {
+        LOG_DEBUG(log, "Skipping clean snapshots, snapshot_clean_watch elapsed: {} ms, snapshot_clean_interval: {}", elapsed, clean_interval);
         return;
+    }
     snapshot_clean_watch.restart();
 
     try
     {
         Stopwatch watch;
         size_t num_removed = 0;
-        LOG_DEBUG(log, "Start to clear ttl expired snapshots at {}", ts.toSecond());
+        LOG_DEBUG(log, "Started to clear ttl expired snapshots at {}", ts.toSecond());
         Catalog::Catalog::DataModelDBs all_db_models = catalog->getAllDataBases();
         for (const auto & db_model : all_db_models)
         {
@@ -284,7 +288,7 @@ void DaemonJobGlobalGC::cleanSnapshotsIfNeeded(TxnTimestamp ts)
                 }
             }
         }
-        LOG_DEBUG(log, "Total removed {} snapshots from {} databases, took {} ms", num_removed, all_db_models.size(), watch.elapsedMilliseconds());
+        LOG_DEBUG(log, "Removed {} snapshots from {} databases, took {} ms", num_removed, all_db_models.size(), watch.elapsedMilliseconds());
         snapshot_clean_watch.restart();
     }
     catch (...)
@@ -300,7 +304,7 @@ bool DaemonJobGlobalGC::executeImpl()
     if (ts == TxnTimestamp::maxTS())
     {
         ts = TxnTimestamp::fromUnixTimestamp(std::time(nullptr));
-        LOG_INFO(log, "TSO isn't available, use wall clock timestamp {} instead", ts.toSecond());
+        LOG_WARNING(log, "TSO isn't available, use wall clock timestamp {} instead", ts.toSecond());
     }
 
     cleanSnapshotsIfNeeded(ts);
@@ -310,7 +314,7 @@ bool DaemonJobGlobalGC::executeImpl()
     std::shared_ptr<CnchTopologyMaster> topology_master = context->getCnchTopologyMaster();
     if (!topology_master)
     {
-        LOG_ERROR(log, "Failed to get topology master, skip iteration");
+        LOG_ERROR(log, "Failed to get topology master, skipping iteration");
         return false;
     }
 
@@ -318,14 +322,8 @@ bool DaemonJobGlobalGC::executeImpl()
     std::vector<std::pair<String, long>> num_of_table_can_send = getNumOfTablesCanSend(clients, log);
     if (num_of_table_can_send.empty())
     {
-        LOG_INFO(log, "Server already have many work, skip iteration");
+        LOG_WARNING(log, "Server work limit exceeded, skipping iteration");
         return false;
-    }
-
-    {
-        std::ostringstream oss;
-        oss << "number of tables can send: " << num_of_table_can_send;
-        LOG_INFO(log, oss.str());
     }
 
     std::vector<std::pair<String, long>> num_of_table_can_send_sorted = GlobalGCHelpers::sortByValue(std::move(num_of_table_can_send));
@@ -346,8 +344,10 @@ bool DaemonJobGlobalGC::executeImpl()
         new_iteration = true;
     }
     UInt64 milliseconds = watch.elapsedMilliseconds();
-    if (milliseconds >= SLOW_EXECUTION_THRESHOLD_MS)
-        LOG_DEBUG(log, "get trash table iterator took {} ms.", milliseconds);
+    if (milliseconds >= SLOW_EXECUTION_THRESHOLD_MS){
+        LOG_WARNING(log, "Fetching trash table iterator exceeds slow execution threshold, elapsed: {} ms, threshold: {} ms", milliseconds, SLOW_EXECUTION_THRESHOLD_MS);
+    }
+
     while(!num_of_table_can_send_sorted.empty())
     {
         if (!tryNext(trash_table_it))
@@ -370,10 +370,15 @@ bool DaemonJobGlobalGC::executeImpl()
                 clients,
                 GlobalGCHelpers::sendToServerForGCImpl,
                 log);
-            if (!ret)
+            if (!ret) {
+                LOG_ERROR(log, "Failed to send tables to {} server(s) for gc", clients.size());
                 break;
+            }
             else
+            {
+                LOG_DEBUG(log, "Clearing tables_need_gc which currently has {} elements", this->tables_need_gc.size());
                 this->tables_need_gc.clear();
+            }
         }
 
         Protos::TableIdentifier table_id{};
@@ -394,7 +399,7 @@ bool DaemonJobGlobalGC::executeImpl()
         if (table_model.has_value()) {
             this->tables_need_gc.push_back(*table_model);
         } else {
-            LOG_INFO(log, "Cannot clean trash table {} because : {}", table_id.name(), fail_reason);
+            LOG_ERROR(log, "Failed to clean trash table {}.{} because : {}", table_id.database(), table_id.name(), fail_reason);
         }
     }
 
@@ -407,7 +412,10 @@ bool DaemonJobGlobalGC::executeImpl()
                 GlobalGCHelpers::sendToServerForGCImpl,
                 log)
         )
+        {
+            LOG_DEBUG(log, "Clearing tables_need_gc which currently has {} elements", this->tables_need_gc.size());
             this->tables_need_gc.clear();
+        }
     }
 
     /// Clean database
@@ -417,13 +425,12 @@ bool DaemonJobGlobalGC::executeImpl()
     {
         if (TxnTimestamp(db.commit_time()).toSecond() < (ts.toSecond() - retention_sec))
         {
-            // remove meta from catalog
-            LOG_INFO(log, "Remove db meta for db {}", db.name());
+            LOG_INFO(log, "Removing db metadata for {}", db.name());
             catalog->clearDatabaseMeta(db.name(), db.commit_time());
         }
     }
 
-    LOG_INFO(log, "Finish executeImpl in global GC");
+    LOG_INFO(log, "Finished executeImpl in global GC");
     return true;
 }
 

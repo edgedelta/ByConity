@@ -248,6 +248,7 @@ CnchBGThreadsMapArray::~CnchBGThreadsMapArray()
 {
     try
     {
+        LOG_INFO(&Poco::Logger::get("CnchBGThreadsMap"), "Destroying CnchBGThreadsMapArray");
         shutdown();
     }
     catch (...)
@@ -258,6 +259,7 @@ CnchBGThreadsMapArray::~CnchBGThreadsMapArray()
 
 void CnchBGThreadsMapArray::shutdown()
 {
+    LOG_INFO(&Poco::Logger::get("CnchBGThreadsMap"), "Shutting down CnchBGThreadsMapArray");
     ThreadPool pool(size_t(CnchBGThreadType::ServerMaxType) - size_t(CnchBGThreadType::ServerMinType) + 1);
 
     for (auto i = size_t(CnchBGThreadType::ServerMinType); i <= size_t(CnchBGThreadType::ServerMaxType); ++i)
@@ -292,11 +294,13 @@ void CnchBGThreadsMapArray::cleanThread()
 
 void CnchBGThreadsMapArray::startResourceReport()
 {
+    LOG_INFO(&Poco::Logger::get("CnchBGThreadsMap"), "Starting resource report");
     resource_reporter_task->start();
 }
 
 void CnchBGThreadsMapArray::stopResourceReport()
 {
+    LOG_INFO(&Poco::Logger::get("CnchBGThreadsMap"), "Stopping resource report");
     resource_reporter_task->stop();
 }
 

@@ -19,7 +19,6 @@
 #include <CloudServices/CnchBGThreadCommon.h>
 #include <DaemonManager/Metrics.h>
 #include <Interpreters/Context.h>
-
 #include <time.h>
 #include <sstream>
 
@@ -136,6 +135,7 @@ void DaemonJob::execute()
 {
     try
     {
+        Stopwatch watch;
         LOG_TRACE(log, __PRETTY_FUNCTION__);
         getExecuteMetric(getType()) << 1;
         bool ret = executeImpl();
@@ -143,7 +143,8 @@ void DaemonJob::execute()
             getExecuteErrorMetric(getType()) << 1;
 
         task->scheduleAfter(interval_ms);
-        LOG_TRACE(log, "finish execute {}, try again after {}", toString(getType()), interval_ms);
+        
+        LOG_DEBUG(log, "Finished executing {} in {} ms, next execution scheduled after {} ms", toString(getType()), watch.elapsedMilliseconds(), interval_ms);
     }
     catch (...)
     {

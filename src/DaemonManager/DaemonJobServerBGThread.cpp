@@ -84,23 +84,36 @@ std::unordered_map<UUID, StorageID> getUUIDsFromCatalog(DaemonJobServerBGThread 
                 }
                 catch(...)
                 {
-                    LOG_WARNING(log, "Fail to schedule for " + storage_id.getFullTableName() + ". Error: " + getCurrentExceptionMessage(true));
+                    LOG_WARNING(log, "Fail to schedule for " + storage_id.getFullTableName());
+                    tryLogCurrentException(log, __PRETTY_FUNCTION__);
                 }
             }
         }
     }
     else    /// For Table daemon job
     {
+        LOG_DEBUG(log, "Fetching all table UUIDs from catalog for daemon job");
+        Stopwatch watch;
         auto data_models = context.getCnchCatalog()->getAllTables();
+        LOG_DEBUG(log, "Fetched {} table UUIDs from catalog in {} ms", data_models.size(), watch.elapsedMilliseconds());
         for (const auto & data_model : data_models)
         {
             if (Status::isDetached(data_model.status()) || Status::isDeleted(data_model.status()))
+            {
+                LOG_TRACE(log, "Skipping daemon job for: {}.{} because status: {}", data_model.database(), data_model.name(), Status::getStatusString(data_model.status()));
                 continue;
+            }
 
             auto uuid = RPCHelpers::createUUID(data_model.uuid());
             StorageID storage_id(data_model.database(), data_model.name(), uuid);
-            if (!data_model.server_vw_name().empty())
+            
+            if (!data_model.server_vw_name().empty()) {
                 storage_id.server_vw_name = data_model.server_vw_name();
+            }
+            else
+            {
+                LOG_TRACE(log, "server_vw_name is empty for: {}.{}", data_model.database(), data_model.name());
+            }
 
             try
             {
@@ -130,15 +143,17 @@ std::unordered_map<UUID, StorageID> getUUIDsFromCatalog(DaemonJobServerBGThread 
 
                 if (daemon_job.ifNeedDaemonJob(storage_trait, storage_id))
                     ret.insert(std::make_pair(uuid, storage_id));
+                else
+                    LOG_TRACE(log, "Daemon job is not needed for {}.{}", data_model.database(), data_model.name());
             }
             catch (Exception & e)
             {
-                LOG_WARNING(log, "Fail to schedule for {}.{}. Error: ", data_model.database(), data_model.name(), e.message());
+                LOG_WARNING(log, "Failed to schedule for {}.{}. Error: ", data_model.database(), data_model.name(), e.message());
                 tryLogCurrentException(log, __PRETTY_FUNCTION__);
             }
             catch (...)
             {
-                LOG_WARNING(log, "Fail to construct storage for {}.{}", data_model.database(), data_model.name());
+                LOG_WARNING(log, "Failed to construct storage for {}.{}", data_model.database(), data_model.name());
                 tryLogCurrentException(log, __PRETTY_FUNCTION__);
             }
         }
@@ -161,7 +176,7 @@ const std::vector<String> getServersInTopology(Context & context, Poco::Logger *
     std::list<CnchServerTopology> server_topologies = topology_master->getCurrentTopology();
     if (server_topologies.empty())
     {
-        LOG_ERROR(log, "Server topology is empty, something wrong with topology");
+        LOG_ERROR(log, "Server topology is empty");
         return ret;
     }
 
@@ -199,7 +214,7 @@ std::map<String, UInt64> fetchServerStartTimes(Context & context, CnchTopologyMa
     std::list<CnchServerTopology> server_topologies = topology_master.getCurrentTopology();
     if (server_topologies.empty())
     {
-        LOG_ERROR(log, "Server topology is empty, something wrong with topology, this iteration will be skip!");
+        LOG_ERROR(log, "Server topologies are empty, skipping iteration!");
         return ret;
     }
 
@@ -211,7 +226,7 @@ std::map<String, UInt64> fetchServerStartTimes(Context & context, CnchTopologyMa
         CnchServerClientPtr client_ptr = context.getCnchServerClientPool().get(host_port);
         if (!client_ptr)
         {
-            LOG_WARNING(log, "Not able to connect to server with rpc address {}", rpc_address);
+            LOG_WARNING(log, "Failed to connect to server with rpc address: {}", rpc_address);
             continue;
         }
 
@@ -228,7 +243,7 @@ std::map<String, UInt64> fetchServerStartTimes(Context & context, CnchTopologyMa
 
     if (ret.size() != host_ports.size())
     {
-        LOG_WARNING(log, "There is network partition, return empty result to skip this iteration");
+        LOG_WARNING(log, "There is network partition, returning empty result to skip this iteration");
         ret.clear();
     }
 
@@ -290,9 +305,7 @@ std::unordered_map<UUID, String> getAllTargetServerForBGJob(
 }
 
 /// TODO: pass const CnchTopologyMaster
-ServerInfo DaemonJobServerBGThread::findServerInfo(
-    const std::map<String, UInt64> & new_server_start_times,
-    const BackgroundJobs & bg_jobs)
+ServerInfo DaemonJobServerBGThread::findServerInfo(const std::map<String, UInt64> & new_server_start_times, const BackgroundJobs & bg_jobs)
 {
     ServerInfo ret;
     ret.alive_servers = findAliveServers(new_server_start_times);
@@ -925,10 +938,8 @@ Result DaemonJobServerBGThread::executeJobAction(const StorageID & storage_id, C
                     background_jobs.erase(uuid);
                     return {"", true};
                 }
-                else
-                {
-                    return bg_ptr->remove(action, true);
-                }
+                
+                return bg_ptr->remove(action, true);
             }
         }
         case CnchBGThreadAction::Stop:
@@ -990,20 +1001,24 @@ Result DaemonJobServerBGThread::executeJobAction(const StorageID & storage_id, C
                             return res;
                     }
                 }
+
+                LOG_DEBUG(log, "Start bg job for {}", storage_id.getNameForLogs());
                 return bg_ptr->start(true);
             }
             break;
         }
         case CnchBGThreadAction::Wakeup:
         {
+            
             auto bg_ptr = getBackgroundJob(uuid);
             if (!bg_ptr)
             {
-                auto error_msg = fmt::format("bg job doesn't exist for table: {} hence, stop wakeup", storage_id.getNameForLogs());
+                auto error_msg = fmt::format("bg job doesn't exist for table: {}, stop wakeup", storage_id.getNameForLogs());
                 return {error_msg, false};
             }
-            else
-                return bg_ptr->wakeup();
+            
+            LOG_DEBUG(log, "Wakeup bg job for {}", storage_id.getNameForLogs());
+            return bg_ptr->wakeup();
         }
     }
     return {"", false};
@@ -1028,6 +1043,8 @@ void DaemonJobForMergeMutate::executeOptimize(const StorageID & storage_id, cons
     }
 
     CnchServerClientPtr server_client = getContext()->getCnchServerClient(info.host_port);
+
+    LOG_DEBUG(log, "Executing optimize for {}", storage_id.getNameForLogs());
     server_client->executeOptimize(storage_id, partition_id, enable_try, mutations_sync, timeout_ms);
 }
 
@@ -1039,7 +1056,7 @@ BackgroundJobs DaemonJobServerBGThread::fetchCnchBGThreadStatus()
     auto cache_clearer = status_persistent_store->fetchStatusesIntoCache();
     UInt64 milliseconds = watch.elapsedMilliseconds();
     if (milliseconds >= SLOW_EXECUTION_THRESHOLD_MS)
-        LOG_DEBUG(log, "fetch bg job statuses took {} ms", milliseconds);
+        LOG_WARNING(log, "Fetching background job statuses took {} ms, slow execution threshold: {} ms", milliseconds, SLOW_EXECUTION_THRESHOLD_MS);
 
     BackgroundJobs ret;
     CnchServerClientPtrs cnch_servers = getContext()->getCnchServerClientPool().getAll();
@@ -1048,7 +1065,7 @@ BackgroundJobs DaemonJobServerBGThread::fetchCnchBGThreadStatus()
     {
         if (!cnch_server)
         {
-            LOG_WARNING(log, "Not able to connect to server with address {}", cnch_server->getRPCAddress());
+            LOG_WARNING(log, "Failed to connect to server with address {}", cnch_server->getRPCAddress());
             continue;
         }
 
@@ -1074,11 +1091,12 @@ BackgroundJobs DaemonJobServerBGThread::fetchCnchBGThreadStatus()
                         // remove a duplicate running task
                         try
                         {
+                            LOG_DEBUG(log, "Removing duplicate task {} from server with RPC address: {}", storage_id.getNameForLogs(), cnch_server->getRPCAddress());
                             getBgJobExecutor().remove(storage_id, cnch_server->getRPCAddress());
                         }
                         catch (...)
                         {
-                            tryLogCurrentException(log, "Fail to remove duplicated task: " + storage_id.getNameForLogs());
+                            tryLogCurrentException(log, "Failed to remove duplicate task: " + storage_id.getNameForLogs());
                         }
                     }
                     else
@@ -1097,7 +1115,7 @@ BackgroundJobs DaemonJobServerBGThread::fetchCnchBGThreadStatus()
                     }
                     catch (...)
                     {
-                        tryLogCurrentException(log, "Fail to remove duplicated task: " + storage_id.getNameForLogs());
+                        tryLogCurrentException(log, "Failed to remove duplicate task: " + storage_id.getNameForLogs());
                     }
                 }
             }
@@ -1110,7 +1128,7 @@ BackgroundJobs DaemonJobServerBGThread::fetchCnchBGThreadStatus()
 
     milliseconds = watch.elapsedMilliseconds();
     if (milliseconds >= SLOW_EXECUTION_THRESHOLD_MS)
-        LOG_DEBUG(log, "fetchBackgroundJobsFromServer took {} ms.", milliseconds);
+        LOG_DEBUG(log, "fetchBackgroundJobsFromServer took {} ms, slow execution threshold: {} ms", milliseconds, SLOW_EXECUTION_THRESHOLD_MS);
     return ret;
 }
 

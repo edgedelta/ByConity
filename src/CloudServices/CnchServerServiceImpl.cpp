@@ -431,7 +431,7 @@ void CnchServerServiceImpl::createTransactionForKafka(
 
             response->set_txn_id(transaction->getTransactionID());
             response->set_start_time(transaction->getStartTime());
-            LOG_TRACE(log, "Create transaction by request: {}\n", transaction->getTransactionID().toUInt64());
+            LOG_TRACE(log, "Create transaction with id: {} by request\n", transaction->getTransactionID().toUInt64());
         }
         catch (...)
         {
@@ -740,7 +740,7 @@ void CnchServerServiceImpl::getBackgroundThreadStatus(
                 }
                 else
                 {
-                    throw Exception("Not support type " + toString(int(request->type())), ErrorCodes::NOT_IMPLEMENTED);
+                    throw Exception("Invalid background thread type: " + toString(int(request->type())), ErrorCodes::NOT_IMPLEMENTED);
                 }
 
                 for (const auto & [storage_id, status] : res)
@@ -787,7 +787,7 @@ void CnchServerServiceImpl::controlCnchBGThread(
                 auto type = CnchBGThreadType(request->type());
                 auto action = CnchBGThreadAction(request->action());
                 auto & controller = static_cast<brpc::Controller &>(*cntl);
-                LOG_DEBUG(log, "Received controlBGThread for {} type {} action {} from {}",
+                LOG_DEBUG(log, "Received controlCnchBGThread for storage: {} type: {} action: {} from: {}",
                     storage_id.empty() ? "empty storage" : storage_id.getNameForLogs(),
                     toString(type), toString(action), butil::endpoint2str(controller.remote_side()).c_str());
                 global_context.controlCnchBGThread(storage_id, type, action);
@@ -824,7 +824,10 @@ void CnchServerServiceImpl::getTableInfo(
             {
                 auto part_cache_manager = gc->getPartCacheManager();
                 if (!part_cache_manager)
+                {
+                    LOG_WARNING(log, "Part cache manager is null!");
                     return;
+                }
                 for (auto & table_id : request->table_ids())
                 {
                     UUID uuid(stringToUUID(table_id.uuid()));
@@ -1097,7 +1100,7 @@ void CnchServerServiceImpl::scheduleGlobalGC(
             brpc::ClosureGuard done_guard(done);
 
             std::vector<Protos::DataModelTable> tables (request->tables().begin(), request->tables().end());
-            LOG_DEBUG(log, "Receive {} tables from DM, they are", tables.size());
+            LOG_DEBUG(log, "Receive {} tables from daemon manager, they are", tables.size());
 
             for (size_t i = 0; i < tables.size(); ++i)
             {
@@ -1133,6 +1136,7 @@ void CnchServerServiceImpl::getNumOfTablesCanSendForGlobalGC(
     catch (...)
     {
         tryLogCurrentException(log, __PRETTY_FUNCTION__);
+        LOG_WARNING(log, "Returning zero for getNumOfTablesCanSendForGlobalGC due to exception");
         response->set_num_of_tables_can_send(0);
     }
 }

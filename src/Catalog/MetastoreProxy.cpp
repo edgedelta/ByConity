@@ -1822,7 +1822,7 @@ std::optional<CnchBGThreadStatus> MetastoreProxy::getBGJobStatus(const String & 
     else if (type == CnchBGThreadType::PartMover)
         metastore_ptr->get(partMoverBGJobStatusKey(name_space, uuid), status_store_data);
     else
-        throw Exception(String{"persistent status is not support for "} + toString(type), ErrorCodes::LOGICAL_ERROR);
+        throw Exception(String{"persistent status is not supported for "} + toString(type), ErrorCodes::LOGICAL_ERROR);
 
     if (status_store_data.empty())
         return {};
@@ -1833,8 +1833,8 @@ std::optional<CnchBGThreadStatus> MetastoreProxy::getBGJobStatus(const String & 
 UUID MetastoreProxy::parseUUIDFromBGJobStatusKey(const std::string & key)
 {
     auto pos = key.rfind("_");
-    if (pos == std::string::npos || pos == (key.size() -1))
-        throw Exception("invalid BGJobStatusKey", ErrorCodes::LOGICAL_ERROR);
+    if (pos == std::string::npos || pos == (key.size() - 1))
+        throw Exception("invalid BGJobStatusKey: " + key, ErrorCodes::LOGICAL_ERROR);
     std::string uuid = key.substr(pos + 1);
     return UUIDHelpers::toUUID(uuid);
 }
@@ -1862,7 +1862,7 @@ std::unordered_map<UUID, CnchBGThreadStatus> MetastoreProxy::getBGJobStatuses(co
             else if (type == CnchBGThreadType::PartMover)
                 return metastore_ptr->getByPrefix(allPartMoverBGJobStatusKeyPrefix(name_space));
             else
-                throw Exception(String{"persistent status is not support for "} + toString(type), ErrorCodes::LOGICAL_ERROR);
+                throw Exception(String{"persistent status is not supported for "} + toString(type), ErrorCodes::LOGICAL_ERROR);
         };
 
     std::unordered_map<UUID, CnchBGThreadStatus> res;

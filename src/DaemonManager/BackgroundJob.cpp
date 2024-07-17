@@ -41,6 +41,7 @@ BackgroundJob::BackgroundJob(StorageID storage_id_, CnchBGThreadStatus status_, 
 
 Result BackgroundJob::start(bool write_status_to_persisent_store)
 {
+    LOG_DEBUG(log, "Executing start action for {}.{}", getStorageID().getDatabaseName(), getStorageID().getTableName());
     String exception_str{"action failed"};
     // start() can be called even when the status is Running
     CnchServerClientPtr cnch_server = nullptr;
@@ -124,6 +125,7 @@ Result BackgroundJob::start(bool write_status_to_persisent_store)
 
 Result BackgroundJob::stop(bool force, bool write_status_to_persisent_store)
 {
+    LOG_DEBUG(log, "Executing stop action for {}.{}", getStorageID().getDatabaseName(), getStorageID().getTableName());
     String exception_str{"action failed"};
     if (write_status_to_persisent_store)
     {
@@ -197,8 +199,8 @@ Result BackgroundJob::stop(bool force, bool write_status_to_persisent_store)
 
 Result BackgroundJob::remove(CnchBGThreadAction remove_type, bool write_status_to_persisent_store)
 {
-    if ((remove_type != CnchBGThreadAction::Remove) &&
-        (remove_type != CnchBGThreadAction::Drop))
+    LOG_DEBUG(log, "Executing remove action for {}.{}", getStorageID().getDatabaseName(), getStorageID().getTableName());
+    if ((remove_type != CnchBGThreadAction::Remove) && (remove_type != CnchBGThreadAction::Drop))
         throw Exception("remove type is not remove or drop, this is a coding mistake", ErrorCodes::LOGICAL_ERROR);
 
     String exception_str{"action failed"};
@@ -278,6 +280,7 @@ Result BackgroundJob::remove(CnchBGThreadAction remove_type, bool write_status_t
 
 Result BackgroundJob::wakeup()
 {
+    LOG_DEBUG(log, "Executing wakeup action for {}.{}", getStorageID().getDatabaseName(), getStorageID().getTableName());
     String exception_str{"action failed"};
     CnchBGThreadStatus curr_status;
     String host_port_copy;
@@ -312,7 +315,7 @@ Result BackgroundJob::wakeup()
     {
         LOG_WARNING(
             log,
-            "Failed to wakeup backgroud job: {} at server {}",
+            "Failed to wakeup background job: {} at server {}",
             storage_id.getNameForLogs(), host_port_copy
         );
     }
@@ -398,6 +401,7 @@ std::optional<BackgroundJob::SyncAction> BackgroundJob::getSyncAction(const Serv
 
 bool BackgroundJob::executeSyncAction(const BackgroundJob::SyncAction & action)
 {
+    LOG_TRACE(log, "Execute sync action: {} for: {}.{}", getSyncActionStr(action), getStorageID().database_name, getStorageID().table_name);
     if (action.clear_host_port)
     {
         LOG_INFO(log, "clear host port for {}", storage_id.getNameForLogs());
@@ -445,6 +449,10 @@ void BackgroundJob::setExpectedStatus(CnchBGThreadStatus status_)
 {
     std::lock_guard<std::mutex> lock_guard(mutex);
     expected_status = status_;
+}
+
+std::string BackgroundJob::getSyncActionStr(const BackgroundJob::SyncAction &action) const {
+    return fmt::format("BackgroundJob::SyncAction(need_start: {}, need_remove: {}, need_stop: {}, clear_host_port: {})", action.need_start, action.need_remove, action.need_stop, action.clear_host_port);
 }
 
 }

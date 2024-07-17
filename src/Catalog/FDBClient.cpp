@@ -26,7 +26,7 @@
 namespace DB
 {
 
-constexpr int64_t default_transaction_timeout = 5000; ///5 seconds
+constexpr int64_t default_transaction_timeout = 5000; // 5 seconds
 namespace ErrorCodes
 {
     extern const int METASTORE_EXCEPTION;

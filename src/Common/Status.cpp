@@ -48,4 +48,18 @@ bool isInActive(const UInt64 & status) { return status & STATUS_INACTIVE; }
 
 
 bool isVisible(const UInt64 status) { return !(status & (STATUS_DELETE | STATUS_DETACH)); }
+
+std::string getStatusString(const UInt64 status) {
+    switch (status)
+    {
+        case STATUS_DELETE:
+            return "STATUS_DELETE";
+        case STATUS_DETACH:
+            return "STATUS_DETACH";
+        case STATUS_INACTIVE:
+            return "STATUS_INACTIVE";
+        default:
+            return "STATUS_UNKNOWN";
+    }
+}
 }
