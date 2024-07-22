@@ -538,6 +538,8 @@ DatabasePtr DatabaseCatalog::tryGetDatabase(const String & database_name, Contex
         DatabasePtr database_cnch = tryGetDatabaseCnch(database_name, local_context);
         if (database_cnch)
             return database_cnch;
+        
+        LOG_WARNING(&Poco::Logger::get("DatabaseCatalog"), "Failed to fetch database {} from cnch catalog", database_name);
     }
 
     String tenant_db = formatTenantDatabaseName(database_name);
