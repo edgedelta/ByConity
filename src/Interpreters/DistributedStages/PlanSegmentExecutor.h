@@ -59,6 +59,7 @@ public:
         AddressInfo coordinator_address;
         RuntimeSegmentsStatus runtime_segment_status;
         Protos::SenderMetrics sender_metrics;
+        Protos::IndexMetrics index_metrics;
     };
     std::optional<ExecutionResult> execute();
     BlockIO lazyExecute(bool add_output_processors = false);

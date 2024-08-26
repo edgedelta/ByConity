@@ -1295,14 +1295,15 @@ MergeTreeDataSelectAnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
     }
 
     for (const auto & index_stat : result.index_stats)
-        LOG_DEBUG(log, "selectRangesToRead index stat : type-{}, name-{}, description-{}, condition-{}, used_keys-{}, num_parts_after-{}, num_granules_after-{}",
+        LOG_DEBUG(log, "selectRangesToRead for query id: {},  index stat : type-{}, name-{}, description-{}, condition-{}, used_keys-{}, num_parts_after-{}, num_granules_after-{}",
+                        context->getCurrentQueryId(),
                         indexTypeToString(index_stat.type),
                         index_stat.name,
                         index_stat.description,
                         index_stat.condition,
                         fmt::join(index_stat.used_keys, ","),
                         std::to_string(index_stat.num_parts_after),
-                        std::to_string(index_stat.num_granules_after));
+                        std::to_string(index_stat.num_granules_after));     
 
     size_t sum_marks_pk = total_marks_pk;
     for (const auto & stat : result.index_stats)

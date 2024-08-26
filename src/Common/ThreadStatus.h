@@ -24,6 +24,7 @@
 #include <Core/SettingsEnums.h>
 #include <Interpreters/Context_fwd.h>
 #include <IO/Progress.h>
+#include <IO/IndexMetrics.h>
 #include <Common/MemoryTracker.h>
 #include <Common/OpenTelemetryTraceContext.h>
 #include <Common/ProfileEvents.h>
@@ -83,6 +84,7 @@ public:
     mutable bthread::Mutex mutex;
 
     ProfileEvents::Counters performance_counters{VariableContext::Process};
+    IndexMetricsCollection index_metrics_collection{};
     MemoryTracker private_memory_tracker{VariableContext::Process};
     MemoryTracker & memory_tracker;
     /// for MaxIOThreadProfileEvents
@@ -144,6 +146,7 @@ public:
 
     /// TODO: merge them into common entity
     ProfileEvents::Counters performance_counters{VariableContext::Thread};
+    IndexMetricsCollection index_metrics_collection{};
     MemoryTracker memory_tracker{VariableContext::Thread};
 
     /// Small amount of untracked memory (per thread atomic-less counter)
@@ -345,6 +348,9 @@ public:
 
     /// Update ProfileEvents and dumps info to system.query_thread_log
     void finalizePerformanceCounters();
+
+    // Update index metrics collection
+    void updateIndexMetricsCollection();
 
     /// Detaches thread from the thread group and the query, dumps performance counters if they have not been dumped
     void detachQuery(bool exit_if_already_detached = false, bool thread_exits = false);

@@ -43,6 +43,15 @@ ProfileEvents::Counters & CurrentThread::getProfileEvents()
     return current_thread ? current_thread->performance_counters : ProfileEvents::global_counters;
 }
 
+IndexMetricsCollection & CurrentThread::getIndexMetricsCollection() 
+{
+    if (current_thread)
+        return current_thread->index_metrics_collection;
+
+    static IndexMetricsCollection empty_collection;
+    return empty_collection;
+}
+
 MemoryTracker * CurrentThread::getMemoryTracker()
 {
     if (unlikely(!current_thread))

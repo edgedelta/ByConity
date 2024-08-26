@@ -70,6 +70,7 @@
 #include <Interpreters/InterpreterSelectQuery.h>
 
 #include <IO/WriteBufferFromOStream.h>
+#include <IO/IndexMetrics.h>
 #include <MergeTreeCommon/assignCnchParts.h>
 #include <Processors/Transforms/AggregatingTransform.h>
 #include <Storages/MergeTree/StorageFromMergeTreeDataPart.h>
@@ -916,7 +917,7 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
         {
             LOG_TRACE(&Poco::Logger::get("filterPartsByPrimaryKeyAndSkipIndexes"),"Creating index {} {}\n", index.name, index.type);
             auto index_helper = MergeTreeIndexFactory::instance().get(index);
-            if (!settings.enable_inverted_index && index_helper->isInvertedIndex())
+            if (index_helper->isInvertedIndex()) //!settings.enable_inverted_index && 
             {
                 continue;
             }
@@ -960,7 +961,7 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
 
     std::atomic<size_t> sum_marks_pk = 0;
     std::atomic<size_t> sum_parts_pk = 0;
-
+    std::atomic<size_t> total_granules = 0;
     /// Let's find what range to read from each part.
     {
         std::atomic<size_t> total_rows{0};
@@ -980,6 +981,7 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
             RangesInDataPart ranges(part, part_index);
 
             size_t total_marks_count = part->index_granularity.getMarksCountWithoutFinal();
+            total_granules.fetch_add(total_marks_count, std::memory_order_relaxed);
 
             // Make sure that part->getIndex() is called only if they're needed.
             if (metadata_snapshot->hasPrimaryKey() && !key_condition.alwaysUnknownOrTrue())
@@ -1123,6 +1125,18 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
             .used_keys = std::move(description.used_keys),
             .num_parts_after = sum_parts_pk.load(std::memory_order_relaxed),
             .num_granules_after = sum_marks_pk.load(std::memory_order_relaxed)});
+        
+        auto skippedParts = parts.size() - sum_parts_pk.load(std::memory_order_relaxed);
+        auto skippedGranules = total_granules.load(std::memory_order_relaxed) - sum_marks_pk.load(std::memory_order_relaxed);
+        auto metric_values = IndexMetricValues{
+            .index_name = "PrimaryKey",
+            .index_description = fmt::format("{}", fmt::join(description.used_keys, ",")),
+            .total_parts =  parts.size(),
+            .total_granules = total_granules.load(std::memory_order_relaxed),
+            .skipped_parts = skippedParts,
+            .skipped_granules = skippedGranules
+        };
+        DB::CurrentThread::getIndexMetricsCollection().addOrUpdateIndexMetric(metric_values);
     }
 
     for (const auto & index_and_condition : useful_indices)
@@ -1144,6 +1158,16 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
             .description = std::move(description),
             .num_parts_after = index_and_condition.total_parts - index_and_condition.parts_dropped,
             .num_granules_after = index_and_condition.total_granules - index_and_condition.granules_dropped});
+
+        auto metric_values = IndexMetricValues{
+            .index_name = index_name,
+            .index_description = description,
+            .total_parts = index_and_condition.total_parts,
+            .total_granules = index_and_condition.total_granules,
+            .skipped_parts = index_and_condition.parts_dropped,
+            .skipped_granules = index_and_condition.granules_dropped
+        };
+        DB::CurrentThread::getIndexMetricsCollection().addOrUpdateIndexMetric(metric_values);
     }
 
     return parts_with_ranges;

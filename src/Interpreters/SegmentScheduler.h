@@ -23,6 +23,7 @@
 #include <Core/Types.h>
 #include <IO/ReadHelpers.h>
 #include <IO/WriteHelpers.h>
+#include <IO/IndexMetrics.h>
 #include <Interpreters/CancellationCode.h>
 #include <Interpreters/Cluster.h>
 #include <Interpreters/Context.h>
@@ -105,6 +106,10 @@ public:
 
     PlanSegmentSet getIOPlanSegmentInstanceIDs(const String & query_id) const;
 
+    void onIndexMetrics(const std::string& query_id, const IndexMetricsCollection & index_metrics_values_);
+    std::unordered_map<std::string, IndexMetricValues> getSnapshotIndexMetrics(const std::string & query_id) const;
+    void removeIndexMetricsForQuery(const std::string & query_id);
+
 private:
     // Protect `query_map`.
     mutable bthread::Mutex mutex;
@@ -121,6 +126,10 @@ private:
     // Protect `bsp_scheduler_map`.
     bthread::Mutex bsp_scheduler_map_mutex;
     BspSchedulerMap bsp_scheduler_map;
+
+    // multi threading is handled within the class itself
+    mutable bthread::Mutex index_metrics_mutex;
+    std::unordered_map<std::string, IndexMetricsCollection> index_metrics_map;
 
     Poco::Logger * log;
 

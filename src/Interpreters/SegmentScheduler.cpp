@@ -300,6 +300,37 @@ void SegmentScheduler::updateQueryStatus(const RuntimeSegmentsStatus & segment_s
     status->metrics.cpu_micros += segment_status.metrics.cpu_micros;
 }
 
+void SegmentScheduler::onIndexMetrics(const std::string & query_id, const IndexMetricsCollection & index_metrics_) 
+{
+    std::unique_lock<bthread::Mutex> lock(index_metrics_mutex);
+    // Try to emplace the provided IndexMetricsCollection into the map
+    auto [iter, inserted] = index_metrics_map.emplace(query_id, index_metrics_);
+
+    // If it was not inserted (i.e., it already existed), aggregate the metrics
+    if (!inserted) {
+        iter->second.aggregate(index_metrics_);
+    }
+}
+
+std::unordered_map<std::string, IndexMetricValues> SegmentScheduler::getSnapshotIndexMetrics(const std::string & query_id) const 
+{
+    std::unique_lock<bthread::Mutex> lock(index_metrics_mutex);
+    auto it = index_metrics_map.find(query_id);
+    if (it != index_metrics_map.end()) {
+        const auto & metrics_collection = it->second;
+        return metrics_collection.getSnapshot();
+    } else {
+        // Handle the case where the query_id does not exist in the map.
+        // You could return an empty map or throw an exception, depending on your requirements.
+        return {};  // Return an empty map if the query_id is not found.
+    }
+}
+
+void SegmentScheduler::removeIndexMetricsForQuery(const std::string & query_id) {
+    std::unique_lock<bthread::Mutex> lock(index_metrics_mutex);
+    index_metrics_map.erase(query_id);
+}
+
 void SegmentScheduler::updateSegmentStatus(const RuntimeSegmentsStatus & segment_status)
 {
     std::unique_lock<bthread::Mutex> lock(segment_status_mutex);

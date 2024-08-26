@@ -34,6 +34,8 @@ void reportExecutionResult(const PlanSegmentExecutor::ExecutionResult & result) 
         request.set_code(status.code);
         request.set_message(status.message);
         *request.mutable_sender_metrics() = std::move(result.sender_metrics);
+        *request.mutable_index_metrics() = std::move(result.index_metrics);
+        
 
         manager.sendPlanSegmentStatus(&cntl, &request, &response, nullptr);
         rpc_client->assertController(cntl);
@@ -133,6 +135,9 @@ PlanSegmentExecutor::ExecutionResult convertSuccessPlanSegmentStatusToResult(
     result.runtime_segment_status.message = "execute success";
     result.runtime_segment_status.metrics.final_progress = final_progress.toProto();
     result.sender_metrics = senderMetricsToProto(plan_segment_outputs, sender_metrics, execution_address);
+
+    auto index_metrics_proto = CurrentThread::getIndexMetricsCollection().toProto();
+    result.index_metrics = index_metrics_proto;
 
     return result;
 }

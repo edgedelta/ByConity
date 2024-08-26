@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <IO/Progress.h>
+#include <IO/IndexMetrics.h>
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/DistributedStages/AddressInfo.h>
 #include <Interpreters/DistributedStages/PlanSegmentInstance.h>
@@ -136,6 +137,13 @@ void PlanSegmentManagerRpcService::sendPlanSegmentStatus(
                     request->query_id(), ex_id, request->parallel_index(), exg_status);
             }
         }
+        if (request->has_index_metrics()) {
+            auto index_metrics_proto = request->index_metrics();
+            IndexMetricsCollection index_metrics_from_executor;
+            index_metrics_from_executor.fromProto(index_metrics_proto);
+            scheduler->onIndexMetrics(request->query_id(), index_metrics_from_executor);
+        }
+
         // TODO(WangTao): fine grained control, conbining with retrying.
         scheduler->updateReceivedSegmentStatusCounter(request->query_id(), request->segment_id(), request->parallel_index(), status);
 

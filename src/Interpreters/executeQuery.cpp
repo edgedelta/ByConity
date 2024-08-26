@@ -20,6 +20,8 @@
  */
 
 #include <memory>
+#include <thread>
+#include <chrono>
 #include <Client/Connection.h>
 #include <Interpreters/executeQueryHelper.h>
 #include <Common/HistogramMetrics.h>
@@ -1687,6 +1689,18 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
                         elem.used_storages = factories_info.storages;
                         elem.used_table_functions = factories_info.table_functions;
                         elem.partition_ids = context->getPartitionIds();
+
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        auto index_metrics = context->getSegmentScheduler()->getSnapshotIndexMetrics(query_id);
+                        if (!elem.segment_profiles)
+                            elem.segment_profiles = std::make_shared<std::vector<String>>();
+
+                        for (auto & snapshot : index_metrics) {
+                            auto index_metrics_str = snapshot.second.toString();
+                            elem.segment_profiles->emplace_back(index_metrics_str);
+                        }
+
+                        // context->getSegmentScheduler()->removeIndexMetricsForQuery(query_id);
 
                         if (log_queries && elem.type >= log_queries_min_type
                             && Int64(elem.query_duration_ms) >= log_queries_min_query_duration_ms)
