@@ -4,13 +4,11 @@ ARG FDB_VERSION=7.1.27
 WORKDIR /downloads
 RUN apk --no-cache add wget
 RUN wget -qO cmake.3.17.tar.gz https://cmake.org/files/v3.17/cmake-3.17.0-Linux-x86_64.tar.gz
-# RUN wget https://apt.llvm.org/llvm.sh
-RUN wget -q https://mirrors.tuna.tsinghua.edu.cn/llvm-apt/llvm.sh
 RUN wget -qO foundationdb-clients.deb https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb
 RUN wget -qO tini https://github.com/krallin/tini/releases/download/v0.19.0/tini
 
 # Debian builder
-FROM debian:11.9 as debian-builder
+FROM debian:11.11 as debian-builder
 LABEL description="Debian image for compiling"
 LABEL org.opencontainers.image.source="https://github.com/ByConity/ByConity"
 
@@ -24,8 +22,10 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --no-instal
 COPY --from=downloader /downloads /downloads
 WORKDIR /downloads
 RUN tar --strip-components=1 -xzf cmake.3.17.tar.gz -C /usr/local
-RUN chmod +x llvm.sh && ./llvm.sh 11 -m https://mirrors.tuna.tsinghua.edu.cn/llvm-apt
-RUN dpkg -i foundationdb-clients.deb
+
+# Use the official LLVM script and mirror
+RUN wget -qO - https://apt.llvm.org/llvm.sh | bash -s 11
+RUN dpkg -i foundationdb-clients.deb || apt-get install --fix-missing -y
 RUN rm -rf /downloads
 
 COPY build.sh /
@@ -39,7 +39,7 @@ RUN ldconfig
 ENV CC=clang-11 CXX=clang++-11
 
 # Base runner image
-FROM debian:11.9-slim as debian-runner
+FROM debian:11.11-slim as debian-runner
 LABEL description="Base Debian image for runtime"
 LABEL org.opencontainers.image.source="https://github.com/ByConity/ByConity"
 
