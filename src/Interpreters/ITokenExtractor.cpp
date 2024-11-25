@@ -200,29 +200,38 @@ bool SplitTokenExtractor::nextInStringPadded(const char * data, size_t length, s
 bool SplitTokenExtractor::nextInStringLike(const char * data, size_t length, size_t * pos, String & token) const
 {
     token.clear();
-    bool bad_token = false; // % or _ before token
     bool escaped = false;
     while (*pos < length)
     {
-        if (!escaped && (data[*pos] == '%' || data[*pos] == '_'))
+        if (escaped && (data[*pos] == '%' || data[*pos] == '_' || data[*pos] == '\\'))
         {
+            // Append escaped characters directly to the token
+            token += data[*pos];
+            escaped = false;
+            ++*pos;
+        }
+        else if (!escaped && (data[*pos] == '%' || data[*pos] == '_'))
+        {
+            if (!token.empty())
+            {
+                return true; // Return the valid token
+            }
+            // Wildcard: reset token, continue to next character
             token.clear();
-            bad_token = true;
             ++*pos;
         }
         else if (!escaped && data[*pos] == '\\')
         {
+            // Escape character, set escape mode
             escaped = true;
             ++*pos;
         }
-        else if (isASCII(data[*pos]) && !isAlphaNumericASCII(data[*pos]))
+        else if (!escaped && isASCII(data[*pos]) && !isAlphaNumericASCII(data[*pos]))
         {
-            if (!bad_token && !token.empty())
+            if (!token.empty())
                 return true;
 
             token.clear();
-            bad_token = false;
-            escaped = false;
             ++*pos;
         }
         else
@@ -237,7 +246,8 @@ bool SplitTokenExtractor::nextInStringLike(const char * data, size_t length, siz
         }
     }
 
-    return !bad_token && !token.empty();
+
+    return !token.empty();
 }
 
 bool StandardTokenExtractor::nextInString(
@@ -291,19 +301,18 @@ bool StandardTokenExtractor::nextInString(
     return *token_length > 0;
 }
 
-bool StandardTokenExtractor::nextInStringLike(
-   const char * data, size_t length, size_t * pos, String & out) const 
-{
-    out.clear();
-    bool bad_token = false; // % or _ before token
-    bool escaped = false;
 
+bool StandardTokenExtractor::nextInStringLike(const char * data, size_t length, size_t * pos, std::string & token) const
+{
+    token.clear();
+    bool escaped = false;
     while (*pos < length)
     {
         if (!escaped && (data[*pos] == '%' || data[*pos] == '_'))
         {
-            out.clear();
-            bad_token = true;
+            if (!token.empty())
+                return true;
+            token.clear();
             ++*pos;
         }
         else if (!escaped && data[*pos] == '\\')
@@ -311,45 +320,89 @@ bool StandardTokenExtractor::nextInStringLike(
             escaped = true;
             ++*pos;
         }
-        else if (isASCII(data[*pos]))
+        else if (!escaped && isASCII(data[*pos]) && !isAlphaNumericASCII(data[*pos]))
         {
-            if(isAlphaNumericASCII(data[*pos]))
-            {
-                out += data[*pos];
-                ++*pos;
-                escaped = false;
-                continue;
-            }
-
-            if (!bad_token && !out.empty())
+            if (!token.empty())
                 return true;
 
-            out.clear();
-            bad_token = false;
+            token.clear();
             escaped = false;
             ++*pos;
         }
         else
         {
-            // before cut utf-8 submit token if has any
-            if (!bad_token && !out.empty())
-                return true;
-            
-            out.clear();
-            bad_token = false;
+            const size_t sz = UTF8::seqLength(static_cast<unsigned char>(data[*pos]));
+            for (size_t j = 0; j < sz; ++j)
+            {
+                token += data[*pos];
+                ++*pos;
+            }
             escaped = false;
-
-            const size_t sz = UTF8::seqLength(static_cast<UInt8>(data[*pos]));
-
-            out.append((data + *pos), sz);
-            (*pos) += sz;
-
-            // submit token after cut utf-8
-            if (!out.empty())
-                return true;
         }
     }
-    return !bad_token && !out.empty();
+
+    return !token.empty();
 }
+
+// bool StandardTokenExtractor::nextInStringLike(
+// const char * data, size_t length, size_t * pos, String & out) const 
+// {
+//     out.clear();
+//     bool escaped = false;
+
+//     while (*pos < length)
+//     {
+//         if (!escaped && (data[*pos] == '%' || data[*pos] == '_'))
+//         {
+//             if (!out.empty())
+//                 return true;
+//             out.clear();
+//             ++*pos;
+//         }
+//         else if (!escaped && data[*pos] == '\\')
+//         {
+//             escaped = true;
+//             ++*pos;
+//         }
+//         else if (isASCII(data[*pos]))
+//         {
+//             if(isAlphaNumericASCII(data[*pos]))
+//             {
+//                 out += data[*pos];
+//                 ++*pos;
+//                 escaped = false;
+//                 continue;
+//             }
+
+//             if (!bad_token && !out.empty())
+//                 return true;
+
+//             out.clear();
+//             bad_token = false;
+//             escaped = false;
+//             ++*pos;
+//         }
+//         else
+//         {
+//             // before cut utf-8 submit token if has any
+//             if (!bad_token && !out.empty())
+//                 return true;
+            
+//             out.clear();
+//             bad_token = false;
+//             escaped = false;
+
+//             const size_t sz = UTF8::seqLength(static_cast<UInt8>(data[*pos]));
+
+//             out.append((data + *pos), sz);
+//             (*pos) += sz;
+
+//             // submit token after cut utf-8
+//             if (!out.empty())
+//                 return true;
+//         }
+//     }
+//     return !bad_token && !out.empty();
+// }
 
 }
