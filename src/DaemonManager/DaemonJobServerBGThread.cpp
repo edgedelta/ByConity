@@ -94,6 +94,13 @@ std::unordered_map<UUID, StorageID> getUUIDsFromCatalog(DaemonJobServerBGThread 
         auto data_models = context.getCnchCatalog()->getAllTables();
         for (const auto & data_model : data_models)
         {
+            LOG_DEBUG(log, 
+                "data model database: {}, name: {}, status: {}, definition: {}",
+                data_model.database(),
+                data_model.name(), 
+                data_model.status(),
+                data_model.definition()
+            );
             if (Status::isDetached(data_model.status()) || Status::isDeleted(data_model.status()))
                 continue;
 
