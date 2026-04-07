@@ -96,7 +96,8 @@ MergeTreeReaderCNCH::MergeTreeReaderCNCH(
 {
     if (data_part->enableDiskCache())
     {
-        segment_cache = DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
+        // Use storage's disk cache (per-table or global)
+        segment_cache = data_part->storage.getDiskCache();
         segment_cache_strategy = segment_cache->getStrategy();
     }
 

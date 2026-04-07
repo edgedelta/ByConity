@@ -20,6 +20,7 @@
 #include <Disks/IStoragePolicy.h>
 #include <Interpreters/Context.h>
 #include <Storages/DiskCache/DiskCacheLRU.h>
+#include <Storages/DiskCache/DiskCacheTTL.h>
 #include <Storages/DiskCache/DiskCacheSettings.h>
 #include <Storages/DiskCache/DiskCacheSimpleStrategy.h>
 #include <common/logger_useful.h>
@@ -108,6 +109,47 @@ void DiskCacheFactory::shutdown()
     IDiskCache::close();
 }
 
+IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
+    const String & table_name,
+    const VolumePtr & volume,
+    const ThrottlerPtr & throttler,
+    const String & mode,
+    UInt64 ttl_minutes)
+{
+    Poco::Logger * log = &Poco::Logger::get("DiskCacheFactory");
+
+    // Get global cache settings as base
+    DiskCacheSettings cache_settings;
+    auto it = caches.find(DiskCacheType::MergeTree);
+    if (it != caches.end() && it->second)
+    {
+        cache_settings = it->second->getSettings();
+    }
+
+    // Override with table-specific settings
+    cache_settings.cache_mode = mode.empty() ? "lru" : mode;
+    cache_settings.cache_ttl_minutes = ttl_minutes;
+
+    bool use_ttl = (cache_settings.cache_mode == "ttl" && ttl_minutes > 0);
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(cache_settings);
+
+    IDiskCachePtr cache;
+    if (use_ttl)
+    {
+        cache = std::make_shared<DiskCacheTTL>(
+            table_name, volume, throttler, cache_settings, strategy, ttl_minutes);
+        LOG_INFO(log, "Created per-table TTL cache for {} (TTL: {} minutes)", table_name, ttl_minutes);
+    }
+    else
+    {
+        cache = std::make_shared<DiskCacheLRU>(
+            table_name, volume, throttler, cache_settings, strategy);
+        LOG_INFO(log, "Created per-table LRU cache for {}", table_name);
+    }
+
+    return cache;
+}
+
 void DiskCacheFactory::addNewCache(Context & context, const std::string & cache_name, bool create_default)
 {
     Poco::Logger * log{&Poco::Logger::get("DiskCacheFactory")};
@@ -144,6 +186,7 @@ void DiskCacheFactory::addNewCache(Context & context, const std::string & cache_
                 cache_settings.lru_max_nums));
     }
 
+    // Global cache always uses LRU (TTL cache is per-table only)
     if (!cache_settings.meta_cache_size_ratio)
     {
         auto disk_cache = std::make_shared<DiskCacheLRU>(

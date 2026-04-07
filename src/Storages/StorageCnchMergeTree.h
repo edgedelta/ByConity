@@ -31,6 +31,8 @@ namespace DB
 
 struct PrepareContextResult;
 class ASTSystemQuery;
+class IDiskCache;
+using IDiskCachePtr = std::shared_ptr<IDiskCache>;
 
 class StorageCnchMergeTree final : public shared_ptr_helper<StorageCnchMergeTree>, public MergeTreeMetaBase, public CnchStorageCommonHelper
 {
@@ -299,6 +301,13 @@ private:
     void checkAlterInCnchServer(const AlterCommands & commands, ContextPtr local_context) const;
 
     std::unique_ptr<MergeTreeSettings> getDefaultSettings() const override;
+
+    /// Get disk cache instance (per-table or global)
+    IDiskCachePtr getDiskCache() const;
+
+private:
+    /// Per-table disk cache instance (null if using global cache)
+    mutable IDiskCachePtr disk_cache;
 };
 
 using StorageCnchMergeTreePtr = std::shared_ptr<StorageCnchMergeTree>;

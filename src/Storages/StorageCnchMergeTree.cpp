@@ -96,6 +96,8 @@
 #include <DataTypes/ObjectUtils.h>
 #include <Storages/StorageSnapshot.h>
 #include <Transaction/TxnTimestamp.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
+#include <Storages/DiskCache/IDiskCache.h>
 
 
 namespace ProfileEvents
@@ -261,10 +263,50 @@ QueryProcessingStage::Enum StorageCnchMergeTree::getQueryProcessingStage(
 
 void StorageCnchMergeTree::startup()
 {
+    // Create per-table cache if enabled
+    if (getSettings()->enable_per_table_disk_cache)
+    {
+        LOG_INFO(log, "Creating per-table disk cache for {} (mode: {}, TTL: {} minutes)",
+            getStorageID().getNameForLogs(),
+            getSettings()->disk_cache_mode,
+            getSettings()->disk_cache_ttl_minutes);
+
+        try
+        {
+            disk_cache = DiskCacheFactory::instance().createDiskCacheFromTableSettings(
+                getStorageID().getNameForLogs(),
+                getContext()->getStoragePolicy(getSettings()->storage_policy)->getVolumeByName("local", true),
+                getContext()->getDiskCacheThrottler(),
+                getSettings()->disk_cache_mode,
+                getSettings()->disk_cache_ttl_minutes
+            );
+        }
+        catch (const Exception & e)
+        {
+            LOG_ERROR(log, "Failed to create per-table disk cache: {}. Falling back to global cache.", e.message());
+            disk_cache = nullptr;
+        }
+    }
 }
 
 void StorageCnchMergeTree::shutdown()
 {
+    if (disk_cache)
+    {
+        LOG_INFO(log, "Shutting down per-table disk cache for {}", getStorageID().getNameForLogs());
+        disk_cache->shutdown();
+        disk_cache.reset();
+    }
+}
+
+IDiskCachePtr StorageCnchMergeTree::getDiskCache() const
+{
+    // Return per-table cache if available
+    if (disk_cache)
+        return disk_cache;
+
+    // Fallback to global cache
+    return DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
 }
 
 Pipe StorageCnchMergeTree::read(

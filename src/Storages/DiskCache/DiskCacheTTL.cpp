@@ -1,0 +1,592 @@
+/*
+ * Copyright (2022) Bytedance Ltd. and/or its affiliates
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include <Storages/DiskCache/DiskCacheTTL.h>
+#include <Storages/MergeTree/MergeTreePartInfo.h>
+#include <fmt/core.h>
+#include <sys/stat.h>
+#include <atomic>
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <string_view>
+#include "Common/Exception.h"
+#include "Common/hex.h"
+#include "common/logger_useful.h"
+#include <Common/Throttler.h>
+#include <Common/setThreadName.h>
+#include <IO/OpenedFileCache.h>
+#include "Interpreters/Context.h"
+#include "Storages/DiskCache/DiskCache_fwd.h"
+#include "Storages/DiskCache/IDiskCache.h"
+#include <common/errnoToString.h>
+#include <Disks/IVolume.h>
+#include <IO/WriteBufferFromString.h>
+#include <IO/copyData.h>
+
+namespace fs = std::filesystem;
+
+namespace CurrentMetrics
+{
+    extern const Metric DiskCacheEvictQueueLength;
+}
+
+namespace ProfileEvents
+{
+    extern const Event DiskCacheGetMetaMicroSeconds;
+    extern const Event DiskCacheGetTotalOps;
+    extern const Event DiskCacheSetTotalOps;
+    extern const Event DiskCacheSetTotalBytes;
+}
+
+namespace DB
+{
+
+namespace ErrorCodes
+{
+    extern const int SYSTEM_ERROR;
+    extern const int LOGICAL_ERROR;
+    extern const int BAD_ARGUMENTS;
+}
+
+static constexpr auto DISK_CACHE_TEMP_FILE_SUFFIX = ".temp";
+static constexpr auto TMP_SUFFIX_LEN = std::char_traits<char>::length(DISK_CACHE_TEMP_FILE_SUFFIX);
+static constexpr auto META_DISK_CACHE_DIR_PREFIX = "meta";
+static constexpr auto DATA_DISK_CACHE_DIR_PREFIX = "data";
+static constexpr auto DATA_FILE_EXTENSION = ".bin";
+
+namespace
+{
+    constexpr size_t HEX_KEY_LEN = sizeof(DiskCacheTTL::KeyType) * 2;
+
+    UInt64 unhex16(const char * data)
+    {
+        UInt64 res = 0;
+        for (size_t i = 0; i < sizeof(UInt64) * 2; ++i, ++data)
+        {
+            res <<= 4;
+            res += static_cast<UInt64>(unhex(*data));
+        }
+        return res;
+    }
+
+    bool isHexKey(const String & hex_key)
+    {
+        if (hex_key.size() != HEX_KEY_LEN)
+            return false;
+
+        for (char c : hex_key)
+        {
+            if (!(isNumericASCII(c) || (c >= 'a' && c <= 'f')))
+                return false;
+        }
+
+        return true;
+    }
+}
+
+DiskCacheTTL::DiskCacheTTL(
+    const String & name_,
+    const VolumePtr & volume_,
+    const ThrottlerPtr & throttler_,
+    const DiskCacheSettings & settings_,
+    const IDiskCacheStrategyPtr & strategy_,
+    UInt64 ttl_minutes_,
+    IDiskCache::DataType type_)
+    : IDiskCache(name_, volume_, throttler_, settings_, strategy_, false, type_)
+    , set_rate_throttler(settings_.cache_set_rate_limit == 0 ? nullptr : std::make_shared<Throttler>(settings_.cache_set_rate_limit))
+    , set_throughput_throttler(settings_.cache_set_throughput_limit == 0 ? nullptr : std::make_shared<Throttler>(settings_.cache_set_throughput_limit))
+    , ttl_minutes(ttl_minutes_)
+{
+    if (settings.cache_load_dispatcher_drill_down_level < -1)
+    {
+        throw Exception(fmt::format("Load dispatcher's drill down level {} invalid, "
+            "must be positive or -1", settings.cache_load_dispatcher_drill_down_level),
+            ErrorCodes::BAD_ARGUMENTS);
+    }
+
+    auto & thread_pool = IDiskCache::getThreadPool();
+    thread_pool.scheduleOrThrowOnError([this] { load(); });
+}
+
+DiskCacheTTL::KeyType DiskCacheTTL::hash(const String & seg_key)
+{
+    size_t stream_name_pos = seg_key.find_last_of('/');
+    if (stream_name_pos == std::string::npos)
+        throw Exception("Invalid seg key: " + seg_key, ErrorCodes::LOGICAL_ERROR);
+
+    stream_name_pos += 1;
+
+    auto low = sipHash64(seg_key.data() + stream_name_pos, seg_key.size() - stream_name_pos);
+    auto high = sipHash64(seg_key.data(), stream_name_pos - 1);
+
+    return {high, low};
+}
+
+String DiskCacheTTL::hexKey(const KeyType & key)
+{
+    std::string res(HEX_KEY_LEN, '\0');
+    writeHexUIntLowercase(key, res.data());
+    return res;
+}
+
+std::optional<DiskCacheTTL::KeyType> DiskCacheTTL::unhexKey(const String & hex_key)
+{
+    if (!isHexKey(hex_key))
+        return {};
+
+    auto low = unhex16(hex_key.data());
+    auto high = unhex16(hex_key.data() + HEX_KEY_LEN / 2);
+
+    return UInt128{high, low};
+}
+
+fs::path DiskCacheTTL::getPath(const DiskCacheTTL::KeyType & hash_key, const String & path, const String & seg_name, const String & prefix)
+{
+    String hex_key = hexKey(hash_key);
+    std::string_view view(hex_key);
+    std::string_view hex_key_low = view.substr(0, HEX_KEY_LEN / 2);
+    std::string_view hex_key_high = view.substr(HEX_KEY_LEN / 2, HEX_KEY_LEN);
+    if (!prefix.empty())
+        return fs::path(path) / prefix / hex_key_high.substr(0, 3) / hex_key_high / hex_key_low;
+
+    return fs::path(path) / (endsWith(seg_name, DATA_FILE_EXTENSION) ? DATA_DISK_CACHE_DIR_PREFIX : META_DISK_CACHE_DIR_PREFIX)
+        / hex_key_high.substr(0, 3) / hex_key_high / hex_key_low;
+}
+
+time_t DiskCacheTTL::parsePartitionTimestamp(const String & part_name)
+{
+    try
+    {
+        // Extract part name from segment path (format: uuid/part_name/segment_name)
+        size_t first_slash = part_name.find('/');
+        if (first_slash == std::string::npos)
+            return 0;
+
+        size_t second_slash = part_name.find('/', first_slash + 1);
+        String actual_part_name;
+        if (second_slash != std::string::npos)
+            actual_part_name = part_name.substr(first_slash + 1, second_slash - first_slash - 1);
+        else
+            actual_part_name = part_name.substr(first_slash + 1);
+
+        // Parse partition_id from part name
+        MergeTreePartInfo info;
+        if (!MergeTreePartInfo::tryParsePartName(actual_part_name, &info, MergeTreeDataFormatVersion(1)))
+            return 0;
+
+        const String & partition_id = info.partition_id;
+        if (partition_id.empty())
+            return 0;
+
+        // Try to parse as date/datetime
+        // Common formats: YYYYMMDD, YYYYMMDDHH, YYYYMM
+        if (partition_id.size() >= 8 && std::all_of(partition_id.begin(), partition_id.end(), ::isdigit))
+        {
+            // Parse as YYYYMMDD
+            int year = std::stoi(partition_id.substr(0, 4));
+            int month = std::stoi(partition_id.substr(4, 2));
+            int day = partition_id.size() >= 8 ? std::stoi(partition_id.substr(6, 2)) : 1;
+
+            struct tm tm_info = {};
+            tm_info.tm_year = year - 1900;
+            tm_info.tm_mon = month - 1;
+            tm_info.tm_mday = day;
+            tm_info.tm_hour = 0;
+            tm_info.tm_min = 0;
+            tm_info.tm_sec = 0;
+            tm_info.tm_isdst = -1;
+
+            return mktime(&tm_info);
+        }
+
+        return 0;
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+bool DiskCacheTTL::shouldCache(time_t part_ts) const
+{
+    if (part_ts == 0 || ttl_minutes == 0)
+        return true; // No timestamp or TTL disabled, cache everything
+
+    time_t now = time(nullptr);
+    time_t age_seconds = now - part_ts;
+    time_t ttl_seconds = ttl_minutes * 60;
+
+    return age_seconds <= ttl_seconds;
+}
+
+void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload)
+{
+    if (is_droping)
+    {
+        LOG_WARNING(log, fmt::format("skip write disk cache for droping disk cache is running"));
+        return;
+    }
+
+    // Check TTL before caching
+    time_t part_ts = parsePartitionTimestamp(seg_name);
+    if (!shouldCache(part_ts))
+    {
+        LOG_TRACE(log, "Skipping cache for expired partition: {}", seg_name);
+        return;
+    }
+
+    if (set_rate_throttler)
+    {
+        set_rate_throttler->add(1);
+    }
+
+    ProfileEvents::increment(ProfileEvents::DiskCacheSetTotalOps, 1, Metrics::MetricType::Rate, {{"type", (is_preload ? "preload": "query")}});
+
+    auto key = hash(seg_name);
+
+    // Check if already exists
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        if (cache_map.find(key) != cache_map.end())
+            return;
+
+        // Reserve slot
+        cache_map[key] = std::make_shared<DiskCacheTTLMeta>(
+            DiskCacheTTLMeta::State::Caching, nullptr, 0, time(nullptr), part_ts
+        );
+    }
+
+    ReservationPtr reserved_space = nullptr;
+    try
+    {
+        reserved_space = volume->reserve(weight_hint);
+        if (reserved_space == nullptr)
+        {
+            throw Exception("Failed to reserve space", ErrorCodes::BAD_ARGUMENTS);
+        }
+
+        size_t weight = writeSegment(seg_name, value, reserved_space);
+        ProfileEvents::increment(ProfileEvents::DiskCacheSetTotalBytes, weight, Metrics::MetricType::Rate, {{"type", (is_preload ? "preload": "query")}});
+
+        // Update to Cached state
+        {
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            cache_map[key] = std::make_shared<DiskCacheTTLMeta>(
+                DiskCacheTTLMeta::State::Cached, reserved_space->getDisk(), weight, time(nullptr), part_ts
+            );
+            total_entries++;
+            total_size += weight;
+        }
+    }
+    catch(const Exception & e)
+    {
+        String local_disk_path = reserved_space == nullptr ? "" : reserved_space->getDisk()->getPath();
+        tryLogCurrentException(log, fmt::format("Failed to write key {} "
+            "to local, disk path: {}, weight: {}, fail: {}", seg_name, local_disk_path, weight_hint, e.message()));
+
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        cache_map.erase(key);
+    }
+}
+
+std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
+{
+    ProfileEvents::increment(ProfileEvents::DiskCacheGetTotalOps);
+    Stopwatch watch;
+    SCOPE_EXIT({ProfileEvents::increment(ProfileEvents::DiskCacheGetMetaMicroSeconds,
+        watch.elapsedMicroseconds());});
+
+    // Periodic eviction check (every hour)
+    time_t now = time(nullptr);
+    time_t last_check = last_eviction_check.load();
+    if (now - last_check > 3600)
+    {
+        if (last_eviction_check.compare_exchange_strong(last_check, now))
+        {
+            // Trigger eviction asynchronously
+            auto & thread_pool = IDiskCache::getEvictPool();
+            thread_pool.scheduleOrThrow([this] { evictExpired(); });
+        }
+    }
+
+    auto key = hash(seg_name);
+
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = cache_map.find(key);
+    if (it == cache_map.end() || it->second->state != DiskCacheTTLMeta::State::Cached)
+        return {};
+
+    if (unlikely(it->second->disk == nullptr))
+    {
+        cache_map.erase(it);
+        return {};
+    }
+
+    // Check TTL on read
+    if (!shouldCache(it->second->part_timestamp))
+    {
+        // Expired, return miss
+        return {};
+    }
+
+    return {it->second->disk, getRelativePath(key, seg_name)};
+}
+
+size_t DiskCacheTTL::writeSegment(const String& seg_key, ReadBuffer& buffer, ReservationPtr& reservation)
+{
+    DiskPtr disk = reservation->getDisk();
+    String cache_rel_path = getRelativePath(hash(seg_key), seg_key);
+    String temp_cache_rel_path = cache_rel_path + ".temp";
+
+    try
+    {
+        disk->createDirectories(fs::path(cache_rel_path).parent_path());
+
+        size_t written_size = 0;
+        {
+            WriteBufferFromFile to(
+                fs::path(disk->getPath()) / temp_cache_rel_path, DBMS_DEFAULT_BUFFER_SIZE, -1, 0666, nullptr, 0, set_throughput_throttler);
+            copyData(buffer, to, reservation.get());
+            to.finalize();
+            written_size = to.count();
+        }
+
+        disk->replaceFile(temp_cache_rel_path, cache_rel_path);
+
+        if (disk->getFileSize(cache_rel_path) != written_size)
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "cached {} file size {} doesn't match written size {}",
+                cache_rel_path,
+                disk->getFileSize(cache_rel_path),
+                written_size);
+
+        return written_size;
+    }
+    catch (...)
+    {
+        disk->removeFileIfExists(temp_cache_rel_path);
+        disk->removeFileIfExists(cache_rel_path);
+        throw;
+    }
+}
+
+void DiskCacheTTL::evictExpired()
+{
+    std::vector<std::pair<KeyType, std::shared_ptr<DiskCacheTTLMeta>>> to_evict;
+
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        for (auto it = cache_map.begin(); it != cache_map.end();)
+        {
+            if (it->second->state == DiskCacheTTLMeta::State::Cached && !shouldCache(it->second->part_timestamp))
+            {
+                to_evict.push_back(*it);
+                total_size -= it->second->size;
+                it = cache_map.erase(it);
+                total_entries--;
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
+    // Delete files
+    for (const auto & [key, meta] : to_evict)
+    {
+        try
+        {
+            String hex = hexKey(key);
+            String prefix = type == IDiskCache::DataType::META ? META_DISK_CACHE_DIR_PREFIX : DATA_DISK_CACHE_DIR_PREFIX;
+            auto rel_path = getPath(key, latest_disk_cache_dir, "", prefix);
+
+            if (meta->disk && meta->disk->exists(rel_path))
+            {
+                meta->disk->removeFile(rel_path);
+                LOG_TRACE(log, "Evicted expired segment: {}", rel_path.string());
+            }
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log, "Failed to evict expired segment");
+        }
+    }
+
+    if (!to_evict.empty())
+    {
+        LOG_INFO(log, "Evicted {} expired segments, freed {} bytes", to_evict.size(), to_evict.size());
+    }
+}
+
+void DiskCacheTTL::load()
+{
+    LOG_INFO(log, "Loading TTL disk cache from disk...");
+
+    for (const auto & disk : volume->getDisks())
+    {
+        DiskCacheLoader loader(*this, disk, settings.cache_loader_per_disk,
+            settings.cache_load_dispatcher_drill_down_level,
+            settings.cache_load_dispatcher_drill_down_level);
+
+        for (const auto & dir_path : previous_disk_cache_dirs)
+        {
+            if (disk->exists(dir_path))
+                loader.exec(dir_path);
+        }
+
+        if (disk->exists(latest_disk_cache_dir))
+            loader.exec(latest_disk_cache_dir);
+
+        LOG_INFO(log, "Loaded {} segments from disk {}", loader.total_loaded, disk->getName());
+    }
+
+    LOG_INFO(log, "TTL disk cache load complete. Total: {} segments, {} bytes", total_entries.load(), total_size.load());
+}
+
+size_t DiskCacheTTL::drop(const String & part_name)
+{
+    std::lock_guard<std::mutex> lock(cache_mutex);
+
+    size_t dropped = 0;
+    for (auto it = cache_map.begin(); it != cache_map.end();)
+    {
+        // Simple prefix match for part name
+        // TODO: Implement proper matching
+        ++it;
+    }
+
+    return dropped;
+}
+
+// DiskIterator implementations
+DiskCacheTTL::DiskIterator::DiskIterator(
+    const String & name_, DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk_, int min_depth_parallel_, int max_depth_parallel_)
+    : name(name_), disk_cache(cache_), disk(disk_), worker_per_disk(worker_per_disk_),
+      min_depth_parallel(min_depth_parallel_), max_depth_parallel(max_depth_parallel_)
+{
+    log = &Poco::Logger::get(name);
+
+    if (worker_per_disk > 1)
+        pool = std::make_unique<ThreadPool>(worker_per_disk);
+}
+
+void DiskCacheTTL::DiskIterator::exec(std::filesystem::path entry_path)
+{
+    iterateDirectory(entry_path, 0);
+
+    if (pool)
+        pool->wait();
+}
+
+void DiskCacheTTL::DiskIterator::iterateDirectory(std::filesystem::path rel_path, size_t depth)
+{
+    if (!disk->exists(rel_path))
+        return;
+
+    for (auto it = disk->iterateDirectory(rel_path); it->isValid(); it->next())
+    {
+        auto entry_path = rel_path / it->name();
+
+        if (disk->isDirectory(entry_path))
+        {
+            iterateDirectory(entry_path, depth + 1);
+        }
+        else if (disk->isFile(entry_path))
+        {
+            iterateFile(entry_path, disk->getFileSize(entry_path));
+        }
+    }
+}
+
+// DiskCacheLoader
+DiskCacheTTL::DiskCacheLoader::DiskCacheLoader(
+    DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk, int min_depth_parallel, int max_depth_parallel)
+    : DiskIterator("DiskCacheTTLLoader", cache_, disk_, worker_per_disk, min_depth_parallel, max_depth_parallel)
+{
+}
+
+DiskCacheTTL::DiskCacheLoader::~DiskCacheLoader()
+{
+}
+
+void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path, size_t file_size)
+{
+    String filename = file_path.filename();
+
+    // Skip temp files
+    if (endsWith(filename, DISK_CACHE_TEMP_FILE_SUFFIX))
+    {
+        disk->removeFileIfExists(file_path);
+        return;
+    }
+
+    auto key = DiskCacheTTL::unhexKey(filename);
+    if (!key.has_value())
+    {
+        LOG_WARNING(log, "Invalid cache file: {}", file_path.string());
+        return;
+    }
+
+    // TODO: Parse part timestamp from path
+    time_t part_ts = 0;
+
+    std::lock_guard<std::mutex> lock(disk_cache.cache_mutex);
+    disk_cache.cache_map[*key] = std::make_shared<DiskCacheTTLMeta>(
+        DiskCacheTTLMeta::State::Cached, disk, file_size, time(nullptr), part_ts
+    );
+    disk_cache.total_entries++;
+    disk_cache.total_size += file_size;
+    total_loaded++;
+}
+
+// DiskCacheMigrator (stub)
+DiskCacheTTL::DiskCacheMigrator::DiskCacheMigrator(
+    DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk, int min_depth_parallel, int max_depth_parallel)
+    : DiskIterator("DiskCacheTTLMigrator", cache_, disk_, worker_per_disk, min_depth_parallel, max_depth_parallel)
+{
+}
+
+DiskCacheTTL::DiskCacheMigrator::~DiskCacheMigrator()
+{
+}
+
+void DiskCacheTTL::DiskCacheMigrator::iterateFile(std::filesystem::path, size_t)
+{
+}
+
+// DiskCacheDeleter (stub)
+DiskCacheTTL::DiskCacheDeleter::DiskCacheDeleter(
+    DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk, int min_depth_parallel, int max_depth_parallel)
+    : DiskIterator("DiskCacheTTLDeleter", cache_, disk_, worker_per_disk, min_depth_parallel, max_depth_parallel)
+{
+}
+
+DiskCacheTTL::DiskCacheDeleter::~DiskCacheDeleter()
+{
+}
+
+void DiskCacheTTL::DiskCacheDeleter::exec(std::filesystem::path entry_path)
+{
+    disk->removeRecursive(entry_path);
+}
+
+void DiskCacheTTL::DiskCacheDeleter::iterateFile(std::filesystem::path, size_t)
+{
+}
+
+}

@@ -66,6 +66,14 @@ public:
         return it->second;
     }
 
+    /// Create per-table disk cache instance from table settings
+    IDiskCachePtr createDiskCacheFromTableSettings(
+        const String & table_name,
+        const VolumePtr & volume,
+        const ThrottlerPtr & throttler,
+        const String & mode,
+        UInt64 ttl_minutes);
+
 private:
     void addNewCache(Context & context, const std::string & cache_name, bool create_default);
     std::unordered_map<DiskCacheType, IDiskCachePtr> caches;
