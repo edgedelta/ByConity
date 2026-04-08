@@ -29,6 +29,10 @@ extern const int LOGICAL_ERROR;
 namespace DB
 {
 class Context;
+class IVolume;
+class Throttler;
+using VolumePtr = std::shared_ptr<IVolume>;
+using ThrottlerPtr = std::shared_ptr<Throttler>;
 
 enum class DiskCacheType {
     File, // for generic file disk cache
