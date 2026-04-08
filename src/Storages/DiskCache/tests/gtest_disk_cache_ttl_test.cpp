@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <thread>
 #include <atomic>
+#include <fmt/core.h>
 #include <gtest/gtest.h>
 #include <Disks/DiskLocal.h>
 #include <Disks/SingleDiskVolume.h>
@@ -325,46 +326,46 @@ TEST_F(DiskCacheTTLTest, EvictExpired)
     UInt64 ttl_minutes = 60; // 1 hour TTL
     DiskCacheTTL cache("test_evict", "test-uuid-0000-0000-0000-000000000005", volume, nullptr, settings, strategy, ttl_minutes);
 
-    // Manually add entries to cache with different ages
     time_t now = time(nullptr);
 
-    // Add recent entry (should survive eviction)
-    String recent_key = "recent_part";
-    time_t recent_ts = now - (30 * 60); // 30 minutes ago
-    {
-        std::unique_lock lock(cache.cache_mutex);
-        auto meta = std::make_shared<DiskCacheTTL::DiskCacheTTLMeta>();
-        meta->partition_timestamp = recent_ts;
-        meta->size = 1024;
-        cache.cache_map[recent_key] = meta;
-        cache.cache_stats.updateCacheSize(1024);
-    }
+    // Create recent partition (30 minutes old - should survive)
+    struct tm tm_recent;
+    time_t recent_time = now - (30 * 60);
+    gmtime_r(&recent_time, &tm_recent);
+    String recent_part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
+        tm_recent.tm_year + 1900, tm_recent.tm_mon + 1, tm_recent.tm_mday);
+    String recent_seg = fmt::format("test-uuid-0000-0000-0000-000000000005/{}/column.bin/offset_0", recent_part);
 
-    // Add old entry (should be evicted)
-    String old_key = "old_part";
-    time_t old_ts = now - (2 * 60 * 60); // 2 hours ago
-    {
-        std::unique_lock lock(cache.cache_mutex);
-        auto meta = std::make_shared<DiskCacheTTL::DiskCacheTTLMeta>();
-        meta->partition_timestamp = old_ts;
-        meta->size = 1024;
-        cache.cache_map[old_key] = meta;
-        cache.cache_stats.updateCacheSize(1024);
-    }
+    // Create old partition (2 hours old - should be evicted)
+    struct tm tm_old;
+    time_t old_time = now - (2 * 60 * 60);
+    gmtime_r(&old_time, &tm_old);
+    String old_part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
+        tm_old.tm_year + 1900, tm_old.tm_mon + 1, tm_old.tm_mday);
+    String old_seg = fmt::format("test-uuid-0000-0000-0000-000000000005/{}/column.bin/offset_1", old_part);
 
-    // Verify both entries exist
-    ASSERT_EQ(cache.cache_map.size(), 2);
+    // Add both segments
+    String data = "test data";
+    ReadBufferFromString buf1(data);
+    ReadBufferFromString buf2(data);
+    cache.set(recent_seg, buf1, data.size(), false);
+    cache.set(old_seg, buf2, data.size(), false);
 
-    // Run eviction
+    // Verify both exist initially
+    size_t initial_count = cache.getKeyCount();
+    ASSERT_EQ(initial_count, 2);
+
+    // Trigger eviction
     cache.evictExpired();
 
-    // Verify old entry was evicted, recent remains
-    {
-        std::unique_lock lock(cache.cache_mutex);
-        ASSERT_EQ(cache.cache_map.count(recent_key), 1);
-        ASSERT_EQ(cache.cache_map.count(old_key), 0);
-        ASSERT_EQ(cache.cache_map.size(), 1);
-    }
+    // Old partition should be evicted, recent should remain
+    ASSERT_EQ(cache.getKeyCount(), 1);
+
+    auto [disk1, path1] = cache.get(recent_seg);
+    auto [disk2, path2] = cache.get(old_seg);
+
+    ASSERT_FALSE(path1.empty());  // Recent still cached
+    ASSERT_TRUE(path2.empty());   // Old evicted
 }
 
 // Test periodic eviction check (hourly)
