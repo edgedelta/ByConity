@@ -215,7 +215,7 @@ TEST_F(DiskCacheTTLTest, TTLDisabled)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 0; // TTL disabled
-    DiskCacheTTL cache("test_no_ttl", volume, nullptr, settings, strategy, ttl_minutes);
+    DiskCacheTTL cache("test_no_ttl", "test-uuid-0000-0000-0000-000000000002", volume, nullptr, settings, strategy, ttl_minutes);
 
     time_t now = time(nullptr);
 
@@ -236,7 +236,7 @@ TEST_F(DiskCacheTTLTest, RejectNonTimePartitions)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache("test_nontime", volume, nullptr, settings, strategy, ttl_minutes);
+    DiskCacheTTL cache("test_nontime", "test-uuid-0000-0000-0000-000000000003", volume, nullptr, settings, strategy, ttl_minutes);
 
     // String partition (non-time)
     String nontime_part = "string_partition_1_100_2";
@@ -273,7 +273,7 @@ TEST_F(DiskCacheTTLTest, BasicOperations)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60; // 1 hour TTL
-    DiskCacheTTL cache("test_basic", volume, nullptr, settings, strategy, ttl_minutes);
+    DiskCacheTTL cache("test_basic", "test-uuid-0000-0000-0000-000000000004", volume, nullptr, settings, strategy, ttl_minutes);
 
     time_t now = time(nullptr);
 
@@ -323,7 +323,7 @@ TEST_F(DiskCacheTTLTest, EvictExpired)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60; // 1 hour TTL
-    DiskCacheTTL cache("test_evict", volume, nullptr, settings, strategy, ttl_minutes);
+    DiskCacheTTL cache("test_evict", "test-uuid-0000-0000-0000-000000000005", volume, nullptr, settings, strategy, ttl_minutes);
 
     // Manually add entries to cache with different ages
     time_t now = time(nullptr);
@@ -376,7 +376,7 @@ TEST_F(DiskCacheTTLTest, PeriodicEvictionCheck)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache("test_periodic", volume, nullptr, settings, strategy, ttl_minutes);
+    DiskCacheTTL cache("test_periodic", "test-uuid-0000-0000-0000-000000000006", volume, nullptr, settings, strategy, ttl_minutes);
 
     time_t initial_check = cache.last_eviction_check.load();
     ASSERT_EQ(initial_check, 0);
@@ -444,7 +444,7 @@ TEST_F(DiskCacheTTLTest, ConcurrentAccess)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache("test_concurrent", volume, nullptr, settings, strategy, ttl_minutes);
+    DiskCacheTTL cache("test_concurrent", "test-uuid-0000-0000-0000-000000000007", volume, nullptr, settings, strategy, ttl_minutes);
 
     time_t now = time(nullptr);
     struct tm tm_now;
@@ -488,7 +488,7 @@ TEST_F(DiskCacheTTLTest, DropPart)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache("test_drop", volume, nullptr, settings, strategy, ttl_minutes);
+    DiskCacheTTL cache("test_drop", "test-uuid-0000-0000-0000-000000000008", volume, nullptr, settings, strategy, ttl_minutes);
 
     time_t now = time(nullptr);
     struct tm tm_now;
@@ -539,7 +539,7 @@ TEST_F(DiskCacheTTLTest, CacheStats)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache("test_stats", volume, nullptr, settings, strategy, ttl_minutes);
+    DiskCacheTTL cache("test_stats", "test-uuid-0000-0000-0000-000000000009", volume, nullptr, settings, strategy, ttl_minutes);
 
     ASSERT_EQ(cache.getKeyCount(), 0);
     ASSERT_EQ(cache.getCachedSize(), 0);
@@ -572,7 +572,7 @@ TEST_F(DiskCacheTTLTest, MultiDiskVolume)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache("test_multidisk", volume, nullptr, settings, strategy, ttl_minutes);
+    DiskCacheTTL cache("test_multidisk", "test-uuid-0000-0000-0000-00000000000a", volume, nullptr, settings, strategy, ttl_minutes);
 
     time_t now = time(nullptr);
     struct tm tm_now;

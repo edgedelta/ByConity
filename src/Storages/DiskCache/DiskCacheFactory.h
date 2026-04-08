@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <Core/UUID.h>
 #include <Storages/DiskCache/DiskCache_fwd.h>
 #include <common/singleton.h>
 #include <common/types.h>

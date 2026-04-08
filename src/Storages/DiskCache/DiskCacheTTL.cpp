@@ -662,21 +662,56 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
         return;
     }
 
-    auto key = DiskCacheTTL::unhexKey(filename);
-    if (!key.has_value())
+    // Validate hash_low filename
+    auto key_low = DiskCacheTTL::unhexKey(filename);
+    if (!key_low.has_value())
     {
-        LOG_WARNING(log, "Invalid cache file: {}", file_path.string());
+        LOG_WARNING(log, "Invalid cache file (hash_low): {}", file_path.string());
         return;
     }
 
-    // Extract part_name from path structure: data/20240315/20240315_1_100_2/segment_hash.bin
-    // parent_path = data/20240315/20240315_1_100_2
-    // part_name = 20240315_1_100_2
-    String part_name = file_path.parent_path().filename();
-    time_t part_ts = DiskCacheTTL::parsePartitionTimestamp(part_name);
+    // New structure: data/uuid/partition/3char/hash_high/hash_low
+    // Extract partition from path hierarchy
+    auto hash_high_dir = file_path.parent_path().filename().string();  // hash_high
+    auto partition_dir = file_path.parent_path().parent_path().parent_path().filename().string();  // partition_id
+
+    // Validate hash_high
+    auto key_high = DiskCacheTTL::unhexKey(hash_high_dir);
+    if (!key_high.has_value())
+    {
+        LOG_WARNING(log, "Invalid cache directory (hash_high): {}", file_path.string());
+        return;
+    }
+
+    // Build full key
+    UInt128 key = {key_high.value(), key_low.value()};
+
+    // Parse timestamp from partition_id (e.g., "20240315")
+    time_t part_ts = 0;
+    if (partition_dir.size() >= 8 && std::all_of(partition_dir.begin(), partition_dir.end(), ::isdigit))
+    {
+        try
+        {
+            int year = std::stoi(partition_dir.substr(0, 4));
+            int month = std::stoi(partition_dir.substr(4, 2));
+            int day = std::stoi(partition_dir.substr(6, 2));
+
+            struct tm tm_info = {};
+            tm_info.tm_year = year - 1900;
+            tm_info.tm_mon = month - 1;
+            tm_info.tm_mday = day;
+            tm_info.tm_isdst = -1;
+
+            part_ts = mktime(&tm_info);
+        }
+        catch (...)
+        {
+            LOG_WARNING(log, "Failed to parse partition timestamp from: {}", partition_dir);
+        }
+    }
 
     std::lock_guard<std::mutex> lock(disk_cache.cache_mutex);
-    disk_cache.cache_map[*key] = std::make_shared<DiskCacheTTLMeta>(
+    disk_cache.cache_map[key] = std::make_shared<DiskCacheTTLMeta>(
         DiskCacheTTLMeta::State::Cached, disk, file_size, time(nullptr), part_ts
     );
     disk_cache.total_entries++;
