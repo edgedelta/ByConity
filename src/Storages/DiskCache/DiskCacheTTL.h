@@ -85,7 +85,7 @@ public:
     size_t getCachedSize() const override { return total_size.load(); }
     std::filesystem::path getRelativePath(const KeyType & key, const String & seg_name, const String & prefix = {}) { return getPath(key, latest_disk_cache_dir, seg_name, prefix);}
 
-    static std::filesystem::path getPath(const KeyType & key, const String & path, const String & seg_name, const String & prefix);
+    std::filesystem::path getPath(const KeyType & key, const String & path, const String & seg_name, const String & prefix) const;
 
     static KeyType hash(const String & seg_name);
     static String hexKey(const KeyType & key);

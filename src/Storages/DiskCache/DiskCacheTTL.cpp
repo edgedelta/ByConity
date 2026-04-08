@@ -211,7 +211,7 @@ std::optional<DiskCacheTTL::KeyType> DiskCacheTTL::unhexKey(const String & hex_k
     return UInt128{high, low};
 }
 
-fs::path DiskCacheTTL::getPath(const DiskCacheTTL::KeyType & hash_key, const String & path, const String & seg_name, const String & prefix)
+fs::path DiskCacheTTL::getPath(const DiskCacheTTL::KeyType & hash_key, const String & path, const String & seg_name, const String & prefix) const
 {
     // New structure: uuid/partition/3char/hash_part/hash_low
     // Example: a1b2c3d4.../20240315/abc/abc123def456/567890abcd
