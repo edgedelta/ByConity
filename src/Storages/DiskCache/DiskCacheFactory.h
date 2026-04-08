@@ -17,6 +17,7 @@
 
 #include <Storages/DiskCache/DiskCache_fwd.h>
 #include <common/singleton.h>
+#include <common/types.h>
 #include <unordered_map>
 #include <Poco/Exception.h>
 
