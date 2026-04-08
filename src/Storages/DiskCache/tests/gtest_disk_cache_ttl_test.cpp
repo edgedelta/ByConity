@@ -14,14 +14,18 @@
  */
 
 #include <filesystem>
+#include <thread>
+#include <atomic>
 #include <gtest/gtest.h>
 #include <Disks/DiskLocal.h>
 #include <Disks/SingleDiskVolume.h>
+#include <Disks/VolumeJBOD.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
 #include <Storages/DiskCache/DiskCacheSettings.h>
 #include <Storages/DiskCache/DiskCacheSimpleStrategy.h>
 #include <Common/tests/gtest_global_context.h>
 #include <Common/tests/gtest_utils.h>
+#include <IO/ReadBufferFromString.h>
 #include <Poco/ConsoleChannel.h>
 #include <Poco/FormattingChannel.h>
 #include <Poco/Logger.h>
@@ -71,6 +75,16 @@ public:
         fs::create_directory("tmp/ttl_disk/");
         auto disk = std::make_shared<DiskLocal>("ttl_disk", "tmp/ttl_disk/", 0);
         return std::make_shared<SingleDiskVolume>("ttl_volume", std::move(disk), 0);
+    }
+
+    VolumePtr createDualDiskVolume()
+    {
+        fs::create_directory("tmp/ttl_disk1/");
+        fs::create_directory("tmp/ttl_disk2/");
+        Disks disks;
+        disks.emplace_back(std::make_shared<DiskLocal>("ttl_disk1", "tmp/ttl_disk1/", DiskStats{}));
+        disks.emplace_back(std::make_shared<DiskLocal>("ttl_disk2", "tmp/ttl_disk2/", DiskStats{}));
+        return std::make_shared<VolumeJBOD>("ttl_dual_volume", disks, disks.front()->getName(), 0, false);
     }
 
     static std::shared_ptr<Context> ctx;
@@ -152,7 +166,7 @@ TEST_F(DiskCacheTTLTest, ShouldCacheLogic)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60; // 1 hour TTL
-    DiskCacheTTL cache("test_ttl", volume, nullptr, settings, strategy, ttl_minutes);
+    DiskCacheTTL cache("test_ttl", "test-uuid-0000-0000-0000-000000000001", volume, nullptr, settings, strategy, ttl_minutes);
 
     time_t now = time(nullptr);
 
@@ -180,9 +194,9 @@ TEST_F(DiskCacheTTLTest, ShouldCacheLogic)
         ASSERT_FALSE(cache.shouldCache(outside_ts));
     }
 
-    // Zero part_ts (non-time partition) - always cache
+    // Zero part_ts (non-time partition) - never cache
     {
-        ASSERT_TRUE(cache.shouldCache(0));
+        ASSERT_FALSE(cache.shouldCache(0));
     }
 
     // Future timestamp - should cache
@@ -205,11 +219,49 @@ TEST_F(DiskCacheTTLTest, TTLDisabled)
 
     time_t now = time(nullptr);
 
-    // All partitions should be cached when TTL is disabled
+    // When TTL is disabled, all time-based partitions should be cached
     ASSERT_TRUE(cache.shouldCache(now));
     ASSERT_TRUE(cache.shouldCache(now - (365 * 24 * 60 * 60))); // 1 year old
-    ASSERT_TRUE(cache.shouldCache(0));
-    ASSERT_TRUE(cache.shouldCache(now + (30 * 60)));
+    ASSERT_TRUE(cache.shouldCache(now + (30 * 60))); // future
+    // Non-time partitions still rejected even with TTL disabled
+    ASSERT_FALSE(cache.shouldCache(0));
+}
+
+// Test non-time partitions are rejected
+TEST_F(DiskCacheTTLTest, RejectNonTimePartitions)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.lru_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    UInt64 ttl_minutes = 60;
+    DiskCacheTTL cache("test_nontime", volume, nullptr, settings, strategy, ttl_minutes);
+
+    // String partition (non-time)
+    String nontime_part = "string_partition_1_100_2";
+    String nontime_seg = fmt::format("test_uuid/{}/column.bin/offset_0", nontime_part);
+
+    // Numeric but invalid date partition
+    String invalid_part = "999_1_100_2";
+    String invalid_seg = fmt::format("test_uuid/{}/column.bin/offset_1", invalid_part);
+
+    // Try to cache non-time partitions - should be rejected
+    {
+        String data = "test data";
+        ReadBufferFromString buf1(data);
+        ReadBufferFromString buf2(data);
+        cache.set(nontime_seg, buf1, data.size(), false);
+        cache.set(invalid_seg, buf2, data.size(), false);
+
+        // Should not be cached
+        auto [disk1, path1] = cache.get(nontime_seg);
+        auto [disk2, path2] = cache.get(invalid_seg);
+        ASSERT_TRUE(path1.empty());
+        ASSERT_TRUE(path2.empty());
+    }
+
+    ASSERT_EQ(cache.getKeyCount(), 0);
 }
 
 // Test basic set/get operations with TTL filtering
@@ -225,51 +277,40 @@ TEST_F(DiskCacheTTLTest, BasicOperations)
 
     time_t now = time(nullptr);
 
-    // Create recent partition name (should be cached)
+    // Create recent segment name (should be cached)
     struct tm tm_recent;
     gmtime_r(&now, &tm_recent);
     String recent_part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
         tm_recent.tm_year + 1900, tm_recent.tm_mon + 1, tm_recent.tm_mday);
+    String recent_seg = fmt::format("test_uuid/{}/column.bin/offset_123", recent_part);
 
-    // Create old partition name (should not be cached)
+    // Create old segment name (should not be cached)
     time_t old_time = now - (2 * 60 * 60); // 2 hours ago
     struct tm tm_old;
     gmtime_r(&old_time, &tm_old);
     String old_part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
         tm_old.tm_year + 1900, tm_old.tm_mon + 1, tm_old.tm_mday);
+    String old_seg = fmt::format("test_uuid/{}/column.bin/offset_456", old_part);
 
-    // Try to set recent part - should succeed
+    // Try to set recent segment - should succeed
     {
-        IDiskCacheSegmentsVector segments;
-        auto seg = std::make_shared<RemoteDiskCacheSegment>(
-            recent_part, "offset_123", 0, 1024, IDiskCache::DataType::DATA);
-        segments.push_back(seg);
+        String test_data = "test data content";
+        ReadBufferFromString buffer(test_data);
+        cache.set(recent_seg, buffer, test_data.size(), false);
 
-        size_t cached = cache.cacheSegmentsToLocalDisk(segments);
-        ASSERT_GT(cached, 0);
-    }
-
-    // Try to set old part - should be rejected
-    {
-        IDiskCacheSegmentsVector segments;
-        auto seg = std::make_shared<RemoteDiskCacheSegment>(
-            old_part, "offset_456", 0, 1024, IDiskCache::DataType::DATA);
-        segments.push_back(seg);
-
-        size_t cached = cache.cacheSegmentsToLocalDisk(segments);
-        ASSERT_EQ(cached, 0);
-    }
-
-    // Recent part should be in cache
-    {
-        auto [disk, path] = cache.get(recent_part);
+        auto [disk, path] = cache.get(recent_seg);
         ASSERT_FALSE(path.empty());
+        ASSERT_TRUE(disk != nullptr);
     }
 
-    // Old part should not be in cache
+    // Try to set old segment - should be rejected (not cached due to TTL)
     {
-        auto [disk, path] = cache.get(old_part);
-        ASSERT_TRUE(path.empty());
+        String test_data = "old data content";
+        ReadBufferFromString buffer(test_data);
+        cache.set(old_seg, buffer, test_data.size(), false);
+
+        auto [disk, path] = cache.get(old_seg);
+        ASSERT_TRUE(path.empty()); // Should not be cached
     }
 }
 
@@ -311,30 +352,18 @@ TEST_F(DiskCacheTTLTest, EvictExpired)
         cache.cache_stats.updateCacheSize(1024);
     }
 
-    // Add non-time partition entry (should survive eviction)
-    String nontime_key = "nontime_part";
-    {
-        std::unique_lock lock(cache.cache_mutex);
-        auto meta = std::make_shared<DiskCacheTTL::DiskCacheTTLMeta>();
-        meta->partition_timestamp = 0;
-        meta->size = 1024;
-        cache.cache_map[nontime_key] = meta;
-        cache.cache_stats.updateCacheSize(1024);
-    }
-
-    // Verify all entries exist
-    ASSERT_EQ(cache.cache_map.size(), 3);
+    // Verify both entries exist
+    ASSERT_EQ(cache.cache_map.size(), 2);
 
     // Run eviction
     cache.evictExpired();
 
-    // Verify old entry was evicted
+    // Verify old entry was evicted, recent remains
     {
         std::unique_lock lock(cache.cache_mutex);
         ASSERT_EQ(cache.cache_map.count(recent_key), 1);
         ASSERT_EQ(cache.cache_map.count(old_key), 0);
-        ASSERT_EQ(cache.cache_map.count(nontime_key), 1);
-        ASSERT_EQ(cache.cache_map.size(), 2);
+        ASSERT_EQ(cache.cache_map.size(), 1);
     }
 }
 
@@ -354,18 +383,16 @@ TEST_F(DiskCacheTTLTest, PeriodicEvictionCheck)
 
     // First set should trigger eviction check
     {
-        IDiskCacheSegmentsVector segments;
         time_t now = time(nullptr);
         struct tm tm_now;
         gmtime_r(&now, &tm_now);
         String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
             tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+        String seg_name = fmt::format("test_uuid/{}/column.bin/offset_1", part);
 
-        auto seg = std::make_shared<RemoteDiskCacheSegment>(
-            part, "offset_1", 0, 1024, IDiskCache::DataType::DATA);
-        segments.push_back(seg);
-
-        cache.cacheSegmentsToLocalDisk(segments);
+        String test_data = "test data 1";
+        ReadBufferFromString buffer(test_data);
+        cache.set(seg_name, buffer, test_data.size(), false);
 
         time_t after_first_check = cache.last_eviction_check.load();
         ASSERT_GT(after_first_check, initial_check);
@@ -374,18 +401,16 @@ TEST_F(DiskCacheTTLTest, PeriodicEvictionCheck)
     // Subsequent sets within same hour should not trigger eviction
     time_t first_check_time = cache.last_eviction_check.load();
     {
-        IDiskCacheSegmentsVector segments;
         time_t now = time(nullptr);
         struct tm tm_now;
         gmtime_r(&now, &tm_now);
         String part = fmt::format("{:04d}{:02d}{:02d}_2_200_2",
             tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+        String seg_name = fmt::format("test_uuid/{}/column.bin/offset_2", part);
 
-        auto seg = std::make_shared<RemoteDiskCacheSegment>(
-            part, "offset_2", 0, 1024, IDiskCache::DataType::DATA);
-        segments.push_back(seg);
-
-        cache.cacheSegmentsToLocalDisk(segments);
+        String test_data = "test data 2";
+        ReadBufferFromString buffer(test_data);
+        cache.set(seg_name, buffer, test_data.size(), false);
 
         time_t after_second_set = cache.last_eviction_check.load();
         ASSERT_EQ(after_second_set, first_check_time);
@@ -394,21 +419,185 @@ TEST_F(DiskCacheTTLTest, PeriodicEvictionCheck)
     // Manually advance time and verify eviction check runs
     cache.last_eviction_check.store(time(nullptr) - 3601); // Over 1 hour ago
     {
-        IDiskCacheSegmentsVector segments;
         time_t now = time(nullptr);
         struct tm tm_now;
         gmtime_r(&now, &tm_now);
         String part = fmt::format("{:04d}{:02d}{:02d}_3_300_2",
             tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+        String seg_name = fmt::format("test_uuid/{}/column.bin/offset_3", part);
 
-        auto seg = std::make_shared<RemoteDiskCacheSegment>(
-            part, "offset_3", 0, 1024, IDiskCache::DataType::DATA);
-        segments.push_back(seg);
-
-        cache.cacheSegmentsToLocalDisk(segments);
+        String test_data = "test data 3";
+        ReadBufferFromString buffer(test_data);
+        cache.set(seg_name, buffer, test_data.size(), false);
 
         time_t after_hour_passed = cache.last_eviction_check.load();
         ASSERT_GT(after_hour_passed, first_check_time);
+    }
+}
+
+// Test concurrent set/get operations
+TEST_F(DiskCacheTTLTest, ConcurrentAccess)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.lru_max_size = 10 * 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    UInt64 ttl_minutes = 60;
+    DiskCacheTTL cache("test_concurrent", volume, nullptr, settings, strategy, ttl_minutes);
+
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
+    String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
+        tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+
+    std::vector<std::thread> threads;
+    std::atomic<int> success_count{0};
+
+    // Multiple threads writing different segments
+    for (int i = 0; i < 10; i++)
+    {
+        threads.emplace_back([&, i]() {
+            String seg_name = fmt::format("test_uuid/{}/col.bin/offset_{}", part, i);
+            String data = fmt::format("data_{}", i);
+            ReadBufferFromString buffer(data);
+            cache.set(seg_name, buffer, data.size(), false);
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+            auto [disk, path] = cache.get(seg_name);
+            if (!path.empty())
+                success_count++;
+        });
+    }
+
+    for (auto& t : threads)
+        t.join();
+
+    ASSERT_EQ(success_count.load(), 10);
+    ASSERT_EQ(cache.getKeyCount(), 10);
+}
+
+// Test drop() method removes part segments
+TEST_F(DiskCacheTTLTest, DropPart)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.lru_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    UInt64 ttl_minutes = 60;
+    DiskCacheTTL cache("test_drop", volume, nullptr, settings, strategy, ttl_minutes);
+
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
+    String part1 = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
+        tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    String part2 = fmt::format("{:04d}{:02d}{:02d}_2_200_2",
+        tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+
+    // Add segments for two parts
+    for (int i = 0; i < 3; i++)
+    {
+        String seg1 = fmt::format("test_uuid/{}/col.bin/offset_{}", part1, i);
+        String seg2 = fmt::format("test_uuid/{}/col.bin/offset_{}", part2, i);
+
+        String data = "test data";
+        ReadBufferFromString buf1(data);
+        ReadBufferFromString buf2(data);
+        cache.set(seg1, buf1, data.size(), false);
+        cache.set(seg2, buf2, data.size(), false);
+    }
+
+    size_t initial_count = cache.getKeyCount();
+    ASSERT_EQ(initial_count, 6);
+
+    // Drop part1
+    size_t dropped = cache.drop(part1);
+    ASSERT_EQ(dropped, 3);
+    ASSERT_EQ(cache.getKeyCount(), 3);
+
+    // Verify part1 gone, part2 remains
+    String seg1_check = fmt::format("test_uuid/{}/col.bin/offset_0", part1);
+    String seg2_check = fmt::format("test_uuid/{}/col.bin/offset_0", part2);
+
+    auto [disk1, path1] = cache.get(seg1_check);
+    auto [disk2, path2] = cache.get(seg2_check);
+
+    ASSERT_TRUE(path1.empty());
+    ASSERT_FALSE(path2.empty());
+}
+
+// Test cache stats
+TEST_F(DiskCacheTTLTest, CacheStats)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.lru_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    UInt64 ttl_minutes = 60;
+    DiskCacheTTL cache("test_stats", volume, nullptr, settings, strategy, ttl_minutes);
+
+    ASSERT_EQ(cache.getKeyCount(), 0);
+    ASSERT_EQ(cache.getCachedSize(), 0);
+
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
+    String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
+        tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+
+    // Add entries
+    for (int i = 0; i < 5; i++)
+    {
+        String seg_name = fmt::format("test_uuid/{}/col.bin/offset_{}", part, i);
+        String data = String(100, 'a');
+        ReadBufferFromString buffer(data);
+        cache.set(seg_name, buffer, data.size(), false);
+    }
+
+    ASSERT_EQ(cache.getKeyCount(), 5);
+    ASSERT_GT(cache.getCachedSize(), 0);
+}
+
+// Test multi-disk volume
+TEST_F(DiskCacheTTLTest, MultiDiskVolume)
+{
+    auto volume = createDualDiskVolume();
+    DiskCacheSettings settings;
+    settings.lru_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    UInt64 ttl_minutes = 60;
+    DiskCacheTTL cache("test_multidisk", volume, nullptr, settings, strategy, ttl_minutes);
+
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
+    String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
+        tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+
+    // Add multiple segments to trigger distribution across disks
+    for (int i = 0; i < 10; i++)
+    {
+        String seg_name = fmt::format("test_uuid/{}/col.bin/offset_{}", part, i);
+        String data = String(1000, 'a');
+        ReadBufferFromString buffer(data);
+        cache.set(seg_name, buffer, data.size(), false);
+    }
+
+    ASSERT_EQ(cache.getKeyCount(), 10);
+
+    // Verify all can be retrieved
+    for (int i = 0; i < 10; i++)
+    {
+        String seg_name = fmt::format("test_uuid/{}/col.bin/offset_{}", part, i);
+        auto [disk, path] = cache.get(seg_name);
+        ASSERT_FALSE(path.empty());
+        ASSERT_TRUE(disk != nullptr);
     }
 }
 

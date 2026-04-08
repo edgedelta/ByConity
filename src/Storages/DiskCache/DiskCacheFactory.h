@@ -71,12 +71,12 @@ public:
         return it->second;
     }
 
-    /// Create per-table disk cache instance from table settings
+    /// Create per-table TTL cache instance from table settings
     IDiskCachePtr createDiskCacheFromTableSettings(
         const String & table_name,
+        const UUID & table_uuid,
         const VolumePtr & volume,
         const ThrottlerPtr & throttler,
-        const String & mode,
         UInt64 ttl_minutes);
 
 private:

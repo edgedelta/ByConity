@@ -15,6 +15,7 @@
 
 #include <Storages/DiskCache/DiskCacheTTL.h>
 #include <Storages/MergeTree/MergeTreePartInfo.h>
+#include <Storages/MergeTree/MergeTreeSuffix.h>
 #include <fmt/core.h>
 #include <sys/stat.h>
 #include <atomic>
@@ -65,11 +66,57 @@ static constexpr auto DISK_CACHE_TEMP_FILE_SUFFIX = ".temp";
 static constexpr auto TMP_SUFFIX_LEN = std::char_traits<char>::length(DISK_CACHE_TEMP_FILE_SUFFIX);
 static constexpr auto META_DISK_CACHE_DIR_PREFIX = "meta";
 static constexpr auto DATA_DISK_CACHE_DIR_PREFIX = "data";
-static constexpr auto DATA_FILE_EXTENSION = ".bin";
 
 namespace
 {
     constexpr size_t HEX_KEY_LEN = sizeof(DiskCacheTTL::KeyType) * 2;
+
+    // Extract UUID from segment/part name (format: uuid/part_name/...)
+    String extractUUID(const String & seg_name)
+    {
+        size_t first_slash = seg_name.find('/');
+        if (first_slash == std::string::npos)
+            return seg_name;
+
+        return seg_name.substr(0, first_slash);
+    }
+
+    // Extract part_name from segment name (format: uuid/part_name/column_segment.ext)
+    String extractPartName(const String & seg_name)
+    {
+        size_t first_slash = seg_name.find('/');
+        if (first_slash == std::string::npos)
+            return seg_name;
+
+        size_t second_slash = seg_name.find('/', first_slash + 1);
+        if (second_slash == std::string::npos)
+            return seg_name.substr(first_slash + 1);  // Return everything after uuid/
+
+        return seg_name.substr(first_slash + 1, second_slash - first_slash - 1);
+    }
+
+    // Extract partition_id from part_name (format: 20240315_1_100_2 → 20240315)
+    String extractPartitionId(const String & part_name)
+    {
+        size_t underscore_pos = part_name.find('_');
+        if (underscore_pos == std::string::npos)
+            return part_name;
+
+        return part_name.substr(0, underscore_pos);
+    }
+
+    // Get relative path for part with new structure
+    // Structure: prefix/uuid/partition/3char/hash_part/
+    // Example: data/a1b2c3.../20240315/abc/abc123def456/
+    fs::path getRelativePathForPart(const String & uuid, const String & part_name, const String & prefix)
+    {
+        String partition_id = extractPartitionId(part_name);
+        auto hash_part = sipHash64(part_name.data(), part_name.size());
+        String hex_hash(HEX_KEY_LEN / 2, '\0');
+        writeHexUIntLowercase(hash_part, hex_hash.data());
+
+        return fs::path(prefix) / uuid / partition_id / hex_hash.substr(0, 3) / hex_hash / "";
+    }
 
     UInt64 unhex16(const char * data)
     {
@@ -99,6 +146,7 @@ namespace
 
 DiskCacheTTL::DiskCacheTTL(
     const String & name_,
+    const String & table_uuid_,
     const VolumePtr & volume_,
     const ThrottlerPtr & throttler_,
     const DiskCacheSettings & settings_,
@@ -108,6 +156,7 @@ DiskCacheTTL::DiskCacheTTL(
     : IDiskCache(name_, volume_, throttler_, settings_, strategy_, false, type_)
     , set_rate_throttler(settings_.cache_set_rate_limit == 0 ? nullptr : std::make_shared<Throttler>(settings_.cache_set_rate_limit))
     , set_throughput_throttler(settings_.cache_set_throughput_limit == 0 ? nullptr : std::make_shared<Throttler>(settings_.cache_set_throughput_limit))
+    , table_uuid(table_uuid_)
     , ttl_minutes(ttl_minutes_)
 {
     if (settings.cache_load_dispatcher_drill_down_level < -1)
@@ -123,14 +172,23 @@ DiskCacheTTL::DiskCacheTTL(
 
 DiskCacheTTL::KeyType DiskCacheTTL::hash(const String & seg_key)
 {
-    size_t stream_name_pos = seg_key.find_last_of('/');
-    if (stream_name_pos == std::string::npos)
+    // seg_key format: "uuid/part_name/column.bin/offset_0"
+    // hash_high = hash(part_name only) for grouping all segments of a part
+    // hash_low = hash(column + segment) for unique segment identification
+
+    size_t first_slash = seg_key.find('/');
+    if (first_slash == std::string::npos)
         throw Exception("Invalid seg key: " + seg_key, ErrorCodes::LOGICAL_ERROR);
 
-    stream_name_pos += 1;
+    size_t second_slash = seg_key.find('/', first_slash + 1);
+    if (second_slash == std::string::npos)
+        throw Exception("Invalid seg key: " + seg_key, ErrorCodes::LOGICAL_ERROR);
 
-    auto low = sipHash64(seg_key.data() + stream_name_pos, seg_key.size() - stream_name_pos);
-    auto high = sipHash64(seg_key.data(), stream_name_pos - 1);
+    // hash_high = hash(part_name) - all segments in same part share this
+    auto high = sipHash64(seg_key.data() + first_slash + 1, second_slash - first_slash - 1);
+
+    // hash_low = hash(column/segment) - unique per segment
+    auto low = sipHash64(seg_key.data() + second_slash + 1, seg_key.size() - second_slash - 1);
 
     return {high, low};
 }
@@ -155,15 +213,22 @@ std::optional<DiskCacheTTL::KeyType> DiskCacheTTL::unhexKey(const String & hex_k
 
 fs::path DiskCacheTTL::getPath(const DiskCacheTTL::KeyType & hash_key, const String & path, const String & seg_name, const String & prefix)
 {
+    // New structure: uuid/partition/3char/hash_part/hash_low
+    // Example: a1b2c3d4.../20240315/abc/abc123def456/567890abcd
+
     String hex_key = hexKey(hash_key);
     std::string_view view(hex_key);
     std::string_view hex_key_low = view.substr(0, HEX_KEY_LEN / 2);
     std::string_view hex_key_high = view.substr(HEX_KEY_LEN / 2, HEX_KEY_LEN);
-    if (!prefix.empty())
-        return fs::path(path) / prefix / hex_key_high.substr(0, 3) / hex_key_high / hex_key_low;
 
-    return fs::path(path) / (endsWith(seg_name, DATA_FILE_EXTENSION) ? DATA_DISK_CACHE_DIR_PREFIX : META_DISK_CACHE_DIR_PREFIX)
-        / hex_key_high.substr(0, 3) / hex_key_high / hex_key_low;
+    String part_name = extractPartName(seg_name);
+    String partition_id = extractPartitionId(part_name);
+    String data_prefix = endsWith(seg_name, DATA_FILE_EXTENSION) ? DATA_DISK_CACHE_DIR_PREFIX : META_DISK_CACHE_DIR_PREFIX;
+
+    // Structure: prefix/uuid/partition/3char/hash_high/hash_low
+    return fs::path(path) / (prefix.empty() ? data_prefix : prefix)
+           / table_uuid / partition_id
+           / hex_key_high.substr(0, 3) / hex_key_high / hex_key_low;
 }
 
 time_t DiskCacheTTL::parsePartitionTimestamp(const String & part_name)
@@ -222,8 +287,13 @@ time_t DiskCacheTTL::parsePartitionTimestamp(const String & part_name)
 
 bool DiskCacheTTL::shouldCache(time_t part_ts) const
 {
-    if (part_ts == 0 || ttl_minutes == 0)
-        return true; // No timestamp or TTL disabled, cache everything
+    // TTL cache only for time-based partitions
+    if (part_ts == 0)
+        return false; // Non-time partitions are not cached
+
+    // TTL disabled - cache all time-based partitions
+    if (ttl_minutes == 0)
+        return true;
 
     time_t now = time(nullptr);
     time_t age_seconds = now - part_ts;
@@ -411,9 +481,23 @@ void DiskCacheTTL::evictExpired()
     {
         try
         {
-            String hex = hexKey(key);
+            // Build path from key + partition timestamp
+            String hex_key = hexKey(key);
+            std::string_view view(hex_key);
+            std::string_view hex_key_low = view.substr(0, HEX_KEY_LEN / 2);
+            std::string_view hex_key_high = view.substr(HEX_KEY_LEN / 2, HEX_KEY_LEN);
+
+            // Convert timestamp to partition_id
+            struct tm tm_time;
+            gmtime_r(&meta->part_timestamp, &tm_time);
+            String partition_id = fmt::format("{:04d}{:02d}{:02d}",
+                tm_time.tm_year + 1900, tm_time.tm_mon + 1, tm_time.tm_mday);
+
             String prefix = type == IDiskCache::DataType::META ? META_DISK_CACHE_DIR_PREFIX : DATA_DISK_CACHE_DIR_PREFIX;
-            auto rel_path = getPath(key, latest_disk_cache_dir, "", prefix);
+
+            // Structure: prefix/uuid/partition/3char/hash_high/hash_low
+            auto rel_path = fs::path(latest_disk_cache_dir) / prefix / table_uuid / partition_id
+                           / hex_key_high.substr(0, 3) / hex_key_high / hex_key_low;
 
             if (meta->disk && meta->disk->exists(rel_path))
             {
@@ -458,19 +542,62 @@ void DiskCacheTTL::load()
     LOG_INFO(log, "TTL disk cache load complete. Total: {} segments, {} bytes", total_entries.load(), total_size.load());
 }
 
-size_t DiskCacheTTL::drop(const String & part_name)
+size_t DiskCacheTTL::drop(const String & part_base_path)
 {
-    std::lock_guard<std::mutex> lock(cache_mutex);
+    // New structure: uuid/partition/3char/hash_part/
+    // part_base_path format: "uuid/part_name"
+    fs::path meta_path, data_path;
 
-    size_t dropped = 0;
-    for (auto it = cache_map.begin(); it != cache_map.end();)
+    if (part_base_path.empty())
     {
-        // Simple prefix match for part name
-        // TODO: Implement proper matching
-        ++it;
+        // Drop entire cache for this table
+        if (type == DataType::ALL || type == DataType::META)
+            meta_path = fs::path(latest_disk_cache_dir) / META_DISK_CACHE_DIR_PREFIX / table_uuid;
+        if (type == DataType::ALL || type == DataType::DATA)
+            data_path = fs::path(latest_disk_cache_dir) / DATA_DISK_CACHE_DIR_PREFIX / table_uuid;
+    }
+    else
+    {
+        // Drop specific part: extract uuid and part_name from part_base_path
+        String uuid = extractUUID(part_base_path);
+        String part_name = extractPartName(part_base_path);
+
+        if (type == DataType::ALL || type == DataType::META)
+            meta_path = fs::path(latest_disk_cache_dir) / getRelativePathForPart(uuid, part_name, META_DISK_CACHE_DIR_PREFIX);
+        if (type == DataType::ALL || type == DataType::DATA)
+            data_path = fs::path(latest_disk_cache_dir) / getRelativePathForPart(uuid, part_name, DATA_DISK_CACHE_DIR_PREFIX);
     }
 
-    return dropped;
+    LOG_TRACE(log, "Dropping cache for part {} (meta: {}, data: {})", part_base_path, meta_path.string(), data_path.string());
+
+    const Disks & disks = volume->getDisks();
+    size_t delete_file_size = 0;
+
+    for (const auto & disk : disks)
+    {
+        if (!meta_path.empty() && disk->exists(meta_path))
+        {
+            DiskCacheDeleter deleter(*this, disk, 1, -1, -1);
+            deleter.exec(meta_path);
+            delete_file_size += deleter.delete_file_size;
+        }
+
+        if (!data_path.empty() && disk->exists(data_path))
+        {
+            DiskCacheDeleter deleter(*this, disk, 1, -1, -1);
+            deleter.exec(data_path);
+            delete_file_size += deleter.delete_file_size;
+        }
+    }
+
+    // Note: We don't clean up cache_map here (same as LRU behavior)
+    // - cache_map stores hash keys, can't efficiently reverse-match to part_name
+    // - Stale entries are harmless: get() returns path, caller handles missing files gracefully
+    // - evictExpired() will eventually remove stale entries based on disk existence checks
+    // - Memory overhead is negligible compared to I/O cost of scanning cache_map
+
+    LOG_TRACE(log, "Dropped {} bytes of cache for part {}", delete_file_size, part_base_path);
+    return delete_file_size;
 }
 
 // DiskIterator implementations
@@ -515,8 +642,8 @@ void DiskCacheTTL::DiskIterator::iterateDirectory(std::filesystem::path rel_path
 
 // DiskCacheLoader
 DiskCacheTTL::DiskCacheLoader::DiskCacheLoader(
-    DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk, int min_depth_parallel, int max_depth_parallel)
-    : DiskIterator("DiskCacheTTLLoader", cache_, disk_, worker_per_disk, min_depth_parallel, max_depth_parallel)
+    DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk_, int min_depth_parallel_, int max_depth_parallel_)
+    : DiskIterator("DiskCacheTTLLoader", cache_, disk_, worker_per_disk_, min_depth_parallel_, max_depth_parallel_)
 {
 }
 
@@ -542,8 +669,11 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
         return;
     }
 
-    // TODO: Parse part timestamp from path
-    time_t part_ts = 0;
+    // Extract part_name from path structure: data/20240315/20240315_1_100_2/segment_hash.bin
+    // parent_path = data/20240315/20240315_1_100_2
+    // part_name = 20240315_1_100_2
+    String part_name = file_path.parent_path().filename();
+    time_t part_ts = DiskCacheTTL::parsePartitionTimestamp(part_name);
 
     std::lock_guard<std::mutex> lock(disk_cache.cache_mutex);
     disk_cache.cache_map[*key] = std::make_shared<DiskCacheTTLMeta>(
@@ -556,8 +686,8 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
 
 // DiskCacheMigrator (stub)
 DiskCacheTTL::DiskCacheMigrator::DiskCacheMigrator(
-    DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk, int min_depth_parallel, int max_depth_parallel)
-    : DiskIterator("DiskCacheTTLMigrator", cache_, disk_, worker_per_disk, min_depth_parallel, max_depth_parallel)
+    DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk_, int min_depth_parallel_, int max_depth_parallel_)
+    : DiskIterator("DiskCacheTTLMigrator", cache_, disk_, worker_per_disk_, min_depth_parallel_, max_depth_parallel_)
 {
 }
 
@@ -571,8 +701,8 @@ void DiskCacheTTL::DiskCacheMigrator::iterateFile(std::filesystem::path, size_t)
 
 // DiskCacheDeleter (stub)
 DiskCacheTTL::DiskCacheDeleter::DiskCacheDeleter(
-    DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk, int min_depth_parallel, int max_depth_parallel)
-    : DiskIterator("DiskCacheTTLDeleter", cache_, disk_, worker_per_disk, min_depth_parallel, max_depth_parallel)
+    DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk_, int min_depth_parallel_, int max_depth_parallel_)
+    : DiskIterator("DiskCacheTTLDeleter", cache_, disk_, worker_per_disk_, min_depth_parallel_, max_depth_parallel_)
 {
 }
 

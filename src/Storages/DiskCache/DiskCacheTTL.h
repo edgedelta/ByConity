@@ -68,6 +68,7 @@ public:
 
     DiskCacheTTL(
         const String & name_,
+        const String & table_uuid_,
         const VolumePtr & volume,
         const ThrottlerPtr & throttler,
         const DiskCacheSettings & settings,
@@ -159,6 +160,7 @@ private:
     ThrottlerPtr set_throughput_throttler;
     std::atomic<bool> is_droping{false};
 
+    const String table_uuid;
     UInt64 ttl_minutes;
 
     /// Simple map-based storage (not using BucketLRUCache)

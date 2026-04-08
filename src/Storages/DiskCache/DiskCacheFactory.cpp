@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <memory>
 
+#include <Core/UUID.h>
 #include <Disks/IStoragePolicy.h>
 #include <Interpreters/Context.h>
 #include <Storages/DiskCache/DiskCacheLRU.h>
@@ -111,9 +112,9 @@ void DiskCacheFactory::shutdown()
 
 IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
     const String & table_name,
+    const UUID & table_uuid,
     const VolumePtr & volume,
     const ThrottlerPtr & throttler,
-    const String & mode,
     UInt64 ttl_minutes)
 {
     Poco::Logger * log = &Poco::Logger::get("DiskCacheFactory");
@@ -126,26 +127,13 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
         cache_settings = it->second->getSettings();
     }
 
-    // Override with table-specific settings
-    cache_settings.cache_mode = mode.empty() ? "lru" : mode;
-    cache_settings.cache_ttl_minutes = ttl_minutes;
-
-    bool use_ttl = (cache_settings.cache_mode == "ttl" && ttl_minutes > 0);
+    // Per-table cache is always TTL-based
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(cache_settings);
+    auto cache = std::make_shared<DiskCacheTTL>(
+        table_name, UUIDHelpers::UUIDToString(table_uuid), volume, throttler, cache_settings, strategy, ttl_minutes);
 
-    IDiskCachePtr cache;
-    if (use_ttl)
-    {
-        cache = std::make_shared<DiskCacheTTL>(
-            table_name, volume, throttler, cache_settings, strategy, ttl_minutes);
-        LOG_INFO(log, "Created per-table TTL cache for {} (TTL: {} minutes)", table_name, ttl_minutes);
-    }
-    else
-    {
-        cache = std::make_shared<DiskCacheLRU>(
-            table_name, volume, throttler, cache_settings, strategy);
-        LOG_INFO(log, "Created per-table LRU cache for {}", table_name);
-    }
+    LOG_INFO(log, "Created per-table TTL cache for {} (UUID: {}, TTL: {} minutes)",
+        table_name, UUIDHelpers::UUIDToString(table_uuid), ttl_minutes);
 
     return cache;
 }

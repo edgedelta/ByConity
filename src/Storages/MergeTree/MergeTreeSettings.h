@@ -505,9 +505,8 @@ enum StealingCacheMode : UInt64
     M(Bool, enable_parts_sync_preload, 0, "Enable sync preload parts", 0) \
     M(Bool, enable_gc_evict_disk_cache, false, "Enable gc evict disk cache", 0)      \
     M(UInt64, disk_cache_stealing_mode, 0, "Read/write remote vw local disk cache if cur local disk cache empty, 0: close; 1: read 2: write 3: read&write", 0) \
-    M(Bool, enable_per_table_disk_cache, false, "Use dedicated cache instance for this table (experimental)", 0) \
-    M(String, disk_cache_mode, "lru", "Cache mode: 'lru' or 'ttl' (requires enable_per_table_disk_cache)", 0) \
-    M(UInt64, disk_cache_ttl_minutes, 0, "TTL in minutes (requires enable_per_table_disk_cache)", 0) \
+    M(Bool, enable_per_table_ttl_cache, false, "Use dedicated per-table TTL cache instead of global LRU cache (experimental)", 0) \
+    M(UInt64, disk_cache_ttl_hours, 0, "Partition age threshold in hours. Only cache partitions younger than this. Granularity should match partition key (e.g., 24 for daily partitions = 1 day retention). Requires enable_per_table_ttl_cache=1.", 0) \
     \
     /* Renamed settings - cannot be ignored */\
     M(Bool, enable_nullable_sorting_key, false, "Alias of `allow_nullable_key`", 0) \

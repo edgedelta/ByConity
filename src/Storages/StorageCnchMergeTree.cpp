@@ -263,27 +263,26 @@ QueryProcessingStage::Enum StorageCnchMergeTree::getQueryProcessingStage(
 
 void StorageCnchMergeTree::startup()
 {
-    // Create per-table cache if enabled
-    if (getSettings()->enable_per_table_disk_cache)
+    // Create per-table TTL cache if enabled
+    if (getSettings()->enable_per_table_ttl_cache)
     {
-        LOG_INFO(log, "Creating per-table disk cache for {} (mode: {}, TTL: {} minutes)",
+        LOG_INFO(log, "Creating per-table TTL cache for {} (TTL: {} hours)",
             getStorageID().getNameForLogs(),
-            getSettings()->disk_cache_mode.value,
-            getSettings()->disk_cache_ttl_minutes.value);
+            getSettings()->disk_cache_ttl_hours.value);
 
         try
         {
             disk_cache = DiskCacheFactory::instance().createDiskCacheFromTableSettings(
                 getStorageID().getNameForLogs(),
+                getStorageUUID(),
                 getContext()->getStoragePolicy(getSettings()->storage_policy)->getVolumeByName("local", true),
                 getContext()->getDiskCacheThrottler(),
-                getSettings()->disk_cache_mode,
-                getSettings()->disk_cache_ttl_minutes
+                getSettings()->disk_cache_ttl_hours.value * 60  // Convert hours to minutes
             );
         }
         catch (const Exception & e)
         {
-            LOG_ERROR(log, "Failed to create per-table disk cache: {}. Falling back to global cache.", e.message());
+            LOG_ERROR(log, "Failed to create per-table TTL cache: {}. Falling back to global LRU cache.", e.message());
             disk_cache = nullptr;
         }
     }
