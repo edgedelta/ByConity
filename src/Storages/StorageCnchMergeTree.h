@@ -223,6 +223,9 @@ public:
     /// drop the memody_dict_cache of cnch table
     void dropMemoryDictCache(ContextMutablePtr & local_context);
 
+    /// Get disk cache instance (per-table or global)
+    IDiskCachePtr getDiskCache() const;
+
 protected:
     StorageCnchMergeTree(
         const StorageID & table_id_,
@@ -301,9 +304,6 @@ private:
     void checkAlterInCnchServer(const AlterCommands & commands, ContextPtr local_context) const;
 
     std::unique_ptr<MergeTreeSettings> getDefaultSettings() const override;
-
-    /// Get disk cache instance (per-table or global)
-    IDiskCachePtr getDiskCache() const;
 
 private:
     /// Per-table disk cache instance (null if using global cache)
