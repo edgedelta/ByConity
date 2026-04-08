@@ -74,7 +74,7 @@ public:
     VolumePtr createTestVolume()
     {
         fs::create_directory("tmp/ttl_disk/");
-        auto disk = std::make_shared<DiskLocal>("ttl_disk", "tmp/ttl_disk/", 0);
+        auto disk = std::make_shared<DiskLocal>("ttl_disk", "tmp/ttl_disk/", DiskStats{});
         return std::make_shared<SingleDiskVolume>("ttl_volume", std::move(disk), 0);
     }
 
