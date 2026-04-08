@@ -268,8 +268,8 @@ void StorageCnchMergeTree::startup()
     {
         LOG_INFO(log, "Creating per-table disk cache for {} (mode: {}, TTL: {} minutes)",
             getStorageID().getNameForLogs(),
-            getSettings()->disk_cache_mode,
-            getSettings()->disk_cache_ttl_minutes);
+            getSettings()->disk_cache_mode.value,
+            getSettings()->disk_cache_ttl_minutes.value);
 
         try
         {
