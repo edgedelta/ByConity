@@ -78,7 +78,8 @@ public:
         const UUID & table_uuid,
         const VolumePtr & volume,
         const ThrottlerPtr & throttler,
-        UInt64 ttl_minutes);
+        UInt64 ttl_minutes,
+        size_t max_size_bytes = 0);
 
 private:
     void addNewCache(Context & context, const std::string & cache_name, bool create_default);

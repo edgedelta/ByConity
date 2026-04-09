@@ -33,6 +33,10 @@ struct DiskCacheSettings
     size_t lru_max_nums {std::numeric_limits<size_t>::max()};
     // max percent of disk total capacity
     size_t lru_max_percent {80};
+    // TTL cache max size (bytes). 0 = use ttl_cache_max_percent instead
+    size_t ttl_cache_max_size {0};
+    // TTL cache max percent of disk capacity (used if ttl_cache_max_size == 0)
+    size_t ttl_cache_max_percent {80};
     // When queue size exceed random drop ratio, start drop disk cache task, range from 0 - 100
     size_t random_drop_threshold {50};
     // Cache mapping bucket size

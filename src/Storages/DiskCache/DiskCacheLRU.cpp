@@ -207,7 +207,7 @@ static fs::path getRelativePathForPart(const String & part_name, const String & 
     return fs::path(prefix) / hex_key.substr(0, 3) / hex_key / "";
 }
 
-void DiskCacheLRU::set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload)
+void DiskCacheLRU::set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload, time_t min_time, time_t max_time)
 {
     if (is_droping)
     {

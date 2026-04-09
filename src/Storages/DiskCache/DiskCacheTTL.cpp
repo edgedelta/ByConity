@@ -152,13 +152,18 @@ DiskCacheTTL::DiskCacheTTL(
     const DiskCacheSettings & settings_,
     const IDiskCacheStrategyPtr & strategy_,
     UInt64 ttl_minutes_,
+    size_t max_size_bytes_,
     IDiskCache::DataType type_)
     : IDiskCache(name_, volume_, throttler_, settings_, strategy_, false, type_)
     , set_rate_throttler(settings_.cache_set_rate_limit == 0 ? nullptr : std::make_shared<Throttler>(settings_.cache_set_rate_limit))
     , set_throughput_throttler(settings_.cache_set_throughput_limit == 0 ? nullptr : std::make_shared<Throttler>(settings_.cache_set_throughput_limit))
     , table_uuid(table_uuid_)
     , ttl_minutes(ttl_minutes_)
+    , max_size_bytes(max_size_bytes_)  // Already calculated by factory
 {
+    cache_stats.table_uuid = table_uuid_;
+    LOG_INFO(log, "Initialized TTL cache for table {} with ttl_minutes={}, max_size_bytes={} ({}GB)",
+             table_uuid_, ttl_minutes_, max_size_bytes, max_size_bytes / (1024*1024*1024));
     if (settings.cache_load_dispatcher_drill_down_level < -1)
     {
         throw Exception(fmt::format("Load dispatcher's drill down level {} invalid, "
@@ -302,7 +307,7 @@ bool DiskCacheTTL::shouldCache(time_t part_ts) const
     return age_seconds <= ttl_seconds;
 }
 
-void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload)
+void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload, time_t min_time, time_t max_time)
 {
     if (is_droping)
     {
@@ -310,10 +315,14 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
         return;
     }
 
-    // Check TTL before caching
-    time_t part_ts = parsePartitionTimestamp(seg_name);
+    // Use provided max_time if available, else parse from partition_id
+    time_t part_ts = (max_time > 0) ? max_time : parsePartitionTimestamp(seg_name);
     if (!shouldCache(part_ts))
     {
+        if (part_ts == 0)
+            cache_stats.rejected_non_time_partition++;
+        else
+            cache_stats.rejected_too_old++;
         LOG_TRACE(log, "Skipping cache for expired partition: {}", seg_name);
         return;
     }
@@ -324,6 +333,38 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
     }
 
     ProfileEvents::increment(ProfileEvents::DiskCacheSetTotalOps, 1, Metrics::MetricType::Rate, {{"type", (is_preload ? "preload": "query")}});
+
+    // Async size-based eviction: if cache >90% full, schedule background cleanup
+    if (max_size_bytes > 0 && total_size.load() > max_size_bytes * 0.90)
+    {
+        time_t now = time(nullptr);
+        time_t last_trigger = last_size_eviction_trigger.load();
+
+        // Rate limit: at most once per minute
+        if (now - last_trigger > 60)
+        {
+            if (last_size_eviction_trigger.compare_exchange_strong(last_trigger, now))
+            {
+                size_t target_free = max_size_bytes * 0.10;  // Free 10%
+                cache_stats.async_eviction_triggered++;
+
+                LOG_DEBUG(log, "Cache {}% full, scheduling async eviction to free {} bytes",
+                         (total_size.load() * 100 / max_size_bytes), target_free);
+
+                auto & thread_pool = IDiskCache::getEvictPool();
+                thread_pool.scheduleOrThrow([this, target_free] {
+                    Stopwatch watch;
+                    evictOldestPartitionsUntilSpace(target_free);
+                    LOG_INFO(log, "Async size-based eviction freed space in {} ms",
+                            watch.elapsedMilliseconds());
+                });
+            }
+        }
+        else
+        {
+            cache_stats.async_eviction_skipped_rate_limit++;
+        }
+    }
 
     auto key = hash(seg_name);
 
@@ -359,7 +400,27 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
             );
             total_entries++;
             total_size += weight;
+
+            cache_stats.total_entries++;
+            cache_stats.total_bytes += weight;
+
+            // Track write source (preload vs query)
+            if (is_preload)
+            {
+                cache_stats.cached_from_preload++;
+                cache_stats.cached_bytes_preload += weight;
+            }
+            else
+            {
+                cache_stats.cached_from_query++;
+                cache_stats.cached_bytes_query += weight;
+            }
         }
+
+        // Update partition stats
+        String part_name = extractPartName(seg_name);
+        String partition_id = extractPartitionId(part_name);
+        updatePartitionStats(partition_id, part_ts, false, weight);
     }
     catch(const Exception & e)
     {
@@ -394,24 +455,34 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
 
     auto key = hash(seg_name);
 
+    String part_name = extractPartName(seg_name);
+    String partition_id = extractPartitionId(part_name);
+
     std::lock_guard<std::mutex> lock(cache_mutex);
     auto it = cache_map.find(key);
     if (it == cache_map.end() || it->second->state != DiskCacheTTLMeta::State::Cached)
+    {
+        updatePartitionStats(partition_id, 0, false, 0);
         return {};
+    }
 
     if (unlikely(it->second->disk == nullptr))
     {
         cache_map.erase(it);
+        updatePartitionStats(partition_id, 0, false, 0);
         return {};
     }
 
     // Check TTL on read
-    if (!shouldCache(it->second->part_timestamp))
+    time_t part_ts = it->second->max_timestamp;
+    if (!shouldCache(part_ts))
     {
         // Expired, return miss
+        updatePartitionStats(partition_id, part_ts, false, 0);
         return {};
     }
 
+    updatePartitionStats(partition_id, part_ts, true, 0);
     return {it->second->disk, getRelativePath(key, seg_name)};
 }
 
@@ -456,22 +527,45 @@ size_t DiskCacheTTL::writeSegment(const String& seg_key, ReadBuffer& buffer, Res
 
 void DiskCacheTTL::evictExpired()
 {
-    std::vector<std::pair<KeyType, std::shared_ptr<DiskCacheTTLMeta>>> to_evict;
+    // Group segments by part (using hash_high) for efficient batch eviction
+    std::map<UInt64, std::vector<std::pair<KeyType, std::shared_ptr<DiskCacheTTLMeta>>>> parts;
 
     {
         std::lock_guard<std::mutex> lock(cache_mutex);
-        for (auto it = cache_map.begin(); it != cache_map.end();)
+        for (const auto & [key, meta] : cache_map)
         {
-            if (it->second->state == DiskCacheTTLMeta::State::Cached && !shouldCache(it->second->part_timestamp))
+            if (meta->state == DiskCacheTTLMeta::State::Cached)
             {
-                to_evict.push_back(*it);
-                total_size -= it->second->size;
-                it = cache_map.erase(it);
-                total_entries--;
+                // Group by part: hash_high uniquely identifies the part
+                UInt64 part_hash = key.items[0];
+                parts[part_hash].push_back({key, meta});
             }
-            else
+        }
+    }
+
+    // Check TTL once per part (all segments in same part share same max_timestamp)
+    std::vector<std::pair<KeyType, std::shared_ptr<DiskCacheTTLMeta>>> to_evict;
+
+    for (const auto & [part_hash, segments] : parts)
+    {
+        if (!segments.empty() && !shouldCache(segments[0].second->max_timestamp))
+        {
+            // Entire part is expired - evict all its segments
+            to_evict.insert(to_evict.end(), segments.begin(), segments.end());
+        }
+    }
+
+    // Remove from cache_map
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        for (const auto & [key, meta] : to_evict)
+        {
+            auto it = cache_map.find(key);
+            if (it != cache_map.end())
             {
-                ++it;
+                total_size -= it->second->size;
+                total_entries--;
+                cache_map.erase(it);
             }
         }
     }
@@ -489,7 +583,7 @@ void DiskCacheTTL::evictExpired()
 
             // Convert timestamp to partition_id
             struct tm tm_time;
-            gmtime_r(&meta->part_timestamp, &tm_time);
+            gmtime_r(&meta->max_timestamp, &tm_time);
             String partition_id = fmt::format("{:04d}{:02d}{:02d}",
                 tm_time.tm_year + 1900, tm_time.tm_mon + 1, tm_time.tm_mday);
 
@@ -513,7 +607,134 @@ void DiskCacheTTL::evictExpired()
 
     if (!to_evict.empty())
     {
-        LOG_INFO(log, "Evicted {} expired segments, freed {} bytes", to_evict.size(), to_evict.size());
+        size_t evicted_count = to_evict.size();
+        size_t evicted_bytes = 0;
+        for (const auto & [key, meta] : to_evict)
+            evicted_bytes += meta->size;
+
+        cache_stats.evicted_expired += evicted_count;
+        cache_stats.total_entries -= evicted_count;
+        cache_stats.total_bytes -= evicted_bytes;
+
+        LOG_INFO(log, "Evicted {} expired segments, freed {} bytes", evicted_count, evicted_bytes);
+    }
+
+    cache_stats.last_eviction_run = time(nullptr);
+}
+
+void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
+{
+    // Check if eviction needed
+    if (max_size_bytes == 0 || total_size.load() + needed_bytes <= max_size_bytes)
+        return;
+
+    size_t target_size = max_size_bytes > needed_bytes ? max_size_bytes - needed_bytes : 0;
+
+    LOG_DEBUG(log, "Size limit reached: current={}, needed={}, max={}, target={}",
+              total_size.load(), needed_bytes, max_size_bytes, target_size);
+
+    // 1. Sort partitions by timestamp (oldest first) - only sort 10-100 partitions
+    std::vector<std::pair<time_t, String>> sorted_partitions;
+    {
+        std::shared_lock<std::shared_mutex> stats_lock(cache_stats.partition_stats_mutex);
+        for (const auto & [partition_id, stats] : cache_stats.partition_stats)
+        {
+            if (stats.total_bytes > 0)
+                sorted_partitions.emplace_back(stats.partition_timestamp, partition_id);
+        }
+    }
+    std::sort(sorted_partitions.begin(), sorted_partitions.end());
+
+    // 2. Evict parts from oldest partitions until target reached
+    std::vector<std::pair<KeyType, std::shared_ptr<DiskCacheTTLMeta>>> to_evict;
+    size_t evicted_bytes = 0;
+
+    for (const auto & [partition_ts, partition_id] : sorted_partitions)
+    {
+        if (total_size.load() - evicted_bytes <= target_size)
+            break;  // Early exit - freed enough space
+
+        // Collect all parts in this partition, grouped by part
+        std::map<UInt64, std::vector<std::pair<KeyType, std::shared_ptr<DiskCacheTTLMeta>>>> parts_in_partition;
+
+        {
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            for (auto it = cache_map.begin(); it != cache_map.end(); ++it)
+            {
+                if (it->second->state == DiskCacheTTLMeta::State::Cached
+                    && it->second->max_timestamp == partition_ts)
+                {
+                    // Group by part: hash_high = hash(part_name)
+                    UInt64 part_hash_high = it->first.items[0];
+                    parts_in_partition[part_hash_high].push_back(*it);
+                }
+            }
+        }
+
+        // Evict parts one by one from this partition until enough space
+        for (auto & [part_hash_high, segments] : parts_in_partition)
+        {
+            if (total_size.load() - evicted_bytes <= target_size)
+                break;
+
+            size_t part_bytes = 0;
+
+            // Evict all segments in this part
+            {
+                std::lock_guard<std::mutex> lock(cache_mutex);
+                for (const auto & [key, meta] : segments)
+                {
+                    to_evict.push_back({key, meta});
+                    evicted_bytes += meta->size;
+                    part_bytes += meta->size;
+                    total_size -= meta->size;
+                    total_entries--;
+                    cache_map.erase(key);
+                }
+            }
+
+            LOG_DEBUG(log, "Evicted part (hash_high={}) from partition {} for size limit, freed {} bytes",
+                     part_hash_high, partition_id, part_bytes);
+        }
+    }
+
+    // Delete files
+    for (const auto & [key, meta] : to_evict)
+    {
+        try
+        {
+            String hex_key = hexKey(key);
+            std::string_view view(hex_key);
+            std::string_view hex_key_low = view.substr(0, HEX_KEY_LEN / 2);
+            std::string_view hex_key_high = view.substr(HEX_KEY_LEN / 2, HEX_KEY_LEN);
+
+            struct tm tm_time;
+            gmtime_r(&meta->max_timestamp, &tm_time);
+            String partition_id = fmt::format("{:04d}{:02d}{:02d}",
+                tm_time.tm_year + 1900, tm_time.tm_mon + 1, tm_time.tm_mday);
+
+            String prefix = type == IDiskCache::DataType::META ? META_DISK_CACHE_DIR_PREFIX : DATA_DISK_CACHE_DIR_PREFIX;
+
+            auto rel_path = fs::path(latest_disk_cache_dir) / prefix / table_uuid / partition_id
+                           / hex_key_high.substr(0, 3) / hex_key_high / hex_key_low;
+
+            if (meta->disk && meta->disk->exists(rel_path))
+                meta->disk->removeFile(rel_path);
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log, "Failed to evict segment for size limit");
+        }
+    }
+
+    if (!to_evict.empty())
+    {
+        cache_stats.evicted_size_limit += to_evict.size();
+        cache_stats.total_entries -= to_evict.size();
+        cache_stats.total_bytes -= evicted_bytes;
+
+        LOG_INFO(log, "Evicted {} segments from oldest parts for size limit, freed {} bytes",
+                 to_evict.size(), evicted_bytes);
     }
 }
 
@@ -752,6 +973,57 @@ void DiskCacheTTL::DiskCacheDeleter::exec(std::filesystem::path entry_path)
 
 void DiskCacheTTL::DiskCacheDeleter::iterateFile(std::filesystem::path, size_t)
 {
+}
+
+DiskCacheTTL::TTLCacheStats DiskCacheTTL::getStats() const
+{
+    TTLCacheStats stats;
+    stats.table_uuid = cache_stats.table_uuid;
+    stats.total_entries = cache_stats.total_entries.load();
+    stats.total_bytes = cache_stats.total_bytes.load();
+    stats.evicted_expired = cache_stats.evicted_expired.load();
+    stats.evicted_size_limit = cache_stats.evicted_size_limit.load();
+    stats.rejected_non_time_partition = cache_stats.rejected_non_time_partition.load();
+    stats.rejected_too_old = cache_stats.rejected_too_old.load();
+    stats.last_eviction_run = cache_stats.last_eviction_run.load();
+    stats.async_eviction_triggered = cache_stats.async_eviction_triggered.load();
+    stats.async_eviction_skipped_rate_limit = cache_stats.async_eviction_skipped_rate_limit.load();
+    return stats;
+}
+
+std::vector<DiskCacheTTL::PartitionStats> DiskCacheTTL::getPartitionStats() const
+{
+    std::vector<PartitionStats> result;
+    std::shared_lock<std::shared_mutex> lock(cache_stats.partition_stats_mutex);
+    result.reserve(cache_stats.partition_stats.size());
+    for (const auto & [partition_id, stats] : cache_stats.partition_stats)
+    {
+        result.push_back(stats);
+    }
+    return result;
+}
+
+void DiskCacheTTL::updatePartitionStats(const String & partition_id, time_t partition_ts, bool hit, size_t bytes)
+{
+    std::unique_lock<std::shared_mutex> lock(cache_stats.partition_stats_mutex);
+    auto & pstats = cache_stats.partition_stats[partition_id];
+
+    if (pstats.partition_id.empty())
+    {
+        pstats.partition_id = partition_id;
+        pstats.partition_timestamp = partition_ts;
+    }
+
+    if (hit)
+        pstats.hits++;
+    else
+        pstats.misses++;
+
+    if (bytes > 0)
+    {
+        pstats.entry_count++;
+        pstats.total_bytes += bytes;
+    }
 }
 
 }

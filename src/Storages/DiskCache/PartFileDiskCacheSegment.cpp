@@ -180,11 +180,14 @@ void PartFileDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool throw_e
             != DiskCacheMode::
                 FORCE_STEAL_DISK_CACHE) // FORCE_STEAL_DISK_CACHE is used for testing, which only allow remote cache request so will skip local cache write
         {
+            // Get min/max time from part for TTL cache granularity
+            auto [min_time, max_time] = data_part->getMinMaxTime();
+
             if (!preload_level || (preload_level & PreloadLevelSettings::DataPreload) == PreloadLevelSettings::DataPreload)
             {
                 data_file->seek(stream_file_pos.file_offset + cache_data_left_offset);
                 LimitReadBuffer segment_value(*data_file, cache_data_bytes, false);
-                disk_cache.getDataCache()->set(getSegmentName(), segment_value, cache_data_bytes, preload_level > 0);
+                disk_cache.getDataCache()->set(getSegmentName(), segment_value, cache_data_bytes, preload_level > 0, min_time, max_time);
                 LOG_TRACE(disk_cache.getLogger(), "Cached part{} data file: {}, preload_level: {}", extension, getSegmentName(), preload_level);
             }
 
@@ -194,7 +197,7 @@ void PartFileDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool throw_e
                 data_file->seek(mrk_file_pos.file_offset);
                 LimitReadBuffer marks_value(*data_file, mrk_file_pos.file_size, false);
                 String marks_key = getMarkName();
-                disk_cache.getMetaCache()->set(marks_key, marks_value, mrk_file_pos.file_size, preload_level > 0);
+                disk_cache.getMetaCache()->set(marks_key, marks_value, mrk_file_pos.file_size, preload_level > 0, min_time, max_time);
                 LOG_TRACE(disk_cache.getLogger(), "Cached part{} mark file: {}, preload_level: {}", extension, marks_key, preload_level);
             }
 

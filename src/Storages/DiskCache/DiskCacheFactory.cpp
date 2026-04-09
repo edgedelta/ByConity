@@ -115,7 +115,8 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
     const UUID & table_uuid,
     const VolumePtr & volume,
     const ThrottlerPtr & throttler,
-    UInt64 ttl_minutes)
+    UInt64 ttl_minutes,
+    size_t max_size_bytes)
 {
     Poco::Logger * log = &Poco::Logger::get("DiskCacheFactory");
 
@@ -127,13 +128,36 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
         cache_settings = it->second->getSettings();
     }
 
+    // Calculate effective max size: per-table setting > worker-level setting > auto-size by percent
+    size_t effective_max_size = max_size_bytes;
+
+    if (effective_max_size == 0)
+    {
+        // No per-table limit, use worker-level ttl_cache_max_size
+        effective_max_size = cache_settings.ttl_cache_max_size;
+
+        // If worker-level also not set, auto-size by percent
+        if (effective_max_size == 0)
+        {
+            auto total_space = volume->getTotalSpace(true);
+            effective_max_size = static_cast<size_t>(
+                total_space.bytes * (cache_settings.ttl_cache_max_percent * 1.0 / 100)
+            );
+            LOG_DEBUG(log, "Auto-sizing TTL cache for {} using {}% of {}GB = {}GB",
+                     table_name,
+                     cache_settings.ttl_cache_max_percent,
+                     total_space.bytes / (1024*1024*1024),
+                     effective_max_size / (1024*1024*1024));
+        }
+    }
+
     // Per-table cache is always TTL-based
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(cache_settings);
     auto cache = std::make_shared<DiskCacheTTL>(
-        table_name, UUIDHelpers::UUIDToString(table_uuid), volume, throttler, cache_settings, strategy, ttl_minutes);
+        table_name, UUIDHelpers::UUIDToString(table_uuid), volume, throttler, cache_settings, strategy, ttl_minutes, effective_max_size);
 
-    LOG_INFO(log, "Created per-table TTL cache for {} (UUID: {}, TTL: {} minutes)",
-        table_name, UUIDHelpers::UUIDToString(table_uuid), ttl_minutes);
+    LOG_INFO(log, "Created per-table TTL cache for {} (UUID: {}, TTL: {} minutes, max_size: {} bytes / {}GB)",
+        table_name, UUIDHelpers::UUIDToString(table_uuid), ttl_minutes, effective_max_size, effective_max_size / (1024*1024*1024));
 
     return cache;
 }

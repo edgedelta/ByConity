@@ -50,6 +50,10 @@ void DiskCacheSettings::loadFromConfig(const Poco::Util::AbstractConfiguration &
     stealing_max_retry_times = config.getUInt(config_prefix + ".stealing_max_retry_times", 3);
     stealing_retry_sleep_ms = config.getUInt(config_prefix + ".stealing_retry_sleep_ms", 100);
     stealing_max_queue_count = config.getUInt(config_prefix + ".stealing_max_queue_count", 10000);
+
+    // TTL cache settings
+    ttl_cache_max_size = config.getUInt64(config_prefix + ".ttl_cache_max_size", 0);
+    ttl_cache_max_percent = config.getUInt64(config_prefix + ".ttl_cache_max_percent", 80);
 }
 
 std::string DiskCacheSettings::toString() const
@@ -60,6 +64,8 @@ std::string DiskCacheSettings::toString() const
             "lru_max_percent": {},
             "lru_max_size": {},
             "lru_max_nums": {},
+            "ttl_cache_max_size": {},
+            "ttl_cache_max_percent": {},
             "random_drop_threshold": {},
             "mapping_bucket_size": {},
             "lru_update_interval": {},
@@ -81,6 +87,8 @@ std::string DiskCacheSettings::toString() const
         lru_max_percent,
         lru_max_size,
         lru_max_nums,
+        ttl_cache_max_size,
+        ttl_cache_max_percent,
         random_drop_threshold,
         mapping_bucket_size,
         lru_update_interval,

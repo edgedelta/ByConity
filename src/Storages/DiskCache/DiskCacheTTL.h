@@ -18,6 +18,9 @@
 #include <atomic>
 #include <filesystem>
 #include <map>
+#include <unordered_map>
+#include <shared_mutex>
+#include <vector>
 #include <Common/HashTable/Hash.h>
 #include <Storages/DiskCache/IDiskCache.h>
 #include <Common/ShardCache.h>
@@ -37,15 +40,15 @@ public:
         Deleting,
     };
 
-    DiskCacheTTLMeta(State state_, const DiskPtr & disk_, size_t size_, time_t cached_at_, time_t part_ts_)
-        : state(state_), disk(disk_), size(size_), cached_at(cached_at_), part_timestamp(part_ts_)
+    DiskCacheTTLMeta(State state_, const DiskPtr & disk_, size_t size_, time_t cached_at_, time_t max_ts_)
+        : state(state_), disk(disk_), size(size_), cached_at(cached_at_), max_timestamp(max_ts_)
     {}
 
     State state;
     DiskPtr disk;
     size_t size;
     time_t cached_at;
-    time_t part_timestamp;
+    time_t max_timestamp;  // Max timestamp from part data (for fine-grained TTL)
 };
 
 struct DiskCacheTTLWeightFunction
@@ -74,9 +77,10 @@ public:
         const DiskCacheSettings & settings,
         const IDiskCacheStrategyPtr & strategy_,
         UInt64 ttl_minutes_,
+        size_t max_size_bytes_ = 0,  // 0 = use settings.ttl_cache_max_size
         IDiskCache::DataType type_ = IDiskCache::DataType::ALL);
 
-    void set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload) override;
+    void set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload, time_t min_time = 0, time_t max_time = 0) override;
     std::pair<DiskPtr, String> get(const String& seg_name) override;
     void load() override;
     size_t drop(const String & part_name) override;
@@ -95,6 +99,48 @@ public:
     /// Returns 0 if partition is not time-based
     static time_t parsePartitionTimestamp(const String & part_name);
 
+    // Stats structures for observability
+    struct PartitionStats
+    {
+        String partition_id;
+        size_t entry_count{0};
+        size_t total_bytes{0};
+        time_t partition_timestamp{0};
+        std::atomic<size_t> hits{0};
+        std::atomic<size_t> misses{0};
+    };
+
+    struct TTLCacheStats
+    {
+        String table_uuid;
+        std::atomic<size_t> total_entries{0};
+        std::atomic<size_t> total_bytes{0};
+
+        // TTL-specific counters
+        std::atomic<size_t> evicted_expired{0};
+        std::atomic<size_t> evicted_size_limit{0};
+        std::atomic<size_t> rejected_non_time_partition{0};
+        std::atomic<size_t> rejected_too_old{0};
+        std::atomic<time_t> last_eviction_run{0};
+
+        // Async size-based eviction stats
+        std::atomic<size_t> async_eviction_triggered{0};
+        std::atomic<size_t> async_eviction_skipped_rate_limit{0};
+
+        // Write source breakdown (preload vs query-triggered)
+        std::atomic<size_t> cached_from_preload{0};
+        std::atomic<size_t> cached_from_query{0};
+        std::atomic<size_t> cached_bytes_preload{0};
+        std::atomic<size_t> cached_bytes_query{0};
+
+        // Per-partition breakdown
+        mutable std::shared_mutex partition_stats_mutex;
+        std::unordered_map<String, PartitionStats> partition_stats;
+    };
+
+    TTLCacheStats getStats() const;
+    std::vector<PartitionStats> getPartitionStats() const;
+
 private:
     size_t writeSegment(const String& seg_name, ReadBuffer& buffer, ReservationPtr& reservation);
 
@@ -103,6 +149,12 @@ private:
 
     /// Evict expired segments
     void evictExpired();
+
+    /// Evict oldest partitions until enough space for new segment
+    void evictOldestPartitionsUntilSpace(size_t needed_bytes);
+
+    /// Update partition-level stats
+    void updatePartitionStats(const String & partition_id, time_t partition_ts, bool hit, size_t bytes);
 
     struct DiskIterator : private boost::noncopyable
     {
@@ -162,6 +214,7 @@ private:
 
     const String table_uuid;
     UInt64 ttl_minutes;
+    size_t max_size_bytes;  // 0 = unlimited
 
     /// Simple map-based storage (not using BucketLRUCache)
     std::mutex cache_mutex;
@@ -171,6 +224,12 @@ private:
 
     /// Last eviction check time
     std::atomic<time_t> last_eviction_check{0};
+
+    /// Last async size-based eviction trigger time
+    std::atomic<time_t> last_size_eviction_trigger{0};
+
+    /// Cache statistics
+    TTLCacheStats cache_stats;
 };
 
 }

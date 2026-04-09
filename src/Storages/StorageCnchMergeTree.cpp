@@ -277,7 +277,8 @@ void StorageCnchMergeTree::startup()
                 getStorageUUID(),
                 getContext()->getStoragePolicy(getSettings()->storage_policy)->getVolumeByName("local", true),
                 getContext()->getDiskCacheThrottler(),
-                getSettings()->disk_cache_ttl_hours.value * 60  // Convert hours to minutes
+                getSettings()->disk_cache_ttl_hours.value * 60,  // Convert hours to minutes
+                getSettings()->disk_cache_max_size_bytes.value    // Per-table size limit
             );
         }
         catch (const Exception & e)
