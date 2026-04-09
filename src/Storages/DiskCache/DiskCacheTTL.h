@@ -100,7 +100,9 @@ public:
     static time_t parsePartitionTimestamp(const String & part_name);
 
     // Stats structures for observability
-    struct PartitionStats
+
+    // Internal stats with atomics (not copyable)
+    struct PartitionStatsInternal
     {
         String partition_id;
         size_t entry_count{0};
@@ -110,7 +112,44 @@ public:
         std::atomic<size_t> misses{0};
     };
 
+    // Snapshot for return (plain types, copyable)
+    struct PartitionStats
+    {
+        String partition_id;
+        size_t entry_count{0};
+        size_t total_bytes{0};
+        time_t partition_timestamp{0};
+        size_t hits{0};
+        size_t misses{0};
+    };
+
+    // Snapshot for return (plain types, copyable)
     struct TTLCacheStats
+    {
+        String table_uuid;
+        size_t total_entries{0};
+        size_t total_bytes{0};
+
+        // TTL-specific counters
+        size_t evicted_expired{0};
+        size_t evicted_size_limit{0};
+        size_t rejected_non_time_partition{0};
+        size_t rejected_too_old{0};
+        time_t last_eviction_run{0};
+
+        // Async size-based eviction stats
+        size_t async_eviction_triggered{0};
+        size_t async_eviction_skipped_rate_limit{0};
+
+        // Write source breakdown (preload vs query-triggered)
+        size_t cached_from_preload{0};
+        size_t cached_from_query{0};
+        size_t cached_bytes_preload{0};
+        size_t cached_bytes_query{0};
+    };
+
+    // Internal stats with atomics
+    struct TTLCacheStatsInternal
     {
         String table_uuid;
         std::atomic<size_t> total_entries{0};
@@ -135,7 +174,7 @@ public:
 
         // Per-partition breakdown
         mutable std::shared_mutex partition_stats_mutex;
-        std::unordered_map<String, PartitionStats> partition_stats;
+        std::unordered_map<String, PartitionStatsInternal> partition_stats;
     };
 
     TTLCacheStats getStats() const;
@@ -229,7 +268,7 @@ private:
     std::atomic<time_t> last_size_eviction_trigger{0};
 
     /// Cache statistics
-    TTLCacheStats cache_stats;
+    TTLCacheStatsInternal cache_stats;
 };
 
 }

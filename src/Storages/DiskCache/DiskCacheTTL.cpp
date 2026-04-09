@@ -988,6 +988,10 @@ DiskCacheTTL::TTLCacheStats DiskCacheTTL::getStats() const
     stats.last_eviction_run = cache_stats.last_eviction_run.load();
     stats.async_eviction_triggered = cache_stats.async_eviction_triggered.load();
     stats.async_eviction_skipped_rate_limit = cache_stats.async_eviction_skipped_rate_limit.load();
+    stats.cached_from_preload = cache_stats.cached_from_preload.load();
+    stats.cached_from_query = cache_stats.cached_from_query.load();
+    stats.cached_bytes_preload = cache_stats.cached_bytes_preload.load();
+    stats.cached_bytes_query = cache_stats.cached_bytes_query.load();
     return stats;
 }
 
@@ -996,9 +1000,16 @@ std::vector<DiskCacheTTL::PartitionStats> DiskCacheTTL::getPartitionStats() cons
     std::vector<PartitionStats> result;
     std::shared_lock<std::shared_mutex> lock(cache_stats.partition_stats_mutex);
     result.reserve(cache_stats.partition_stats.size());
-    for (const auto & [partition_id, stats] : cache_stats.partition_stats)
+    for (const auto & [partition_id, internal_stats] : cache_stats.partition_stats)
     {
-        result.push_back(stats);
+        PartitionStats snapshot;
+        snapshot.partition_id = internal_stats.partition_id;
+        snapshot.entry_count = internal_stats.entry_count;
+        snapshot.total_bytes = internal_stats.total_bytes;
+        snapshot.partition_timestamp = internal_stats.partition_timestamp;
+        snapshot.hits = internal_stats.hits.load();
+        snapshot.misses = internal_stats.misses.load();
+        result.push_back(snapshot);
     }
     return result;
 }
