@@ -76,13 +76,29 @@ public:
     IDiskCachePtr createDiskCacheFromTableSettings(
         const String & table_name,
         const UUID & table_uuid,
-        const VolumePtr & volume,
+        Context & context,
         const ThrottlerPtr & throttler,
         UInt64 ttl_minutes,
         size_t max_size_bytes = 0);
 
+    /// Global TTL cache usage tracking
+    /// shared across all per-table TTL caches
+    void addGlobalTTLUsage(size_t bytes) { global_ttl_cache_usage.fetch_add(bytes); }
+    void releaseGlobalTTL(size_t bytes) { global_ttl_cache_usage.fetch_sub(bytes); }
+    size_t getGlobalTTLUsage() const { return global_ttl_cache_usage.load(); }
+    size_t getGlobalTTLLimit() const
+    {
+        auto it = caches.find(DiskCacheType::MergeTree);
+        if (it != caches.end() && it->second)
+            return it->second->getSettings().ttl_cache_max_size;
+        return 0;
+    }
+
 private:
     void addNewCache(Context & context, const std::string & cache_name, bool create_default);
     std::unordered_map<DiskCacheType, IDiskCachePtr> caches;
+
+    /// Global TTL cache usage tracking
+    std::atomic<size_t> global_ttl_cache_usage{0};
 };
 }

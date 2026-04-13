@@ -14,6 +14,7 @@
  */
 
 #include <Storages/DiskCache/DiskCacheTTL.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/MergeTree/MergeTreePartInfo.h>
 #include <Storages/MergeTree/MergeTreeSuffix.h>
 #include <fmt/core.h>
@@ -334,8 +335,16 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
 
     ProfileEvents::increment(ProfileEvents::DiskCacheSetTotalOps, 1, Metrics::MetricType::Rate, {{"type", (is_preload ? "preload": "query")}});
 
-    // Async size-based eviction: if cache >90% full, schedule background cleanup
-    if (max_size_bytes > 0 && total_size.load() > max_size_bytes * 0.90)
+    // Check both global and local thresholds (both at 90%)
+    auto & factory = DiskCacheFactory::instance();
+    size_t global_usage = factory.getGlobalTTLUsage();
+    size_t global_limit = factory.getGlobalTTLLimit();
+
+    bool global_threshold_hit = (global_limit > 0 && global_usage > global_limit * 0.90);
+    bool local_threshold_hit = (max_size_bytes > 0 && total_size.load() > max_size_bytes * 0.90);
+
+    // Async size-based eviction: if either threshold hit, schedule background cleanup
+    if (global_threshold_hit || local_threshold_hit)
     {
         time_t now = time(nullptr);
         time_t last_trigger = last_size_eviction_trigger.load();
@@ -346,10 +355,19 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
             if (last_size_eviction_trigger.compare_exchange_strong(last_trigger, now))
             {
                 size_t target_free = max_size_bytes * 0.10;  // Free 10%
-                cache_stats.async_eviction_triggered++;
 
-                LOG_DEBUG(log, "Cache {}% full, scheduling async eviction to free {} bytes",
-                         (total_size.load() * 100 / max_size_bytes), target_free);
+                if (global_threshold_hit)
+                {
+                    cache_stats.async_eviction_triggered_global++;
+                    LOG_DEBUG(log, "Global cache at {}%, scheduling async eviction for table {}",
+                             (global_usage * 100 / global_limit), table_uuid);
+                }
+                else
+                {
+                    cache_stats.async_eviction_triggered++;
+                    LOG_DEBUG(log, "Table cache {}% full, scheduling async eviction to free {} bytes",
+                             (total_size.load() * 100 / max_size_bytes), target_free);
+                }
 
                 auto & thread_pool = IDiskCache::getEvictPool();
                 thread_pool.scheduleOrThrow([this, target_free] {
@@ -362,7 +380,10 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
         }
         else
         {
-            cache_stats.async_eviction_skipped_rate_limit++;
+            if (global_threshold_hit)
+                cache_stats.async_eviction_skipped_rate_limit_global++;
+            else
+                cache_stats.async_eviction_skipped_rate_limit++;
         }
     }
 
@@ -415,6 +436,9 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
                 cache_stats.cached_from_query++;
                 cache_stats.cached_bytes_query += weight;
             }
+
+            // Update global TTL usage
+            DiskCacheFactory::instance().addGlobalTTLUsage(weight);
         }
 
         // Update partition stats
@@ -616,6 +640,9 @@ void DiskCacheTTL::evictExpired()
         cache_stats.total_entries -= evicted_count;
         cache_stats.total_bytes -= evicted_bytes;
 
+        // Release global TTL usage
+        DiskCacheFactory::instance().releaseGlobalTTL(evicted_bytes);
+
         LOG_INFO(log, "Evicted {} expired segments, freed {} bytes", evicted_count, evicted_bytes);
     }
 
@@ -732,6 +759,9 @@ void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
         cache_stats.evicted_size_limit += to_evict.size();
         cache_stats.total_entries -= to_evict.size();
         cache_stats.total_bytes -= evicted_bytes;
+
+        // Release global TTL usage
+        DiskCacheFactory::instance().releaseGlobalTTL(evicted_bytes);
 
         LOG_INFO(log, "Evicted {} segments from oldest parts for size limit, freed {} bytes",
                  to_evict.size(), evicted_bytes);
@@ -937,6 +967,10 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
     );
     disk_cache.total_entries++;
     disk_cache.total_size += file_size;
+
+    // Add to global TTL usage
+    DiskCacheFactory::instance().addGlobalTTLUsage(file_size);
+
     total_loaded++;
 }
 
@@ -988,6 +1022,8 @@ DiskCacheTTL::TTLCacheStats DiskCacheTTL::getStats() const
     stats.last_eviction_run = cache_stats.last_eviction_run.load();
     stats.async_eviction_triggered = cache_stats.async_eviction_triggered.load();
     stats.async_eviction_skipped_rate_limit = cache_stats.async_eviction_skipped_rate_limit.load();
+    stats.async_eviction_triggered_global = cache_stats.async_eviction_triggered_global.load();
+    stats.async_eviction_skipped_rate_limit_global = cache_stats.async_eviction_skipped_rate_limit_global.load();
     stats.cached_from_preload = cache_stats.cached_from_preload.load();
     stats.cached_from_query = cache_stats.cached_from_query.load();
     stats.cached_bytes_preload = cache_stats.cached_bytes_preload.load();

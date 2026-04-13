@@ -263,8 +263,8 @@ QueryProcessingStage::Enum StorageCnchMergeTree::getQueryProcessingStage(
 
 void StorageCnchMergeTree::startup()
 {
-    // Create per-table TTL cache if enabled
-    if (getSettings()->enable_per_table_ttl_cache)
+    // Create per-table TTL cache if disk_cache_ttl_hours > 0
+    if (getSettings()->disk_cache_ttl_hours.value > 0)
     {
         LOG_INFO(log, "Creating per-table TTL cache for {} (TTL: {} hours)",
             getStorageID().getNameForLogs(),
@@ -275,7 +275,7 @@ void StorageCnchMergeTree::startup()
             disk_cache = DiskCacheFactory::instance().createDiskCacheFromTableSettings(
                 getStorageID().getNameForLogs(),
                 getStorageUUID(),
-                getContext()->getStoragePolicy(getSettings()->storage_policy)->getVolumeByName("local", true),
+                *getContext(),
                 getContext()->getDiskCacheThrottler(),
                 getSettings()->disk_cache_ttl_hours.value * 60,  // Convert hours to minutes
                 getSettings()->disk_cache_max_size_bytes.value    // Per-table size limit

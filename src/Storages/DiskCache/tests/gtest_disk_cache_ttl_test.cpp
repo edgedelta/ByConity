@@ -215,7 +215,7 @@ TEST_F(DiskCacheTTLTest, TTLDisabled)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 0; // TTL disabled
-    DiskCacheTTL cache(\1, volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
 
     time_t now = time(nullptr);
 
@@ -244,7 +244,7 @@ TEST_F(DiskCacheTTLTest, RejectNonTimePartitions)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache(\1, volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
 
     // String partition (non-time)
     String nontime_part = "string_partition_1_100_2";
@@ -281,7 +281,7 @@ TEST_F(DiskCacheTTLTest, BasicOperations)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60; // 1 hour TTL
-    DiskCacheTTL cache(\1, volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
 
     time_t now = time(nullptr);
 
@@ -331,7 +331,7 @@ TEST_F(DiskCacheTTLTest, EvictExpired)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60; // 1 hour TTL
-    DiskCacheTTL cache(\1, volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
 
     time_t now = time(nullptr);
 
@@ -387,7 +387,7 @@ TEST_F(DiskCacheTTLTest, ConcurrentAccess)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache(\1, volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
 
     time_t now = time(nullptr);
     struct tm tm_now;
@@ -418,7 +418,7 @@ TEST_F(DiskCacheTTLTest, ConcurrentAccess)
     for (auto& t : threads)
         t.join();
 
-    ASSERT_EQ(success_count.load(), 10);
+    ASSERT_EQ(success_count, 10);
     ASSERT_EQ(cache.getKeyCount(), 10);
 }
 
@@ -431,7 +431,7 @@ TEST_F(DiskCacheTTLTest, DropPart)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache(\1, volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
 
     time_t now = time(nullptr);
     struct tm tm_now;
@@ -482,7 +482,7 @@ TEST_F(DiskCacheTTLTest, CacheStats)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache(\1, volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
 
     ASSERT_EQ(cache.getKeyCount(), 0);
     ASSERT_EQ(cache.getCachedSize(), 0);
@@ -515,7 +515,7 @@ TEST_F(DiskCacheTTLTest, MultiDiskVolume)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache(\1, volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
 
     time_t now = time(nullptr);
     struct tm tm_now;
@@ -553,7 +553,7 @@ TEST_F(DiskCacheTTLTest, DetailedStats)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache(\1, volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
 
     time_t now = time(nullptr);
 
@@ -600,10 +600,10 @@ TEST_F(DiskCacheTTLTest, DetailedStats)
     // Check global stats
     auto stats = cache.getStats();
     ASSERT_EQ(stats.table_uuid, "test-uuid-0000-0000-0000-00000000000b");
-    ASSERT_EQ(stats.total_entries.load(), 5); // Only recent entries
-    ASSERT_GT(stats.total_bytes.load(), 0);
-    ASSERT_EQ(stats.rejected_too_old.load(), 3); // Old entries rejected
-    ASSERT_EQ(stats.rejected_non_time_partition.load(), 2); // Non-time rejected
+    ASSERT_EQ(stats.total_entries, 5); // Only recent entries
+    ASSERT_GT(stats.total_bytes, 0);
+    ASSERT_EQ(stats.rejected_too_old, 3); // Old entries rejected
+    ASSERT_EQ(stats.rejected_non_time_partition, 2); // Non-time rejected
 
     // Perform gets (hits)
     for (int i = 0; i < 5; i++)
@@ -637,8 +637,8 @@ TEST_F(DiskCacheTTLTest, DetailedStats)
             found_recent = true;
             ASSERT_EQ(ps.entry_count, 5);
             ASSERT_GT(ps.total_bytes, 0);
-            ASSERT_EQ(ps.hits.load(), 5);
-            ASSERT_EQ(ps.misses.load(), 1); // Initial set counts as miss
+            ASSERT_EQ(ps.hits, 5);
+            ASSERT_EQ(ps.misses, 1); // Initial set counts as miss
             break;
         }
     }
@@ -654,7 +654,7 @@ TEST_F(DiskCacheTTLTest, StatsAfterEviction)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache(\1, volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
 
     time_t now = time(nullptr);
 
@@ -689,7 +689,7 @@ TEST_F(DiskCacheTTLTest, StatsAfterEviction)
     }
 
     auto stats_before = cache.getStats();
-    size_t entries_before = stats_before.total_entries.load();
+    size_t entries_before = stats_before.total_entries;
 
     // Wait for eviction
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -697,9 +697,9 @@ TEST_F(DiskCacheTTLTest, StatsAfterEviction)
     auto stats_after = cache.getStats();
 
     // Old entries should be evicted
-    ASSERT_LT(stats_after.total_entries.load(), entries_before);
-    ASSERT_GT(stats_after.evicted_expired.load(), 0);
-    ASSERT_GT(stats_after.last_eviction_run.load(), 0);
+    ASSERT_LT(stats_after.total_entries, entries_before);
+    ASSERT_GT(stats_after.evicted_expired, 0);
+    ASSERT_GT(stats_after.last_eviction_run, 0);
 }
 
 // Test per-partition hit rate calculation
@@ -711,7 +711,7 @@ TEST_F(DiskCacheTTLTest, PartitionHitRate)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache(\1, volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
 
     time_t now = time(nullptr);
     struct tm tm_now;
@@ -752,8 +752,8 @@ TEST_F(DiskCacheTTLTest, PartitionHitRate)
         if (ps.partition_id == partition_id)
         {
             found = true;
-            size_t hits = ps.hits.load();
-            size_t misses = ps.misses.load();
+            size_t hits = ps.hits;
+            size_t misses = ps.misses;
 
             // Hits should include successful gets
             ASSERT_EQ(hits, 7);
@@ -801,8 +801,8 @@ TEST_F(DiskCacheTTLTest, AsyncSizeBasedEviction)
     }
 
     auto stats_before = cache.getStats();
-    ASSERT_GT(stats_before.total_bytes.load(), settings.ttl_cache_max_size * 0.90);
-    ASSERT_EQ(stats_before.async_eviction_triggered.load(), 0);
+    ASSERT_GT(stats_before.total_bytes, settings.ttl_cache_max_size * 0.90);
+    ASSERT_EQ(stats_before.async_eviction_triggered, 0);
 
     // Add one more segment - should trigger async eviction
     {
@@ -817,14 +817,14 @@ TEST_F(DiskCacheTTLTest, AsyncSizeBasedEviction)
 
     // Check that async eviction was triggered
     auto stats_after = cache.getStats();
-    ASSERT_EQ(stats_after.async_eviction_triggered.load(), 1);
+    ASSERT_EQ(stats_after.async_eviction_triggered, 1);
 
     // Wait for async eviction to complete
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     // Verify some space was freed
     auto stats_final = cache.getStats();
-    ASSERT_GT(stats_final.evicted_size_limit.load(), 0);
+    ASSERT_GT(stats_final.evicted_size_limit, 0);
 
     // Try adding another segment immediately - should be rate limited
     {
@@ -839,8 +839,8 @@ TEST_F(DiskCacheTTLTest, AsyncSizeBasedEviction)
 
     // Should be rate limited (still 1 trigger, but skipped counter increased)
     auto stats_rate_limit = cache.getStats();
-    ASSERT_EQ(stats_rate_limit.async_eviction_triggered.load(), 1);
-    ASSERT_GT(stats_rate_limit.async_eviction_skipped_rate_limit.load(), 0);
+    ASSERT_EQ(stats_rate_limit.async_eviction_triggered, 1);
+    ASSERT_GT(stats_rate_limit.async_eviction_skipped_rate_limit, 0);
 }
 
 // Test explicit min/max time parameters override partition_id parsing
@@ -928,10 +928,10 @@ TEST_F(DiskCacheTTLTest, PreloadQueryStats)
         cache.set(seg, buf, data.size(), false); // is_preload=false
 
         auto stats = cache.getStats();
-        ASSERT_EQ(stats.cached_from_query.load(), 1);
-        ASSERT_EQ(stats.cached_bytes_query.load(), 100);
-        ASSERT_EQ(stats.cached_from_preload.load(), 0);
-        ASSERT_EQ(stats.cached_bytes_preload.load(), 0);
+        ASSERT_EQ(stats.cached_from_query, 1);
+        ASSERT_EQ(stats.cached_bytes_query, 100);
+        ASSERT_EQ(stats.cached_from_preload, 0);
+        ASSERT_EQ(stats.cached_bytes_preload, 0);
     }
 
     // Cache with preload=true (background preload)
@@ -942,10 +942,10 @@ TEST_F(DiskCacheTTLTest, PreloadQueryStats)
         cache.set(seg, buf, data.size(), true); // is_preload=true
 
         auto stats = cache.getStats();
-        ASSERT_EQ(stats.cached_from_query.load(), 1);
-        ASSERT_EQ(stats.cached_bytes_query.load(), 100);
-        ASSERT_EQ(stats.cached_from_preload.load(), 1);
-        ASSERT_EQ(stats.cached_bytes_preload.load(), 200);
+        ASSERT_EQ(stats.cached_from_query, 1);
+        ASSERT_EQ(stats.cached_bytes_query, 100);
+        ASSERT_EQ(stats.cached_from_preload, 1);
+        ASSERT_EQ(stats.cached_bytes_preload, 200);
     }
 
     // Cache more query-triggered segments
@@ -956,32 +956,25 @@ TEST_F(DiskCacheTTLTest, PreloadQueryStats)
         cache.set(seg, buf, data.size(), false); // is_preload=false
 
         auto stats = cache.getStats();
-        ASSERT_EQ(stats.cached_from_query.load(), 2);
-        ASSERT_EQ(stats.cached_bytes_query.load(), 150);
-        ASSERT_EQ(stats.cached_from_preload.load(), 1);
-        ASSERT_EQ(stats.cached_bytes_preload.load(), 200);
+        ASSERT_EQ(stats.cached_from_query, 2);
+        ASSERT_EQ(stats.cached_bytes_query, 150);
+        ASSERT_EQ(stats.cached_from_preload, 1);
+        ASSERT_EQ(stats.cached_bytes_preload, 200);
     }
 }
 
-// Test auto-sizing by percent when max_size_bytes=0
-TEST_F(DiskCacheTTLTest, AutoSizeByPercent)
+// Test unlimited per-table cache (constrained only by global limit)
+TEST_F(DiskCacheTTLTest, UnlimitedPerTable)
 {
     auto volume = createTestVolume();
     DiskCacheSettings settings;
-    settings.ttl_cache_max_size = 0;  // Don't use worker-level limit
-    settings.ttl_cache_max_percent = 50;  // Use 50% of disk
+    settings.ttl_cache_max_size = 0;  // No worker-level per-table default
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
 
-    // Pass max_size_bytes=0 to trigger auto-sizing
-    DiskCacheTTL cache("test_auto_size", "test-uuid-0000-0000-0000-000000000012", volume, nullptr, settings, strategy, ttl_minutes, 0);
-
-    // Get disk capacity
-    auto total_space = volume->getTotalSpace(true);
-    size_t expected_max_size = static_cast<size_t>(total_space.bytes * 0.50);
-
-    ASSERT_GT(expected_max_size, 0);
+    // Pass max_size_bytes=0 → unlimited per-table (constrained by global)
+    DiskCacheTTL cache("test_unlimited", "test-uuid-0000-0000-0000-000000000012", volume, nullptr, settings, strategy, ttl_minutes, 0);
 
     time_t now = time(nullptr);
     struct tm tm_now;
@@ -989,40 +982,22 @@ TEST_F(DiskCacheTTLTest, AutoSizeByPercent)
     String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
         tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
 
-    // Fill cache beyond 50% of disk - should trigger size-based eviction
-    size_t segment_size = expected_max_size / 8;  // Each segment = 12.5% of limit
-    int segments_added = 0;
-
-    for (int i = 0; i < 10; i++)
+    // Cache some data - no per-table limit check
+    for (int i = 0; i < 5; i++)
     {
         String seg = fmt::format("test-uuid-0000-0000-0000-000000000012/{}/col.bin/offset_{}", part, i);
-        String data = String(segment_size, 'x');
+        String data = String(1024, 'x');
         ReadBufferFromString buf(data);
         cache.set(seg, buf, data.size(), false);
-        segments_added++;
-
-        // Should trigger async eviction around 90% (7.2 segments)
-        if (segments_added >= 8)
-        {
-            auto stats = cache.getStats();
-            if (stats.async_eviction_triggered.load() > 0)
-                break;
-        }
     }
 
-    // Verify async eviction was triggered due to percent-based size limit
+    // Verify cached (no per-table eviction triggered)
     auto stats = cache.getStats();
-    ASSERT_GT(stats.async_eviction_triggered.load(), 0);
-
-    // Wait for eviction to complete
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-    // Verify eviction happened
-    auto final_stats = cache.getStats();
-    ASSERT_GT(final_stats.evicted_size_limit.load(), 0);
+    ASSERT_EQ(stats.async_eviction_triggered, 0);  // No local eviction
+    ASSERT_EQ(stats.total_entries, 5);
 }
 
-// Test 3-tier precedence: per-table max_size_bytes > worker ttl_cache_max_size > auto-size
+// Test 2-tier precedence: per-table max_size_bytes > worker ttl_cache_max_size > unlimited (0)
 TEST_F(DiskCacheTTLTest, SizeLimitPrecedence)
 {
     auto volume = createTestVolume();
@@ -1056,7 +1031,7 @@ TEST_F(DiskCacheTTLTest, SizeLimitPrecedence)
 
         // Should trigger eviction at 1MB limit, not 10MB
         auto stats = cache.getStats();
-        ASSERT_GT(stats.async_eviction_triggered.load(), 0);
+        ASSERT_GT(stats.async_eviction_triggered, 0);
     }
 
     // Test 2: Worker-level limit (10MB) used when per-table = 0
@@ -1082,21 +1057,17 @@ TEST_F(DiskCacheTTLTest, SizeLimitPrecedence)
 
         // Should trigger eviction at 10MB limit
         auto stats = cache.getStats();
-        ASSERT_GT(stats.async_eviction_triggered.load(), 0);
+        ASSERT_GT(stats.async_eviction_triggered, 0);
     }
 
-    // Test 3: Auto-size by percent when both per-table and worker-level = 0
+    // Test 3: Unlimited when both per-table and worker-level = 0
     {
         DiskCacheSettings settings_no_limit;
         settings_no_limit.ttl_cache_max_size = 0;
-        settings_no_limit.ttl_cache_max_percent = 10;  // Small percent for faster test
         auto strategy_no_limit = std::make_shared<DiskCacheSimpleStrategy>(settings_no_limit);
 
-        DiskCacheTTL cache("test_auto_size", "test-uuid-0000-0000-0000-000000000015",
+        DiskCacheTTL cache("test_unlimited", "test-uuid-0000-0000-0000-000000000015",
                           volume, nullptr, settings_no_limit, strategy_no_limit, ttl_minutes, 0);
-
-        auto total_space = volume->getTotalSpace(true);
-        size_t expected_limit = static_cast<size_t>(total_space.bytes * 0.10);
 
         time_t now = time(nullptr);
         struct tm tm_now;
@@ -1104,19 +1075,19 @@ TEST_F(DiskCacheTTLTest, SizeLimitPrecedence)
         String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
             tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
 
-        // Fill beyond auto-sized limit
-        size_t segment_size = expected_limit / 8;
-        for (int i = 0; i < 10; i++)
+        // Cache data - no per-table limit
+        for (int i = 0; i < 5; i++)
         {
             String seg = fmt::format("test-uuid-0000-0000-0000-000000000015/{}/col.bin/offset_{}", part, i);
-            String data = String(segment_size, 'c');
+            String data = String(1024, 'c');
             ReadBufferFromString buf(data);
             cache.set(seg, buf, data.size(), false);
         }
 
-        // Should trigger eviction based on auto-sized limit
+        // No per-table eviction (unlimited, only constrained by global)
         auto stats = cache.getStats();
-        ASSERT_GT(stats.async_eviction_triggered.load(), 0);
+        ASSERT_EQ(stats.async_eviction_triggered, 0);
+        ASSERT_EQ(stats.total_entries, 5);
     }
 }
 

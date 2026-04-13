@@ -113,7 +113,7 @@ void DiskCacheFactory::shutdown()
 IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
     const String & table_name,
     const UUID & table_uuid,
-    const VolumePtr & volume,
+    Context & context,
     const ThrottlerPtr & throttler,
     UInt64 ttl_minutes,
     size_t max_size_bytes)
@@ -128,27 +128,16 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
         cache_settings = it->second->getSettings();
     }
 
-    // Calculate effective max size: per-table setting > worker-level setting > auto-size by percent
-    size_t effective_max_size = max_size_bytes;
+    // Get volume from ttl_disk_policy 
+    // defaults to disk_policy if not set
+    VolumePtr volume = context.getStoragePolicy(cache_settings.ttl_disk_policy)->getVolumeByName("local", true);
 
+    // Per-table size limit: explicit setting or constrained by global limit
+    size_t effective_max_size = max_size_bytes;
     if (effective_max_size == 0)
     {
-        // No per-table limit, use worker-level ttl_cache_max_size
-        effective_max_size = cache_settings.ttl_cache_max_size;
-
-        // If worker-level also not set, auto-size by percent
-        if (effective_max_size == 0)
-        {
-            auto total_space = volume->getTotalSpace(true);
-            effective_max_size = static_cast<size_t>(
-                total_space.bytes * (cache_settings.ttl_cache_max_percent * 1.0 / 100)
-            );
-            LOG_DEBUG(log, "Auto-sizing TTL cache for {} using {}% of {}GB = {}GB",
-                     table_name,
-                     cache_settings.ttl_cache_max_percent,
-                     total_space.bytes / (1024*1024*1024),
-                     effective_max_size / (1024*1024*1024));
-        }
+        LOG_DEBUG(log, "TTL cache for {} has no per-table limit, constrained only by global limit",
+                 table_name);
     }
 
     // Per-table cache is always TTL-based
@@ -156,8 +145,16 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
     auto cache = std::make_shared<DiskCacheTTL>(
         table_name, UUIDHelpers::UUIDToString(table_uuid), volume, throttler, cache_settings, strategy, ttl_minutes, effective_max_size);
 
-    LOG_INFO(log, "Created per-table TTL cache for {} (UUID: {}, TTL: {} minutes, max_size: {} bytes / {}GB)",
-        table_name, UUIDHelpers::UUIDToString(table_uuid), ttl_minutes, effective_max_size, effective_max_size / (1024*1024*1024));
+    if (effective_max_size > 0)
+    {
+        LOG_INFO(log, "Created per-table TTL cache for {} (UUID: {}, TTL: {} minutes, max_size: {}GB, policy: {})",
+            table_name, UUIDHelpers::UUIDToString(table_uuid), ttl_minutes, effective_max_size / (1024*1024*1024), cache_settings.ttl_disk_policy);
+    }
+    else
+    {
+        LOG_INFO(log, "Created per-table TTL cache for {} (UUID: {}, TTL: {} minutes, max_size: unlimited, policy: {})",
+            table_name, UUIDHelpers::UUIDToString(table_uuid), ttl_minutes, cache_settings.ttl_disk_policy);
+    }
 
     return cache;
 }
@@ -197,6 +194,14 @@ void DiskCacheFactory::addNewCache(Context & context, const std::string & cache_
                 static_cast<size_t>(total_space_unlimited.inodes * (cache_settings.lru_max_percent * 1.0 / 100)),
                 cache_settings.lru_max_nums));
     }
+
+    // Resolve global TTL cache limit (like LRU pattern)
+    cache_settings.ttl_cache_max_size = (cache_settings.ttl_cache_max_size > 0)
+        ? cache_settings.ttl_cache_max_size
+        : static_cast<size_t>(total_space_unlimited.bytes * (cache_settings.ttl_cache_max_percent / 100.0));
+
+    LOG_INFO(log, "{} cache: TTL global limit {}GB",
+             cache_name, cache_settings.ttl_cache_max_size / (1024*1024*1024));
 
     // Global cache always uses LRU (TTL cache is per-table only)
     if (!cache_settings.meta_cache_size_ratio)

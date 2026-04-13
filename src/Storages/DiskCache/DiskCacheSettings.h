@@ -29,6 +29,7 @@ struct DiskCacheSettings
     void loadFromConfig(const Poco::Util::AbstractConfiguration & conf, const std::string & disk_cache_name);
 
     String disk_policy {"default"};
+    String ttl_disk_policy {""};  // Storage policy for TTL cache, empty = use disk_policy
     size_t lru_max_size {std::numeric_limits<size_t>::max()};
     size_t lru_max_nums {std::numeric_limits<size_t>::max()};
     // max percent of disk total capacity

@@ -24,6 +24,7 @@ void DiskCacheSettings::loadFromConfig(const Poco::Util::AbstractConfiguration &
 {
     std::string config_prefix = fmt::format("{}.{}", root, disk_cache_name); // {root}.MergeTree
     disk_policy = config.getString(config_prefix + ".disk_policy", "default");
+    ttl_disk_policy = config.getString(config_prefix + ".ttl_disk_policy", disk_policy);  // Fallback to disk_policy
     lru_max_nums = config.getUInt64(config_prefix + ".lru_max_object_num", std::numeric_limits<size_t>::max());
     // Todo: process the case which disk not have 2 TB free space
     lru_max_size = config.getUInt64(config_prefix + ".lru_max_size", static_cast<uint64_t>(2) * 1024 * 1024 * 1024 * 1024);
