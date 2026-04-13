@@ -110,6 +110,14 @@ void DiskCacheFactory::shutdown()
     IDiskCache::close();
 }
 
+size_t DiskCacheFactory::getGlobalTTLLimit() const
+{
+    auto it = caches.find(DiskCacheType::MergeTree);
+    if (it != caches.end() && it->second)
+        return it->second->getSettings().ttl_cache_max_size;
+    return 0;
+}
+
 IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
     const String & table_name,
     const UUID & table_uuid,
