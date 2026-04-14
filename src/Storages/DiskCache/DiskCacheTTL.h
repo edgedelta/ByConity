@@ -184,6 +184,9 @@ public:
     TTLCacheStats getStats() const;
     std::vector<PartitionStats> getPartitionStats() const;
 
+    UInt64 getTTLMinutes() const { return ttl_minutes; }
+    size_t getMaxSizeBytes() const { return max_size_bytes; }
+
 private:
     size_t writeSegment(const String& seg_name, ReadBuffer& buffer, ReservationPtr& reservation);
 
