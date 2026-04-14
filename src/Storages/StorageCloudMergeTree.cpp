@@ -43,6 +43,7 @@
 #include <CloudServices/CnchPartsHelper.h>
 #include <Interpreters/InterpreterSelectQuery.h>
 #include <Storages/StorageReplicatedMergeTree.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
 
 namespace ProfileEvents
 {
@@ -101,6 +102,25 @@ void StorageCloudMergeTree::shutdown()
 {
     if (dedup_worker)
         dedup_worker->stop();
+}
+
+IDiskCachePtr StorageCloudMergeTree::getDiskCache() const
+{
+    // Check if TTL cache enabled
+    if (getSettings()->disk_cache_ttl_hours.value > 0)
+    {
+        return DiskCacheFactory::instance().createDiskCacheFromTableSettings(
+            getStorageID().getNameForLogs(),
+            getStorageUUID(),
+            *getContext(),
+            getContext()->getDiskCacheThrottler(),
+            getSettings()->disk_cache_ttl_hours.value * 60,  // hours to minutes
+            getSettings()->disk_cache_max_size_bytes.value
+        );
+    }
+
+    // Fallback to global LRU cache
+    return DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
 }
 
 StorageCloudMergeTree::~StorageCloudMergeTree()

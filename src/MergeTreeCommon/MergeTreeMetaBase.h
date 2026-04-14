@@ -37,6 +37,8 @@ namespace DB
 {
 
 class MutationCommands;
+class IDiskCache;
+using IDiskCachePtr = std::shared_ptr<IDiskCache>;
 
 class MergeTreeMetaBase : public IStorage, public WithMutableContext, public MergeTreeDataPartTypeHelper
 {
@@ -170,6 +172,11 @@ public:
     StoragePolicyPtr getStoragePolicy(StorageLocation location) const override;
     virtual const String& getRelativeDataPath(StorageLocation location) const;
     void setRelativeDataPath(StorageLocation location, const String & rel_path);
+
+    /// Get disk cache (TTL cache if enabled, otherwise global LRU)
+    /// Override in subclasses to provide per-table TTL cache support
+    virtual IDiskCachePtr getDiskCache() const;
+
 
     bool supportsFinal() const override
     {

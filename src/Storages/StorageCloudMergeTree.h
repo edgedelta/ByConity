@@ -26,6 +26,10 @@ namespace DB
 
 class CloudMergeTreeDedupWorker;
 using CloudMergeTreeDedupWorkerPtr = std::unique_ptr<CloudMergeTreeDedupWorker>;
+
+class IDiskCache;
+using IDiskCachePtr = std::shared_ptr<IDiskCache>;
+
 namespace IngestColumnCnch
 {
     struct IngestPartitionParam;
@@ -104,6 +108,8 @@ public:
 
     CloudMergeTreeDedupWorker * tryGetDedupWorker() { return dedup_worker.get(); }
     CloudMergeTreeDedupWorker * getDedupWorker();
+
+    IDiskCachePtr getDiskCache() const;
 
     QueryProcessingStage::Enum getQueryProcessingStage(ContextPtr, QueryProcessingStage::Enum, const StorageSnapshotPtr &, SelectQueryInfo &) const override;
     bool getQueryProcessingStageWithAggregateProjection(ContextPtr query_context, const StorageSnapshotPtr & storage_snapshot, SelectQueryInfo & query_info) const;

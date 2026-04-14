@@ -355,7 +355,7 @@ void MergeTreeDataPartCNCH::loadFromFileSystem(bool load_hint_mutation)
         try
         {
             MetaInfoDiskCacheSegment metainfo_segment(shared_from_this());
-            auto disk_cache = DiskCacheFactory::instance().get(DiskCacheType::MergeTree)->getMetaCache();
+            auto disk_cache = storage.getDiskCache()->getMetaCache();
             auto [cache_disk, segment_path] = disk_cache->get(metainfo_segment.getSegmentName());
             if (cache_disk && cache_disk->exists(segment_path))
             {
@@ -389,7 +389,7 @@ void MergeTreeDataPartCNCH::loadFromFileSystem(bool load_hint_mutation)
     if (parent_part && enableDiskCache())
     {
         auto segment = std::make_shared<MetaInfoDiskCacheSegment>(shared_from_this());
-        auto disk_cache = DiskCacheFactory::instance().get(DiskCacheType::MergeTree)->getMetaCache();
+        auto disk_cache = storage.getDiskCache()->getMetaCache();
         disk_cache->cacheSegmentsToLocalDisk({std::move(segment)});
     }
 }
@@ -753,7 +753,7 @@ IMergeTreeDataPart::IndexPtr MergeTreeDataPartCNCH::loadIndexFromStorage() const
     /// first try to load index from local disk cache
     if (enableDiskCache())
     {
-        auto disk_cache = DiskCacheFactory::instance().get(DiskCacheType::MergeTree)->getMetaCache();
+        auto disk_cache = storage.getDiskCache()->getMetaCache();
         PrimaryIndexDiskCacheSegment segment(shared_from_this());
         auto [cache_disk, segment_path] = disk_cache->get(segment.getSegmentName());
 
@@ -794,7 +794,7 @@ IMergeTreeDataPart::IndexPtr MergeTreeDataPartCNCH::loadIndexFromStorage() const
     if (enableDiskCache())
     {
         auto index_seg = std::make_shared<PrimaryIndexDiskCacheSegment>(shared_from_this());
-        auto disk_cache = DiskCacheFactory::instance().get(DiskCacheType::MergeTree)->getMetaCache();
+        auto disk_cache = storage.getDiskCache()->getMetaCache();
         disk_cache->cacheSegmentsToLocalDisk({std::move(index_seg)});
     }
     return res;
@@ -812,7 +812,7 @@ IMergeTreeDataPart::ChecksumsPtr MergeTreeDataPartCNCH::loadChecksums([[maybe_un
     if (enableDiskCache())
     {
         ChecksumsDiskCacheSegment checksums_segment(shared_from_this());
-        auto disk_cache = DiskCacheFactory::instance().get(DiskCacheType::MergeTree)->getMetaCache();
+        auto disk_cache = storage.getDiskCache()->getMetaCache();
         auto [cache_disk, segment_path] = disk_cache->get(checksums_segment.getSegmentName());
 
         if (cache_disk && cache_disk->exists(segment_path))
@@ -907,7 +907,7 @@ IMergeTreeDataPart::ChecksumsPtr MergeTreeDataPartCNCH::loadChecksumsFromRemote(
     if (enableDiskCache() && follow_part_chain)
     {
         auto segment = std::make_shared<ChecksumsDiskCacheSegment>(shared_from_this());
-        auto disk_cache = DiskCacheFactory::instance().get(DiskCacheType::MergeTree)->getMetaCache();
+        auto disk_cache = storage.getDiskCache()->getMetaCache();
         disk_cache->cacheSegmentsToLocalDisk({std::move(segment)});
     }
 
@@ -1237,7 +1237,8 @@ void MergeTreeDataPartCNCH::preload(UInt64 preload_level, UInt64 submit_ts) cons
             return;
         }
 
-        auto disk_cache = DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
+        // Get cache from storage (TTL cache if enabled, otherwise global LRU)
+        auto disk_cache = storage.getDiskCache();
         auto cache_strategy = disk_cache->getStrategy();
 
         MarkRanges all_mark_ranges{MarkRange(0, getMarksCount())};
@@ -1494,7 +1495,7 @@ void MergeTreeDataPartCNCH::preload(UInt64 preload_level, UInt64 submit_ts) cons
 
                 std::unique_ptr<IGinDataPartHelper> part_helper = std::make_unique<GinDataCNCHPartHelper>(
                     getMvccDataPart(index_helper->getFileName() + INDEX_FILE_EXTENSION),
-                    DiskCacheFactory::instance().get(DiskCacheType::MergeTree)->getMetaCache(),
+                    storage.getDiskCache()->getMetaCache(),
                     DiskCacheMode::USE_DISK_CACHE);
                 factory->get(index_helper->getFileName(), std::move(part_helper));
             }
@@ -1548,7 +1549,7 @@ void MergeTreeDataPartCNCH::dropDiskCache(ThreadPool & pool, bool drop_vw_disk_c
     }
 
     auto part_log = storage.getContext()->getPartLog(storage.getDatabaseName());
-    auto disk_cache = DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
+    auto disk_cache = storage.getDiskCache();
     auto cache_strategy = disk_cache->getStrategy();
 
     auto impl = [part_log, part = shared_from_this(), part_base_path, disk_cache] {
