@@ -18,6 +18,7 @@
 #include <atomic>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <unordered_map>
 #include <shared_mutex>
 #include <vector>
@@ -29,6 +30,8 @@
 
 namespace DB
 {
+
+class TTLCacheFDBIndex;
 
 class DiskCacheTTLMeta
 {
@@ -186,6 +189,7 @@ public:
 
     UInt64 getTTLMinutes() const { return ttl_minutes; }
     size_t getMaxSizeBytes() const { return max_size_bytes; }
+    void setFDBIndex(std::shared_ptr<TTLCacheFDBIndex> idx) { fdb_index = std::move(idx); }
 
 private:
     size_t writeSegment(const String& seg_name, ReadBuffer& buffer, ReservationPtr& reservation);
@@ -253,6 +257,10 @@ private:
 
         size_t delete_file_size {0};
     };
+
+    /// FDB-backed index for fast startup recovery 
+    /// optional — null if catalog unavailable
+    std::shared_ptr<TTLCacheFDBIndex> fdb_index;
 
     ThrottlerPtr set_rate_throttler;
     ThrottlerPtr set_throughput_throttler;

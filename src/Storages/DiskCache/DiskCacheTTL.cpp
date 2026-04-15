@@ -15,6 +15,7 @@
 
 #include <Storages/DiskCache/DiskCacheTTL.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
+#include <Storages/DiskCache/TTLCacheFDBIndex.h>
 #include <Storages/MergeTree/MergeTreePartInfo.h>
 #include <Storages/MergeTree/MergeTreeSuffix.h>
 #include <fmt/core.h>
@@ -24,6 +25,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include "Common/Exception.h"
 #include "Common/hex.h"
 #include "common/logger_useful.h"
@@ -445,6 +447,9 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
         String part_name = extractPartName(seg_name);
         String partition_id = extractPartitionId(part_name);
         updatePartitionStats(partition_id, part_ts, false, weight);
+
+        if (fdb_index)
+            fdb_index->onSet(key, seg_name, weight, part_ts);
     }
     catch(const Exception & e)
     {
@@ -572,11 +577,9 @@ void DiskCacheTTL::evictExpired()
 
     for (const auto & [part_hash, segments] : parts)
     {
-        if (!segments.empty() && !shouldCache(segments[0].second->max_timestamp))
-        {
-            // Entire part is expired - evict all its segments
-            to_evict.insert(to_evict.end(), segments.begin(), segments.end());
-        }
+        if (segments.empty() || shouldCache(segments[0].second->max_timestamp))
+            continue;
+        to_evict.insert(to_evict.end(), segments.begin(), segments.end());
     }
 
     // Remove from cache_map
@@ -594,18 +597,18 @@ void DiskCacheTTL::evictExpired()
         }
     }
 
-    // Delete files
+    // Delete files; partition_id derived from meta->max_timestamp is reused for
+    // both the file path and the FDB eviction (one clean() per part via hash_high).
+    std::unordered_set<UInt64> fdb_evicted_parts;
     for (const auto & [key, meta] : to_evict)
     {
         try
         {
-            // Build path from key + partition timestamp
             String hex_key = hexKey(key);
             std::string_view view(hex_key);
             std::string_view hex_key_low = view.substr(0, HEX_KEY_LEN / 2);
             std::string_view hex_key_high = view.substr(HEX_KEY_LEN / 2, HEX_KEY_LEN);
 
-            // Convert timestamp to partition_id
             struct tm tm_time;
             gmtime_r(&meta->max_timestamp, &tm_time);
             String partition_id = fmt::format("{:04d}{:02d}{:02d}",
@@ -613,7 +616,6 @@ void DiskCacheTTL::evictExpired()
 
             String prefix = type == IDiskCache::DataType::META ? META_DISK_CACHE_DIR_PREFIX : DATA_DISK_CACHE_DIR_PREFIX;
 
-            // Structure: prefix/uuid/partition/3char/hash_high/hash_low
             auto rel_path = fs::path(latest_disk_cache_dir) / prefix / table_uuid / partition_id
                            / hex_key_high.substr(0, 3) / hex_key_high / hex_key_low;
 
@@ -622,6 +624,10 @@ void DiskCacheTTL::evictExpired()
                 meta->disk->removeFile(rel_path);
                 LOG_TRACE(log, "Evicted expired segment: {}", rel_path.string());
             }
+
+            UInt64 hash_high = key.items[0];
+            if (fdb_index && fdb_evicted_parts.insert(hash_high).second)
+                fdb_index->evictPart(partition_id, hash_high);
         }
         catch (...)
         {
@@ -720,6 +726,9 @@ void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
                 }
             }
 
+            if (fdb_index)
+                fdb_index->evictPart(partition_id, part_hash_high);
+
             LOG_DEBUG(log, "Evicted part (hash_high={}) from partition {} for size limit, freed {} bytes",
                      part_hash_high, partition_id, part_bytes);
         }
@@ -770,6 +779,34 @@ void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
 
 void DiskCacheTTL::load()
 {
+    if (fdb_index)
+    {
+        bool ok = fdb_index->reconcile(
+            cache_map, cache_mutex, volume,
+            [this](UInt128 key, const String & seg_name) { return getRelativePath(key, seg_name); },
+            [this](time_t ts) { return shouldCache(ts); });
+
+        if (ok)
+        {
+            // reconcile() populated cache_map; tally counters from it
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            for (const auto & [k, meta] : cache_map)
+            {
+                if (meta->state == DiskCacheTTLMeta::State::Cached)
+                {
+                    total_entries++;
+                    total_size += meta->size;
+                    cache_stats.total_entries++;
+                    cache_stats.total_bytes += meta->size;
+                }
+            }
+            LOG_INFO(log, "TTL cache for {} recovered from FDB index: {} entries, {} bytes",
+                table_uuid, total_entries.load(), total_size.load());
+            return;
+        }
+        LOG_WARNING(log, "FDB index empty or unavailable for {}, falling back to disk scan", table_uuid);
+    }
+
     LOG_INFO(log, "Loading TTL disk cache from disk...");
 
     for (const auto & disk : volume->getDisks())

@@ -1,0 +1,90 @@
+#pragma once
+
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <filesystem>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <thread>
+
+#include <Catalog/IMetastore.h>
+#include <Core/Types.h>
+#include <Disks/IVolume.h>
+#include <common/logger_useful.h>
+#include <common/types.h>
+
+namespace DB
+{
+
+class DiskCacheTTL;
+struct DiskCacheTTLMeta;
+
+/// FDB-backed index for DiskCacheTTL.
+/// On set(): async-writes an entry so the in-memory cache_map can be restored from
+/// FDB on the next startup instead of doing a slow disk scan.
+/// On evictPart(): issues a single FDB clean() covering all segments of a part.
+/// reconcile(): called from load() — scans FDB, verifies files on disk, populates cache_map.
+class TTLCacheFDBIndex
+{
+public:
+    TTLCacheFDBIndex(
+        std::shared_ptr<IMetaStore> metastore_,
+        const String & name_space,
+        const String & worker_id,
+        const String & table_uuid);
+
+    ~TTLCacheFDBIndex();
+
+    /// Enqueue async FDB write after a segment is successfully cached.
+    void onSet(UInt128 key, const String & seg_name, size_t size, time_t part_ts);
+
+    /// Issue FDB clean() for all segments of one part (hash_high).
+    /// partition_id: YYYYMMDD string derived from max_timestamp (same as path structure).
+    void evictPart(const String & partition_id, UInt64 hash_high);
+
+    /// Scan FDB index and restore cache_map. Returns false if index is empty.
+    /// get_rel_path: wraps DiskCacheTTL::getRelativePath(key, seg_name)
+    /// should_cache:  wraps DiskCacheTTL::shouldCache(part_ts)
+    bool reconcile(
+        std::map<UInt128, std::shared_ptr<DiskCacheTTLMeta>> & cache_map,
+        std::mutex & cache_mutex,
+        const VolumePtr & volume,
+        std::function<std::filesystem::path(UInt128, const String &)> get_rel_path,
+        std::function<bool(time_t)> should_cache);
+
+private:
+    struct PendingOp
+    {
+        enum class Type { Set, Evict } type;
+        String key;    // full FDB key (Set) or prefix to clean (Evict)
+        String value;  // serialized entry (Set only)
+    };
+
+    void bgLoop();
+    void flush(std::vector<PendingOp> & ops);
+
+    String makeSegKey(UInt128 key, const String & partition_id, UInt64 hash_high) const;
+    String makePartPrefix(const String & partition_id, UInt64 hash_high) const;
+
+    static String encodeValue(const String & seg_name, size_t size, time_t part_ts);
+    static bool decodeValue(const String & raw, String & seg_name, size_t & size, time_t & part_ts);
+
+    std::shared_ptr<IMetaStore> metastore;
+    String key_prefix;  // escapeString(ns) + "_DCI_" + escapeString(worker_id) + "_" + table_uuid
+
+    std::mutex mu;
+    std::deque<PendingOp> queue;
+    std::condition_variable cv;
+    std::thread bg;
+    std::atomic<bool> stopped{false};
+
+    static constexpr size_t BATCH_SIZE = 100;
+    static constexpr size_t MAX_WAIT_MS = 5000;
+
+    Poco::Logger * log;
+};
+
+}

@@ -17,6 +17,8 @@
 #include <cstddef>
 #include <memory>
 
+#include <Catalog/Catalog.h>
+#include <Common/HostWithPorts.h>
 #include <Core/UUID.h>
 #include <Disks/IStoragePolicy.h>
 #include <Interpreters/Context.h>
@@ -24,6 +26,7 @@
 #include <Storages/DiskCache/DiskCacheTTL.h>
 #include <Storages/DiskCache/DiskCacheSettings.h>
 #include <Storages/DiskCache/DiskCacheSimpleStrategy.h>
+#include <Storages/DiskCache/TTLCacheFDBIndex.h>
 #include <common/logger_useful.h>
 #include <Disks/SingleDiskVolume.h>
 #include <Storages/DiskCache/IDiskCache.h>
@@ -173,6 +176,24 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
     {
         LOG_INFO(log, "Created per-table TTL cache for {} (UUID: {}, TTL: {} minutes, max_size: unlimited, policy: {})",
             table_name, UUIDHelpers::UUIDToString(table_uuid), ttl_minutes, cache_settings.ttl_disk_policy);
+    }
+
+    // Inject FDB index if catalog is available
+    if (auto catalog = context.getCnchCatalog())
+    {
+        try
+        {
+            auto metastore = catalog->getMetastore();
+            String ns = context.getCnchConfigRef().getString("catalog.name_space", "default");
+            String worker_id = getWorkerID(context.shared_from_this());
+            String uuid_str = UUIDHelpers::UUIDToString(table_uuid);
+            auto fdb_idx = std::make_shared<TTLCacheFDBIndex>(metastore, ns, worker_id, uuid_str);
+            static_pointer_cast<DiskCacheTTL>(cache)->setFDBIndex(std::move(fdb_idx));
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log, "Failed to create TTLCacheFDBIndex, cache will use disk scan on restart");
+        }
     }
 
     // Add to registry
