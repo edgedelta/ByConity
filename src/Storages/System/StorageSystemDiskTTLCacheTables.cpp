@@ -5,7 +5,7 @@
 #include <DataTypes/DataTypeMap.h>
 #include <Columns/ColumnMap.h>
 #include <Interpreters/Context.h>
-#include <Databases/DatabaseCatalog.h>
+#include <Interpreters/DatabaseCatalog.h>
 #include <Storages/StorageCnchMergeTree.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
 
