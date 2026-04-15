@@ -261,53 +261,6 @@ QueryProcessingStage::Enum StorageCnchMergeTree::getQueryProcessingStage(
     }
 }
 
-void StorageCnchMergeTree::startup()
-{
-    // Create per-table TTL cache if disk_cache_ttl_hours > 0
-    if (getSettings()->disk_cache_ttl_hours.value > 0)
-    {
-        LOG_INFO(log, "Creating per-table TTL cache for {} (TTL: {} hours)",
-            getStorageID().getNameForLogs(),
-            getSettings()->disk_cache_ttl_hours.value);
-
-        try
-        {
-            disk_cache = DiskCacheFactory::instance().createDiskCacheFromTableSettings(
-                getStorageID().getNameForLogs(),
-                getStorageUUID(),
-                *getContext(),
-                getContext()->getDiskCacheThrottler(),
-                getSettings()->disk_cache_ttl_hours.value * 60,  // Convert hours to minutes
-                getSettings()->disk_cache_max_size_bytes.value    // Per-table size limit
-            );
-        }
-        catch (const Exception & e)
-        {
-            LOG_ERROR(log, "Failed to create per-table TTL cache: {}. Falling back to global LRU cache.", e.message());
-            disk_cache = nullptr;
-        }
-    }
-}
-
-void StorageCnchMergeTree::shutdown()
-{
-    if (disk_cache)
-    {
-        LOG_INFO(log, "Shutting down per-table disk cache for {}", getStorageID().getNameForLogs());
-        disk_cache->shutdown();
-        disk_cache.reset();
-    }
-}
-
-IDiskCachePtr StorageCnchMergeTree::getDiskCache() const
-{
-    // Return per-table cache if available
-    if (disk_cache)
-        return disk_cache;
-
-    // Fallback to global cache
-    return DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
-}
 
 Pipe StorageCnchMergeTree::read(
     const Names & column_names,

@@ -178,7 +178,6 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
             table_name, UUIDHelpers::UUIDToString(table_uuid), ttl_minutes, cache_settings.ttl_disk_policy);
     }
 
-    // Inject FDB index if catalog is available
     if (auto catalog = context.getCnchCatalog())
     {
         try

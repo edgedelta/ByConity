@@ -81,16 +81,6 @@ public:
         UInt64 ttl_minutes,
         size_t max_size_bytes = 0);
 
-    /// Get or create per-table TTL cache (for workers)
-    /// Caches instances in registry to avoid recreating on each query
-    IDiskCachePtr getOrCreateTTLCache(
-        const UUID & table_uuid,
-        const String & table_name,
-        Context & context,
-        const ThrottlerPtr & throttler,
-        UInt64 ttl_minutes,
-        size_t max_size_bytes = 0);
-
     /// Global TTL cache usage tracking
     /// shared across all per-table TTL caches
     void addGlobalTTLUsage(size_t bytes) { global_ttl_cache_usage.fetch_add(bytes); }

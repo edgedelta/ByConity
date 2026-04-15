@@ -71,8 +71,7 @@ public:
     QueryProcessingStage::Enum
     getQueryProcessingStage(ContextPtr, QueryProcessingStage::Enum, const StorageSnapshotPtr &, SelectQueryInfo &) const override;
 
-    void startup() override;
-    void shutdown() override;
+    void startup() override {};
 
     Pipe read(
         const Names & /*column_names*/,
@@ -223,8 +222,6 @@ public:
     /// drop the memody_dict_cache of cnch table
     void dropMemoryDictCache(ContextMutablePtr & local_context);
 
-    /// Get disk cache instance (per-table or global)
-    IDiskCachePtr getDiskCache() const;
 
 protected:
     StorageCnchMergeTree(
@@ -306,8 +303,6 @@ private:
     std::unique_ptr<MergeTreeSettings> getDefaultSettings() const override;
 
 private:
-    /// Per-table disk cache instance (null if using global cache)
-    mutable IDiskCachePtr disk_cache;
 };
 
 using StorageCnchMergeTreePtr = std::shared_ptr<StorageCnchMergeTree>;
