@@ -5,6 +5,7 @@
 #include <DataTypes/DataTypeMap.h>
 #include <Columns/ColumnMap.h>
 #include <Interpreters/Context.h>
+#include <Common/HostWithPorts.h>
 #include <Interpreters/DatabaseCatalog.h>
 #include <Storages/StorageCnchMergeTree.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
@@ -56,7 +57,7 @@ static void dumpStatsToMapColumn(const std::unordered_map<String, UInt64> & map,
 void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, ContextPtr context, const SelectQueryInfo &) const
 {
     // Get worker_id from context
-    String worker_id = context->getHostWithPorts().getReadableID();
+    String worker_id = getWorkerID(context);
 
     // Iterate through all databases and tables
     const auto databases = DatabaseCatalog::instance().getDatabases(context);

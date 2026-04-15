@@ -2,7 +2,8 @@
 #include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Interpreters/Context.h>
-#include <Databases/DatabaseCatalog.h>
+#include <Interpreters/DatabaseCatalog.h>
+#include <Common/HostWithPorts.h>
 #include <Storages/StorageCnchMergeTree.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
 
@@ -31,7 +32,7 @@ StorageSystemDiskTTLCachePartitions::StorageSystemDiskTTLCachePartitions(const S
 void StorageSystemDiskTTLCachePartitions::fillData(MutableColumns & res_columns, ContextPtr context, const SelectQueryInfo &) const
 {
     // Get worker_id from context
-    String worker_id = context->getHostWithPorts().getReadableID();
+    String worker_id = getWorkerID(context);
 
     // Iterate through all databases and tables
     const auto databases = DatabaseCatalog::instance().getDatabases(context);
