@@ -15,6 +15,7 @@
 
 #include <Storages/StorageCloudMergeTree.h>
 
+#include <mutex>
 #include <Common/Exception.h>
 #include "Core/UUID.h"
 #include "Storages/IStorage.h"
