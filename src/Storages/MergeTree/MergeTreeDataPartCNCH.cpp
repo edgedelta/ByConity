@@ -1381,11 +1381,21 @@ void MergeTreeDataPartCNCH::preload(UInt64 preload_level, UInt64 submit_ts) cons
                             continue;
                         }
 
+                        // Skip indexes have GRANULARITY N: one index mark per N primary-key marks.
+                        // Their marks_count = ceil(data_marks / N), not getMarksCount() (which is data marks).
+                        // Derive from the actual mark file size to avoid a size mismatch in MergeTreeMarksLoader.
+                        size_t mark_size = source_data_part->index_granularity_info.getMarkSizeInBytes(1);
+                        size_t skip_index_marks_count = mark_size > 0 ? mark_file_size / mark_size : 0;
+                        if (skip_index_marks_count == 0)
+                            continue;
+
+                        MarkRanges index_mark_ranges{MarkRange(0, skip_index_marks_count)};
+
                         IDiskCacheSegmentsVector segs = cache_strategy->transferRangesToSegments<PartFileDiskCacheSegment>(
-                            all_mark_ranges,
+                            index_mark_ranges,
                             source_data_part,
                             PartFileDiskCacheSegment::FileOffsetAndSize{mark_file_offset, mark_file_size},
-                            getMarksCount(),
+                            skip_index_marks_count,
                             mark_cache_holder.get(),
                             disk_cache->getMetaCache().get(),
                             index_name,
