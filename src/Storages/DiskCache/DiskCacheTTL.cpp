@@ -172,6 +172,17 @@ namespace
 
         return true;
     }
+
+    // Validate a 16-char hex string (one half of a UInt128 key as written by buildEvictionPath).
+    bool isHexHalf(const String & s)
+    {
+        if (s.size() != HEX_KEY_LEN / 2)
+            return false;
+        for (char c : s)
+            if (!(isNumericASCII(c) || (c >= 'a' && c <= 'f')))
+                return false;
+        return true;
+    }
 }
 
 DiskCacheTTL::DiskCacheTTL(
@@ -945,29 +956,31 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
         return;
     }
 
-    // Validate hash_low filename
-    auto key_low = DiskCacheTTL::unhexKey(filename);
-    if (!key_low.has_value())
+    // buildEvictionPath writes the UInt128 key as two 16-char hex halves:
+    //   hex_low  = hexKey(key)[0..15]  → filename
+    //   hex_high = hexKey(key)[16..31] → parent directory name
+    // Parse each half with unhex16 and reconstruct the key.
+    if (!isHexHalf(filename))
     {
         LOG_WARNING(log, "Invalid cache file (hash_low): {}", file_path.string());
         return;
     }
+    UInt64 low = unhex16(filename.data());
 
     // New structure: data/uuid/partition/3char/hash_high/hash_low
     // Extract partition from path hierarchy
     auto hash_high_dir = file_path.parent_path().filename().string();  // hash_high
     auto partition_dir = file_path.parent_path().parent_path().parent_path().filename().string();  // partition_id
 
-    // Validate hash_high
-    auto key_high = DiskCacheTTL::unhexKey(hash_high_dir);
-    if (!key_high.has_value())
+    if (!isHexHalf(hash_high_dir))
     {
         LOG_WARNING(log, "Invalid cache directory (hash_high): {}", file_path.string());
         return;
     }
+    UInt64 high = unhex16(hash_high_dir.data());
 
-    // Build full key
-    UInt128 key = {key_high.value(), key_low.value()};
+    // Build full key matching UInt128{high, low} as returned by unhexKey
+    UInt128 key = {high, low};
 
     // Parse timestamp from partition_id (e.g., "20240315")
     time_t part_ts = 0;
