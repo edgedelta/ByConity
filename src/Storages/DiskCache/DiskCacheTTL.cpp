@@ -211,9 +211,8 @@ DiskCacheTTL::DiskCacheTTL(
             "must be positive or -1", settings.cache_load_dispatcher_drill_down_level),
             ErrorCodes::BAD_ARGUMENTS);
     }
-
-    auto & thread_pool = IDiskCache::getThreadPool();
-    thread_pool.scheduleOrThrowOnError([this] { load(); });
+    // load() is called by the factory after this object wins the registry race,
+    // so only one disk scan runs per table UUID.
 }
 
 DiskCacheTTL::KeyType DiskCacheTTL::hash(const String & seg_key)

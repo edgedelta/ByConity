@@ -195,11 +195,21 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
         }
     }
 
-    // Add to registry
+    // Insert into registry with re-check: if another thread won the race, discard ours.
+    // load() is called only on the winner so only one disk scan runs per table UUID.
     {
         std::lock_guard<std::mutex> lock(ttl_cache_registry_mutex);
-        per_table_ttl_caches[table_uuid] = cache;
+        auto [it, inserted] = per_table_ttl_caches.emplace(table_uuid, cache);
+        if (!inserted)
+        {
+            LOG_TRACE(log, "Reusing TTL cache created concurrently for {} (UUID: {})", table_name, UUIDHelpers::UUIDToString(table_uuid));
+            return it->second;
+        }
     }
+
+    // Schedule disk scan only for the winning cache object.
+    auto & thread_pool = IDiskCache::getThreadPool();
+    thread_pool.scheduleOrThrowOnError([cache] { cache->load(); });
 
     return cache;
 }
