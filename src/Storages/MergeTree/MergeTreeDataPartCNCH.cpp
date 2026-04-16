@@ -1371,6 +1371,16 @@ void MergeTreeDataPartCNCH::preload(UInt64 preload_level, UInt64 submit_ts) cons
                         off_t mark_file_offset = source_data_part->getFileOffsetOrZero(mark_file_name);
                         size_t mark_file_size = source_data_part->getFileSizeOrZero(mark_file_name);
 
+                        if (mark_file_size == 0)
+                        {
+                            LOG_DEBUG(
+                                storage.log,
+                                "Skipping preload of index {} for part {}: not in checksums (written before index was added)",
+                                index_name,
+                                getFullRelativePath());
+                            continue;
+                        }
+
                         IDiskCacheSegmentsVector segs = cache_strategy->transferRangesToSegments<PartFileDiskCacheSegment>(
                             all_mark_ranges,
                             source_data_part,
