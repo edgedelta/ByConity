@@ -109,7 +109,7 @@ public:
     CloudMergeTreeDedupWorker * tryGetDedupWorker() { return dedup_worker.get(); }
     CloudMergeTreeDedupWorker * getDedupWorker();
 
-    IDiskCachePtr getDiskCache() const;
+    IDiskCachePtr getDiskCache() const override;
 
     QueryProcessingStage::Enum getQueryProcessingStage(ContextPtr, QueryProcessingStage::Enum, const StorageSnapshotPtr &, SelectQueryInfo &) const override;
     bool getQueryProcessingStageWithAggregateProjection(ContextPtr query_context, const StorageSnapshotPtr & storage_snapshot, SelectQueryInfo & query_info) const;

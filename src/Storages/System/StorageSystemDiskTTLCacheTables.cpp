@@ -7,7 +7,7 @@
 #include <Interpreters/Context.h>
 #include <Common/HostWithPorts.h>
 #include <Interpreters/DatabaseCatalog.h>
-#include <Storages/StorageCnchMergeTree.h>
+#include <Storages/StorageCloudMergeTree.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
 
 namespace DB
@@ -66,12 +66,13 @@ void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, Con
         for (auto it = database->getTablesIterator(context); it->isValid(); it->next())
         {
             const auto & table = it->table();
-            auto * cnch_table = dynamic_cast<StorageCnchMergeTree *>(table.get());
-            if (!cnch_table)
+            // TTL caches live on workers; on workers tables are StorageCloudMergeTree
+            auto * cloud_table = dynamic_cast<StorageCloudMergeTree *>(table.get());
+            if (!cloud_table)
                 continue;
 
             // Check if table has per-table TTL cache
-            auto disk_cache = cnch_table->getDiskCache();
+            auto disk_cache = cloud_table->getDiskCache();
             if (!disk_cache)
                 continue;
 

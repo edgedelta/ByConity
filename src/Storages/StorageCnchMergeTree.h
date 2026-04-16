@@ -71,7 +71,7 @@ public:
     QueryProcessingStage::Enum
     getQueryProcessingStage(ContextPtr, QueryProcessingStage::Enum, const StorageSnapshotPtr &, SelectQueryInfo &) const override;
 
-    void startup() override {};
+    void startup() override {}
 
     Pipe read(
         const Names & /*column_names*/,

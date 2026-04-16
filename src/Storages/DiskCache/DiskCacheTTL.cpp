@@ -66,7 +66,6 @@ namespace ErrorCodes
 }
 
 static constexpr auto DISK_CACHE_TEMP_FILE_SUFFIX = ".temp";
-static constexpr auto TMP_SUFFIX_LEN = std::char_traits<char>::length(DISK_CACHE_TEMP_FILE_SUFFIX);
 static constexpr auto META_DISK_CACHE_DIR_PREFIX = "meta";
 static constexpr auto DATA_DISK_CACHE_DIR_PREFIX = "data";
 
@@ -347,7 +346,7 @@ bool DiskCacheTTL::shouldCache(time_t part_ts) const
     return age_seconds <= ttl_seconds;
 }
 
-void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload, time_t min_time, time_t max_time)
+void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload, time_t /*min_time*/, time_t max_time)
 {
     if (is_droping)
     {
