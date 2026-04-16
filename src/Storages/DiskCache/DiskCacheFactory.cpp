@@ -131,14 +131,24 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
 {
     Poco::Logger * log = &Poco::Logger::get("DiskCacheFactory");
 
-    // Check registry first (for worker reuse)
+    // Check registry first (for worker reuse).
+    // If settings changed (ttl_minutes or max_size_bytes), evict the stale entry and fall through to recreate.
     {
         std::lock_guard<std::mutex> lock(ttl_cache_registry_mutex);
         auto reg_it = per_table_ttl_caches.find(table_uuid);
         if (reg_it != per_table_ttl_caches.end())
         {
-            LOG_TRACE(log, "Reusing existing TTL cache for {} (UUID: {})", table_name, UUIDHelpers::UUIDToString(table_uuid));
-            return reg_it->second;
+            auto existing = static_pointer_cast<DiskCacheTTL>(reg_it->second);
+            if (existing->getTTLMinutes() == ttl_minutes && existing->getMaxSizeBytes() == max_size_bytes)
+            {
+                LOG_TRACE(log, "Reusing existing TTL cache for {} (UUID: {})", table_name, UUIDHelpers::UUIDToString(table_uuid));
+                return reg_it->second;
+            }
+            LOG_INFO(log, "TTL cache settings changed for {} (UUID: {}), recreating (ttl: {}->{}min, max_size: {}->{}bytes)",
+                table_name, UUIDHelpers::UUIDToString(table_uuid),
+                existing->getTTLMinutes(), ttl_minutes,
+                existing->getMaxSizeBytes(), max_size_bytes);
+            per_table_ttl_caches.erase(reg_it);
         }
     }
 

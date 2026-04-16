@@ -81,6 +81,14 @@ public:
         UInt64 ttl_minutes,
         size_t max_size_bytes = 0);
 
+    /// Remove a per-table TTL cache entry from the registry.
+    /// Called when disk_cache_ttl_hours is set to 0 so re-enabling creates a fresh object.
+    void removeTableTTLCache(const UUID & table_uuid)
+    {
+        std::lock_guard<std::mutex> lock(ttl_cache_registry_mutex);
+        per_table_ttl_caches.erase(table_uuid);
+    }
+
     /// Global TTL cache usage tracking
     /// shared across all per-table TTL caches
     void addGlobalTTLUsage(size_t bytes) { global_ttl_cache_usage.fetch_add(bytes); }

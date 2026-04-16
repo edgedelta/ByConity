@@ -106,21 +106,28 @@ void StorageCloudMergeTree::shutdown()
 
 IDiskCachePtr StorageCloudMergeTree::getDiskCache() const
 {
-    // Check if TTL cache enabled
-    if (getSettings()->disk_cache_ttl_hours.value > 0)
+    // getDiskCache() is called per-part; compute the pointer once per storage lifetime.
+    std::call_once(disk_cache_flag, [this]
     {
-        return DiskCacheFactory::instance().createDiskCacheFromTableSettings(
-            getStorageID().getNameForLogs(),
-            getStorageUUID(),
-            *getContext(),
-            getContext()->getDiskCacheThrottler(),
-            getSettings()->disk_cache_ttl_hours.value * 60,  // hours to minutes
-            getSettings()->disk_cache_max_size_bytes.value
-        );
-    }
-
-    // Fallback to global LRU cache
-    return DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
+        if (getSettings()->disk_cache_ttl_hours.value > 0)
+        {
+            disk_cache_ptr = DiskCacheFactory::instance().createDiskCacheFromTableSettings(
+                getStorageID().getNameForLogs(),
+                getStorageUUID(),
+                *getContext(),
+                getContext()->getDiskCacheThrottler(),
+                getSettings()->disk_cache_ttl_hours.value * 60,
+                getSettings()->disk_cache_max_size_bytes.value
+            );
+        }
+        else
+        {
+            // TTL disabled — evict any stale registry entry so re-enabling picks up fresh settings.
+            DiskCacheFactory::instance().removeTableTTLCache(getStorageUUID());
+            disk_cache_ptr = DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
+        }
+    });
+    return disk_cache_ptr;
 }
 
 StorageCloudMergeTree::~StorageCloudMergeTree()

@@ -142,6 +142,10 @@ private:
     std::set<Int64> required_bucket_numbers;
 
     CloudMergeTreeDedupWorkerPtr dedup_worker;
+
+    // Cached per-query disk cache pointer — getDiskCache() is called per-part so compute once.
+    mutable std::once_flag disk_cache_flag;
+    mutable IDiskCachePtr disk_cache_ptr;
 };
 
 }
