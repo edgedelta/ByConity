@@ -27,7 +27,6 @@
 #include <IO/ReadBufferFromFileBase.h>
 #include <Interpreters/InDepthNodeVisitor.h>
 #include <Interpreters/inplaceBlockConversions.h>
-#include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/DiskCache_fwd.h>
 #include <Storages/DiskCache/IDiskCacheStrategy.h>
 #include <Storages/DiskCache/PartFileDiskCacheSegment.h>
@@ -35,7 +34,7 @@
 #include <Storages/MergeTree/MergeTreeDataPartCNCH.h>
 #include <Storages/MergeTree/MergeTreeDataPartWide.h>
 #include <Storages/MergeTree/MergeTreeReaderStreamWithSegmentCache.h>
-#include <Storages/StorageCnchMergeTree.h>
+#include <MergeTreeCommon/MergeTreeMetaBase.h>
 #include <bits/types/clockid_t.h>
 #include <Poco/Logger.h>
 #include <common/getFQDNOrHostName.h>
@@ -97,15 +96,7 @@ MergeTreeReaderCNCH::MergeTreeReaderCNCH(
 {
     if (data_part->enableDiskCache())
     {
-        // Try to get per-table cache if available, otherwise use global cache
-        if (auto * cnch_storage = dynamic_cast<const StorageCnchMergeTree*>(&data_part->storage))
-        {
-            segment_cache = cnch_storage->getDiskCache();
-        }
-        else
-        {
-            segment_cache = DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
-        }
+        segment_cache = data_part->storage.getDiskCache();
         segment_cache_strategy = segment_cache->getStrategy();
     }
 
