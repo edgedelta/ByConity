@@ -1327,6 +1327,7 @@ void CnchWorkerServiceImpl::getTTLCacheStats(
 {
     SUBMIT_THREADPOOL({
         auto ttl_caches = DiskCacheFactory::instance().getAllTableTTLCaches();
+        LOG_DEBUG(log, "getTTLCacheStats: {} TTL cache(s) in registry", ttl_caches.size());
         for (const auto & [uuid, cache_ptr] : ttl_caches)
         {
             auto * ttl_cache = dynamic_cast<DiskCacheTTL *>(cache_ptr.get());
@@ -1334,6 +1335,7 @@ void CnchWorkerServiceImpl::getTTLCacheStats(
                 continue;
 
             auto stats = ttl_cache->getStats();
+            LOG_DEBUG(log, "getTTLCacheStats: returning stats for table={} uuid={}", ttl_cache->getName(), stats.table_uuid);
             auto * t = response->add_tables();
             t->set_table_name(ttl_cache->getName());
             t->set_table_uuid(stats.table_uuid);
@@ -1364,6 +1366,7 @@ void CnchWorkerServiceImpl::getTTLCachePartitionStats(
 {
     SUBMIT_THREADPOOL({
         auto ttl_caches = DiskCacheFactory::instance().getAllTableTTLCaches();
+        LOG_DEBUG(log, "getTTLCachePartitionStats: {} TTL cache(s) in registry", ttl_caches.size());
         for (const auto & [uuid, cache_ptr] : ttl_caches)
         {
             auto * ttl_cache = dynamic_cast<DiskCacheTTL *>(cache_ptr.get());
@@ -1371,6 +1374,7 @@ void CnchWorkerServiceImpl::getTTLCachePartitionStats(
                 continue;
 
             auto table_stats = ttl_cache->getStats();
+            LOG_DEBUG(log, "getTTLCachePartitionStats: returning partition stats for table={} uuid={}", ttl_cache->getName(), table_stats.table_uuid);
             for (const auto & ps : ttl_cache->getPartitionStats())
             {
                 auto * p = response->add_partitions();

@@ -5,6 +5,7 @@
 #include <Common/HostWithPorts.h>
 #include <CloudServices/CnchWorkerClient.h>
 #include <Interpreters/WorkerGroupHandle.h>
+#include <Interpreters/VirtualWarehouseHandle.h>
 #include <Protos/cnch_worker_rpc.pb.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
@@ -50,13 +51,25 @@ void StorageSystemDiskTTLCachePartitions::fillData(MutableColumns & res_columns,
     {
         auto worker_group = context->tryGetCurrentWorkerGroup();
         if (!worker_group)
+        {
+            if (auto vw = context->getVirtualWarehousePool().tryGet("vw_default"))
+                worker_group = vw->pickWorkerGroup(VirtualWarehouseHandle::VWScheduleAlgo::Random);
+        }
+        if (!worker_group)
             return;
 
-        for (const auto & worker : worker_group->getWorkerClients())
+        auto workers = worker_group->getWorkerClients();
+        LOG_DEBUG(&Poco::Logger::get("StorageSystemDiskTTLCachePartitions"),
+            "Querying TTL partition stats from {} worker(s)", workers.size());
+        for (const auto & worker : workers)
         {
+            LOG_DEBUG(&Poco::Logger::get("StorageSystemDiskTTLCachePartitions"),
+                "Sending getTTLCachePartitionStats RPC to {}", worker->getRPCAddress());
             try
             {
                 auto partitions = worker->getTTLCachePartitionStats();
+                LOG_DEBUG(&Poco::Logger::get("StorageSystemDiskTTLCachePartitions"),
+                    "Got {} partition entries from {}", partitions.size(), worker->getRPCAddress());
                 for (const auto & p : partitions)
                     fillPartitionRow(res_columns, worker->getRPCAddress(), p);
             }

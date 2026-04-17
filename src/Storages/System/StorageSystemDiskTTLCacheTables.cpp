@@ -8,6 +8,7 @@
 #include <Common/HostWithPorts.h>
 #include <CloudServices/CnchWorkerClient.h>
 #include <Interpreters/WorkerGroupHandle.h>
+#include <Interpreters/VirtualWarehouseHandle.h>
 #include <Protos/cnch_worker_rpc.pb.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
@@ -99,16 +100,29 @@ void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, Con
 {
     if (context->getServerType() == ServerType::cnch_server)
     {
-        // Fan out to all workers via RPC
+        // Fan out to all workers via RPC.
+        // Fall back to vw_default when no worker group is set in context (e.g. direct system table query).
         auto worker_group = context->tryGetCurrentWorkerGroup();
+        if (!worker_group)
+        {
+            if (auto vw = context->getVirtualWarehousePool().tryGet("vw_default"))
+                worker_group = vw->pickWorkerGroup(VirtualWarehouseHandle::VWScheduleAlgo::Random);
+        }
         if (!worker_group)
             return;
 
-        for (const auto & worker : worker_group->getWorkerClients())
+        auto workers = worker_group->getWorkerClients();
+        LOG_DEBUG(&Poco::Logger::get("StorageSystemDiskTTLCacheTables"),
+            "Querying TTL cache stats from {} worker(s)", workers.size());
+        for (const auto & worker : workers)
         {
+            LOG_DEBUG(&Poco::Logger::get("StorageSystemDiskTTLCacheTables"),
+                "Sending getTTLCacheStats RPC to {}", worker->getRPCAddress());
             try
             {
                 auto stats = worker->getTTLCacheStats();
+                LOG_DEBUG(&Poco::Logger::get("StorageSystemDiskTTLCacheTables"),
+                    "Got {} TTL cache entries from {}", stats.size(), worker->getRPCAddress());
                 for (const auto & t : stats)
                     fillRowFromProto(res_columns, worker->getRPCAddress(), t);
             }
