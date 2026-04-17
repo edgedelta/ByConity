@@ -105,8 +105,16 @@ void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, Con
         auto worker_group = context->tryGetCurrentWorkerGroup();
         if (!worker_group)
         {
-            if (auto vw = context->getVirtualWarehousePool().tryGet("vw_default"))
+            try
+            {
+                auto vw = context->getVirtualWarehousePool().get("vw_default");
                 worker_group = vw->pickWorkerGroup(VWScheduleAlgo::Random);
+            }
+            catch (...)
+            {
+                tryLogCurrentException(&Poco::Logger::get("StorageSystemDiskTTLCacheTables"),
+                    "Failed to get vw_default worker group, returning empty result");
+            }
         }
         if (!worker_group)
             return;
