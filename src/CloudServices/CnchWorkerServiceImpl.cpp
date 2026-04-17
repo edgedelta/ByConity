@@ -34,6 +34,8 @@
 #include <Protos/DataModelHelpers.h>
 #include <Protos/RPCHelpers.h>
 #include <Storages/DiskCache/IDiskCache.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
+#include <Storages/DiskCache/DiskCacheTTL.h>
 #include <Storages/MergeTree/CnchMergeTreeMutationEntry.h>
 #include <Storages/MergeTree/IMergeTreeDataPart_fwd.h>
 #include <Storages/MergeTree/MergeTreeDataPartCNCH.h>
@@ -1315,6 +1317,43 @@ void CnchWorkerServiceImpl::getCloudMergeTreeStatus(
     Protos::GetCloudMergeTreeStatusResp * response,
     google::protobuf::Closure * done)
 {
+}
+
+void CnchWorkerServiceImpl::getTTLCacheStats(
+    google::protobuf::RpcController *,
+    const Protos::GetTTLCacheStatsReq *,
+    Protos::GetTTLCacheStatsResp * response,
+    google::protobuf::Closure * done)
+{
+    SUBMIT_THREADPOOL({
+        auto ttl_caches = DiskCacheFactory::instance().getAllTableTTLCaches();
+        for (const auto & [uuid, cache_ptr] : ttl_caches)
+        {
+            auto * ttl_cache = dynamic_cast<DiskCacheTTL *>(cache_ptr.get());
+            if (!ttl_cache)
+                continue;
+
+            auto stats = ttl_cache->getStats();
+            auto * t = response->add_tables();
+            t->set_table_name(ttl_cache->getName());
+            t->set_table_uuid(stats.table_uuid);
+            t->set_ttl_minutes(ttl_cache->getTTLMinutes());
+            t->set_max_size_bytes(ttl_cache->getMaxSizeBytes());
+            t->set_last_eviction_run(stats.last_eviction_run);
+            t->set_evicted_expired(stats.evicted_expired);
+            t->set_evicted_size_limit(stats.evicted_size_limit);
+            t->set_async_triggered_local(stats.async_eviction_triggered);
+            t->set_async_skipped_rate_limit_local(stats.async_eviction_skipped_rate_limit);
+            t->set_async_triggered_global(stats.async_eviction_triggered_global);
+            t->set_async_skipped_rate_limit_global(stats.async_eviction_skipped_rate_limit_global);
+            t->set_rejected_non_time_partition(stats.rejected_non_time_partition);
+            t->set_rejected_too_old(stats.rejected_too_old);
+            t->set_count_preload(stats.cached_from_preload);
+            t->set_count_query(stats.cached_from_query);
+            t->set_bytes_preload(stats.cached_bytes_preload);
+            t->set_bytes_query(stats.cached_bytes_query);
+        }
+    });
 }
 
 #if defined(__clang__)

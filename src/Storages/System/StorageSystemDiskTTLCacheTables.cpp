@@ -6,6 +6,8 @@
 #include <Columns/ColumnMap.h>
 #include <Interpreters/Context.h>
 #include <Common/HostWithPorts.h>
+#include <CloudServices/CnchWorkerClient.h>
+#include <Interpreters/WorkerGroupHandle.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
 
@@ -53,10 +55,72 @@ static void dumpStatsToMapColumn(const std::unordered_map<String, UInt64> & map,
     offsets.push_back((offsets.size() == 0 ? 0 : offsets.back()) + size);
 }
 
+static void fillRowFromProto(MutableColumns & res_columns, const String & worker_id, const Protos::TTLCacheTableStats & t)
+{
+    size_t col_idx = 0;
+
+    res_columns[col_idx++]->insert(worker_id);
+    res_columns[col_idx++]->insert(t.table_name());
+    res_columns[col_idx++]->insert(t.table_uuid());
+    res_columns[col_idx++]->insert(t.ttl_minutes());
+    res_columns[col_idx++]->insert(t.max_size_bytes());
+    res_columns[col_idx++]->insert(t.last_eviction_run());
+
+    {
+        std::unordered_map<String, UInt64> eviction_map;
+        eviction_map["expired"] = t.evicted_expired();
+        eviction_map["size_limit"] = t.evicted_size_limit();
+        eviction_map["async_triggered_local"] = t.async_triggered_local();
+        eviction_map["async_skipped_rate_limit_local"] = t.async_skipped_rate_limit_local();
+        eviction_map["async_triggered_global"] = t.async_triggered_global();
+        eviction_map["async_skipped_rate_limit_global"] = t.async_skipped_rate_limit_global();
+        dumpStatsToMapColumn(eviction_map, res_columns[col_idx++].get());
+    }
+
+    {
+        std::unordered_map<String, UInt64> rejection_map;
+        rejection_map["non_time_partition"] = t.rejected_non_time_partition();
+        rejection_map["too_old"] = t.rejected_too_old();
+        dumpStatsToMapColumn(rejection_map, res_columns[col_idx++].get());
+    }
+
+    {
+        std::unordered_map<String, UInt64> write_map;
+        write_map["count_preload"] = t.count_preload();
+        write_map["count_query"] = t.count_query();
+        write_map["bytes_preload"] = t.bytes_preload();
+        write_map["bytes_query"] = t.bytes_query();
+        dumpStatsToMapColumn(write_map, res_columns[col_idx++].get());
+    }
+}
+
 void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, ContextPtr context, const SelectQueryInfo &) const
 {
-    String worker_id = getWorkerID(context);
+    if (context->getServerType() == ServerType::cnch_server)
+    {
+        // Fan out to all workers via RPC
+        auto worker_group = context->tryGetCurrentWorkerGroup();
+        if (!worker_group)
+            return;
 
+        for (const auto & worker : worker_group->getWorkerClients())
+        {
+            try
+            {
+                auto stats = worker->getTTLCacheStats();
+                for (const auto & t : stats)
+                    fillRowFromProto(res_columns, worker->getRPCAddress(), t);
+            }
+            catch (...)
+            {
+                tryLogCurrentException(__PRETTY_FUNCTION__);
+            }
+        }
+        return;
+    }
+
+    // On worker: read directly from local DiskCacheFactory registry
+    String worker_id = getWorkerID(context);
     auto ttl_caches = DiskCacheFactory::instance().getAllTableTTLCaches();
     for (const auto & [uuid, cache_ptr] : ttl_caches)
     {

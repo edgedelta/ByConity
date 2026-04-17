@@ -175,6 +175,24 @@ std::vector<ManipulationInfo> CnchWorkerClient::getManipulationTasksStatus()
     return res;
 }
 
+std::vector<Protos::TTLCacheTableStats> CnchWorkerClient::getTTLCacheStats()
+{
+    brpc::Controller cntl;
+    Protos::GetTTLCacheStatsReq request;
+    Protos::GetTTLCacheStatsResp response;
+
+    stub->getTTLCacheStats(&cntl, &request, &response, nullptr);
+
+    assertController(cntl);
+    RPCHelpers::checkResponse(response);
+
+    std::vector<Protos::TTLCacheTableStats> res;
+    res.reserve(response.tables_size());
+    for (const auto & t : response.tables())
+        res.push_back(t);
+    return res;
+}
+
 void CnchWorkerClient::submitMvRefreshTask(
     const StorageMaterializedView & , const ManipulationTaskParams & params, TxnTimestamp txn_id)
 {
