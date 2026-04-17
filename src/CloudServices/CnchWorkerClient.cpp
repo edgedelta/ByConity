@@ -193,6 +193,24 @@ std::vector<Protos::TTLCacheTableStats> CnchWorkerClient::getTTLCacheStats()
     return res;
 }
 
+std::vector<Protos::TTLCachePartitionStats> CnchWorkerClient::getTTLCachePartitionStats()
+{
+    brpc::Controller cntl;
+    Protos::GetTTLCachePartitionStatsReq request;
+    Protos::GetTTLCachePartitionStatsResp response;
+
+    stub->getTTLCachePartitionStats(&cntl, &request, &response, nullptr);
+
+    assertController(cntl);
+    RPCHelpers::checkResponse(response);
+
+    std::vector<Protos::TTLCachePartitionStats> res;
+    res.reserve(response.partitions_size());
+    for (const auto & p : response.partitions())
+        res.push_back(p);
+    return res;
+}
+
 void CnchWorkerClient::submitMvRefreshTask(
     const StorageMaterializedView & , const ManipulationTaskParams & params, TxnTimestamp txn_id)
 {

@@ -8,6 +8,7 @@
 #include <Common/HostWithPorts.h>
 #include <CloudServices/CnchWorkerClient.h>
 #include <Interpreters/WorkerGroupHandle.h>
+#include <Protos/cnch_worker_rpc.pb.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
 
@@ -129,41 +130,27 @@ void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, Con
             continue;
 
         auto stats = ttl_cache->getStats();
-        size_t col_idx = 0;
 
-        res_columns[col_idx++]->insert(worker_id);
-        res_columns[col_idx++]->insert(ttl_cache->getName());
-        res_columns[col_idx++]->insert(stats.table_uuid);
-        res_columns[col_idx++]->insert(ttl_cache->getTTLMinutes());
-        res_columns[col_idx++]->insert(ttl_cache->getMaxSizeBytes());
-        res_columns[col_idx++]->insert(stats.last_eviction_run);
+        Protos::TTLCacheTableStats t;
+        t.set_table_name(ttl_cache->getName());
+        t.set_table_uuid(stats.table_uuid);
+        t.set_ttl_minutes(ttl_cache->getTTLMinutes());
+        t.set_max_size_bytes(ttl_cache->getMaxSizeBytes());
+        t.set_last_eviction_run(stats.last_eviction_run);
+        t.set_evicted_expired(stats.evicted_expired);
+        t.set_evicted_size_limit(stats.evicted_size_limit);
+        t.set_async_triggered_local(stats.async_eviction_triggered);
+        t.set_async_skipped_rate_limit_local(stats.async_eviction_skipped_rate_limit);
+        t.set_async_triggered_global(stats.async_eviction_triggered_global);
+        t.set_async_skipped_rate_limit_global(stats.async_eviction_skipped_rate_limit_global);
+        t.set_rejected_non_time_partition(stats.rejected_non_time_partition);
+        t.set_rejected_too_old(stats.rejected_too_old);
+        t.set_count_preload(stats.cached_from_preload);
+        t.set_count_query(stats.cached_from_query);
+        t.set_bytes_preload(stats.cached_bytes_preload);
+        t.set_bytes_query(stats.cached_bytes_query);
 
-        {
-            std::unordered_map<String, UInt64> eviction_map;
-            eviction_map["expired"] = stats.evicted_expired;
-            eviction_map["size_limit"] = stats.evicted_size_limit;
-            eviction_map["async_triggered_local"] = stats.async_eviction_triggered;
-            eviction_map["async_skipped_rate_limit_local"] = stats.async_eviction_skipped_rate_limit;
-            eviction_map["async_triggered_global"] = stats.async_eviction_triggered_global;
-            eviction_map["async_skipped_rate_limit_global"] = stats.async_eviction_skipped_rate_limit_global;
-            dumpStatsToMapColumn(eviction_map, res_columns[col_idx++].get());
-        }
-
-        {
-            std::unordered_map<String, UInt64> rejection_map;
-            rejection_map["non_time_partition"] = stats.rejected_non_time_partition;
-            rejection_map["too_old"] = stats.rejected_too_old;
-            dumpStatsToMapColumn(rejection_map, res_columns[col_idx++].get());
-        }
-
-        {
-            std::unordered_map<String, UInt64> write_map;
-            write_map["count_preload"] = stats.cached_from_preload;
-            write_map["count_query"] = stats.cached_from_query;
-            write_map["bytes_preload"] = stats.cached_bytes_preload;
-            write_map["bytes_query"] = stats.cached_bytes_query;
-            dumpStatsToMapColumn(write_map, res_columns[col_idx++].get());
-        }
+        fillRowFromProto(res_columns, worker_id, t);
     }
 }
 

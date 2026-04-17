@@ -82,6 +82,7 @@ public:
     std::unordered_set<String> touchManipulationTasks(const UUID & table_uuid, const Strings & tasks_id);
     std::vector<ManipulationInfo> getManipulationTasksStatus();
     std::vector<Protos::TTLCacheTableStats> getTTLCacheStats();
+    std::vector<Protos::TTLCachePartitionStats> getTTLCachePartitionStats();
 
     void submitMvRefreshTask(
         const StorageMaterializedView & storage, const ManipulationTaskParams & params, TxnTimestamp txn_id);

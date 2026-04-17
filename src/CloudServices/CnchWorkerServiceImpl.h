@@ -73,6 +73,12 @@ public:
         Protos::GetTTLCacheStatsResp * response,
         google::protobuf::Closure * done) override;
 
+    void getTTLCachePartitionStats(
+        google::protobuf::RpcController * cntl,
+        const Protos::GetTTLCachePartitionStatsReq * request,
+        Protos::GetTTLCachePartitionStatsResp * response,
+        google::protobuf::Closure * done) override;
+
     void GetPreallocatedStatus(
         google::protobuf::RpcController *,
         const Protos::GetPreallocatedStatusReq * request,

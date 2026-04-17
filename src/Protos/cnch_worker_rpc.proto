@@ -214,6 +214,27 @@ message GetTTLCacheStatsResp
   repeated TTLCacheTableStats tables = 2;
 }
 
+message TTLCachePartitionStats
+{
+  optional string table_name = 1;
+  optional string table_uuid = 2;
+  optional string partition = 3;
+  optional uint64 entry_count = 4;
+  optional uint64 bytes = 5;
+  optional uint64 hits = 6;
+  optional uint64 misses = 7;
+}
+
+message GetTTLCachePartitionStatsReq
+{
+}
+
+message GetTTLCachePartitionStatsResp
+{
+  optional string exception = 1;
+  repeated TTLCachePartitionStats partitions = 2;
+}
+
 message GetPreallocatedStatusReq
 {
   required UUID storage_id = 1;
@@ -649,4 +670,5 @@ service CnchWorkerService
   rpc executeDedupTask(ExecuteDedupTaskReq) returns (ExecuteDedupTaskResp);
 
   rpc getTTLCacheStats(GetTTLCacheStatsReq) returns (GetTTLCacheStatsResp);
+  rpc getTTLCachePartitionStats(GetTTLCachePartitionStatsReq) returns (GetTTLCachePartitionStatsResp);
 }

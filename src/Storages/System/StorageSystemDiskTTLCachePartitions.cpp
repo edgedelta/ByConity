@@ -3,6 +3,9 @@
 #include <DataTypes/DataTypesNumber.h>
 #include <Interpreters/Context.h>
 #include <Common/HostWithPorts.h>
+#include <CloudServices/CnchWorkerClient.h>
+#include <Interpreters/WorkerGroupHandle.h>
+#include <Protos/cnch_worker_rpc.pb.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
 
@@ -28,10 +31,45 @@ StorageSystemDiskTTLCachePartitions::StorageSystemDiskTTLCachePartitions(const S
 {
 }
 
+static void fillPartitionRow(MutableColumns & res_columns, const String & worker_id, const Protos::TTLCachePartitionStats & p)
+{
+    size_t col_idx = 0;
+    res_columns[col_idx++]->insert(worker_id);
+    res_columns[col_idx++]->insert(p.table_name());
+    res_columns[col_idx++]->insert(p.table_uuid());
+    res_columns[col_idx++]->insert(p.partition());
+    res_columns[col_idx++]->insert(p.entry_count());
+    res_columns[col_idx++]->insert(p.bytes());
+    res_columns[col_idx++]->insert(p.hits());
+    res_columns[col_idx++]->insert(p.misses());
+}
+
 void StorageSystemDiskTTLCachePartitions::fillData(MutableColumns & res_columns, ContextPtr context, const SelectQueryInfo &) const
 {
-    String worker_id = getWorkerID(context);
+    if (context->getServerType() == ServerType::cnch_server)
+    {
+        auto worker_group = context->tryGetCurrentWorkerGroup();
+        if (!worker_group)
+            return;
 
+        for (const auto & worker : worker_group->getWorkerClients())
+        {
+            try
+            {
+                auto partitions = worker->getTTLCachePartitionStats();
+                for (const auto & p : partitions)
+                    fillPartitionRow(res_columns, worker->getRPCAddress(), p);
+            }
+            catch (...)
+            {
+                tryLogCurrentException(__PRETTY_FUNCTION__);
+            }
+        }
+        return;
+    }
+
+    // On worker: read directly from local DiskCacheFactory registry
+    String worker_id = getWorkerID(context);
     auto ttl_caches = DiskCacheFactory::instance().getAllTableTTLCaches();
     for (const auto & [uuid, cache_ptr] : ttl_caches)
     {
@@ -39,20 +77,18 @@ void StorageSystemDiskTTLCachePartitions::fillData(MutableColumns & res_columns,
         if (!ttl_cache)
             continue;
 
-        auto stats = ttl_cache->getStats();
-        auto partition_stats_list = ttl_cache->getPartitionStats();
-
-        for (const auto & ps : partition_stats_list)
+        auto table_stats = ttl_cache->getStats();
+        for (const auto & ps : ttl_cache->getPartitionStats())
         {
-            size_t col_idx = 0;
-            res_columns[col_idx++]->insert(worker_id);
-            res_columns[col_idx++]->insert(ttl_cache->getName());
-            res_columns[col_idx++]->insert(stats.table_uuid);
-            res_columns[col_idx++]->insert(ps.partition_id);
-            res_columns[col_idx++]->insert(ps.entry_count);
-            res_columns[col_idx++]->insert(ps.total_bytes);
-            res_columns[col_idx++]->insert(ps.hits);
-            res_columns[col_idx++]->insert(ps.misses);
+            Protos::TTLCachePartitionStats p;
+            p.set_table_name(ttl_cache->getName());
+            p.set_table_uuid(table_stats.table_uuid);
+            p.set_partition(ps.partition_id);
+            p.set_entry_count(ps.entry_count);
+            p.set_bytes(ps.total_bytes);
+            p.set_hits(ps.hits);
+            p.set_misses(ps.misses);
+            fillPartitionRow(res_columns, worker_id, p);
         }
     }
 }

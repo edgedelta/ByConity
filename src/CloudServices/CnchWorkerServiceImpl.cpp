@@ -1356,6 +1356,36 @@ void CnchWorkerServiceImpl::getTTLCacheStats(
     });
 }
 
+void CnchWorkerServiceImpl::getTTLCachePartitionStats(
+    google::protobuf::RpcController *,
+    const Protos::GetTTLCachePartitionStatsReq *,
+    Protos::GetTTLCachePartitionStatsResp * response,
+    google::protobuf::Closure * done)
+{
+    SUBMIT_THREADPOOL({
+        auto ttl_caches = DiskCacheFactory::instance().getAllTableTTLCaches();
+        for (const auto & [uuid, cache_ptr] : ttl_caches)
+        {
+            auto * ttl_cache = dynamic_cast<DiskCacheTTL *>(cache_ptr.get());
+            if (!ttl_cache)
+                continue;
+
+            auto table_stats = ttl_cache->getStats();
+            for (const auto & ps : ttl_cache->getPartitionStats())
+            {
+                auto * p = response->add_partitions();
+                p->set_table_name(ttl_cache->getName());
+                p->set_table_uuid(table_stats.table_uuid);
+                p->set_partition(ps.partition_id);
+                p->set_entry_count(ps.entry_count);
+                p->set_bytes(ps.total_bytes);
+                p->set_hits(ps.hits);
+                p->set_misses(ps.misses);
+            }
+        }
+    });
+}
+
 #if defined(__clang__)
 #    pragma clang diagnostic pop
 #else
