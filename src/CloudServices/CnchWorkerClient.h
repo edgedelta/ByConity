@@ -43,6 +43,8 @@ namespace DB
 namespace Protos
 {
     class CnchWorkerService_Stub;
+    class TTLCacheTableStats;
+    class TTLCachePartitionStats;
 }
 
 namespace IngestColumnCnch
