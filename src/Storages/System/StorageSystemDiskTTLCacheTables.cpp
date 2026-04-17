@@ -8,7 +8,7 @@
 #include <Common/HostWithPorts.h>
 #include <CloudServices/CnchWorkerClient.h>
 #include <Interpreters/WorkerGroupHandle.h>
-#include <Interpreters/VirtualWarehouseHandle.h>
+#include <Interpreters/VirtualWarehousePool.h>
 #include <Protos/cnch_worker_rpc.pb.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
@@ -106,7 +106,7 @@ void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, Con
         if (!worker_group)
         {
             if (auto vw = context->getVirtualWarehousePool().tryGet("vw_default"))
-                worker_group = vw->pickWorkerGroup(VirtualWarehouseHandle::VWScheduleAlgo::Random);
+                worker_group = vw->pickWorkerGroup(VWScheduleAlgo::Random);
         }
         if (!worker_group)
             return;
