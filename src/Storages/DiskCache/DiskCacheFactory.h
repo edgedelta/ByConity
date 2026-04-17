@@ -81,6 +81,13 @@ public:
         UInt64 ttl_minutes,
         size_t max_size_bytes = 0);
 
+    /// Return a snapshot of all registered per-table TTL caches (UUID → cache ptr).
+    std::unordered_map<UUID, IDiskCachePtr> getAllTableTTLCaches() const
+    {
+        std::lock_guard<std::mutex> lock(ttl_cache_registry_mutex);
+        return per_table_ttl_caches;
+    }
+
     /// Remove a per-table TTL cache entry from the registry.
     /// Called when disk_cache_ttl_hours is set to 0 so re-enabling creates a fresh object.
     void removeTableTTLCache(const UUID & table_uuid)
@@ -102,7 +109,7 @@ private:
 
     /// Per-table TTL cache registry (for workers)
     std::unordered_map<UUID, IDiskCachePtr> per_table_ttl_caches;
-    std::mutex ttl_cache_registry_mutex;
+    mutable std::mutex ttl_cache_registry_mutex;
 
     /// Global TTL cache usage tracking
     std::atomic<size_t> global_ttl_cache_usage{0};
