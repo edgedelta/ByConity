@@ -4,7 +4,6 @@
 #include <Interpreters/Context.h>
 #include <Common/HostWithPorts.h>
 #include <CloudServices/CnchWorkerClient.h>
-#include <Interpreters/WorkerGroupHandle.h>
 #include <Interpreters/VirtualWarehousePool.h>
 #include <Protos/cnch_worker_rpc.pb.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
@@ -49,24 +48,27 @@ void StorageSystemDiskTTLCachePartitions::fillData(MutableColumns & res_columns,
 {
     if (context->getServerType() == ServerType::cnch_server)
     {
+        std::vector<CnchWorkerClientPtr> workers;
         auto worker_group = context->tryGetCurrentWorkerGroup();
-        if (!worker_group)
+        if (worker_group)
+        {
+            workers = worker_group->getWorkerClients();
+        }
+        else
         {
             try
             {
                 auto vw = context->getVirtualWarehousePool().get("vw_default");
-                worker_group = vw->pickWorkerGroup(VWScheduleAlgo::Random);
+                workers = vw->getAllWorkers();
             }
             catch (...)
             {
                 tryLogCurrentException(&Poco::Logger::get("StorageSystemDiskTTLCachePartitions"),
-                    "Failed to get vw_default worker group, returning empty result");
+                    "Failed to get vw_default workers, returning empty result");
             }
         }
-        if (!worker_group)
+        if (workers.empty())
             return;
-
-        auto workers = worker_group->getWorkerClients();
         LOG_DEBUG(&Poco::Logger::get("StorageSystemDiskTTLCachePartitions"),
             "Querying TTL partition stats from {} worker(s)", workers.size());
         for (const auto & worker : workers)
