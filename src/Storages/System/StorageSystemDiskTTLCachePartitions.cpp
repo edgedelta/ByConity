@@ -4,7 +4,8 @@
 #include <Interpreters/Context.h>
 #include <Common/HostWithPorts.h>
 #include <CloudServices/CnchWorkerClient.h>
-#include <Interpreters/VirtualWarehousePool.h>
+#include <CloudServices/CnchWorkerClientPools.h>
+#include <ResourceManagement/ResourceManagerClient.h>
 #include <Protos/cnch_worker_rpc.pb.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
@@ -48,40 +49,34 @@ void StorageSystemDiskTTLCachePartitions::fillData(MutableColumns & res_columns,
 {
     if (context->getServerType() == ServerType::cnch_server)
     {
-        std::vector<CnchWorkerClientPtr> workers;
-        auto worker_group = context->tryGetCurrentWorkerGroup();
-        if (worker_group)
+        auto * log = &Poco::Logger::get("StorageSystemDiskTTLCachePartitions");
+        std::vector<WorkerNodeResourceData> all_workers;
+        try
         {
-            workers = worker_group->getWorkerClients();
+            auto rm_client = context->getResourceManagerClient();
+            if (!rm_client)
+            {
+                LOG_WARNING(log, "ResourceManager client unavailable, returning empty result");
+                return;
+            }
+            rm_client->getAllWorkers(all_workers);
         }
-        else
+        catch (...)
         {
-            try
-            {
-                auto vw = context->getVirtualWarehousePool().get("vw_default");
-                workers = vw->getAllWorkers();
-            }
-            catch (...)
-            {
-                tryLogCurrentException(&Poco::Logger::get("StorageSystemDiskTTLCachePartitions"),
-                    "Failed to get vw_default workers, returning empty result");
-            }
-        }
-        if (workers.empty())
+            tryLogCurrentException(log, "Failed to get workers from ResourceManager");
             return;
-        LOG_DEBUG(&Poco::Logger::get("StorageSystemDiskTTLCachePartitions"),
-            "Querying TTL partition stats from {} worker(s)", workers.size());
-        for (const auto & worker : workers)
+        }
+
+        LOG_INFO(log, "Querying TTL partition stats from {} worker(s)", all_workers.size());
+        auto & pools = context->getCnchWorkerClientPools();
+        for (const auto & wd : all_workers)
         {
-            LOG_DEBUG(&Poco::Logger::get("StorageSystemDiskTTLCachePartitions"),
-                "Sending getTTLCachePartitionStats RPC to {}", worker->getRPCAddress());
             try
             {
+                auto worker = pools.getWorker(wd.host_ports);
                 auto partitions = worker->getTTLCachePartitionStats();
-                LOG_DEBUG(&Poco::Logger::get("StorageSystemDiskTTLCachePartitions"),
-                    "Got {} partition entries from {}", partitions.size(), worker->getRPCAddress());
                 for (const auto & p : partitions)
-                    fillPartitionRow(res_columns, worker->getRPCAddress(), p);
+                    fillPartitionRow(res_columns, wd.host_ports.getRPCAddress(), p);
             }
             catch (...)
             {

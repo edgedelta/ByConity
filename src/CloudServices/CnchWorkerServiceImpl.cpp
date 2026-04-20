@@ -1327,7 +1327,7 @@ void CnchWorkerServiceImpl::getTTLCacheStats(
 {
     SUBMIT_THREADPOOL({
         auto ttl_caches = DiskCacheFactory::instance().getAllTableTTLCaches();
-        LOG_DEBUG(log, "getTTLCacheStats: {} TTL cache(s) in registry", ttl_caches.size());
+        LOG_INFO(log, "getTTLCacheStats: {} TTL cache(s) in registry", ttl_caches.size());
         for (const auto & [uuid, cache_ptr] : ttl_caches)
         {
             auto * ttl_cache = dynamic_cast<DiskCacheTTL *>(cache_ptr.get());
@@ -1335,7 +1335,7 @@ void CnchWorkerServiceImpl::getTTLCacheStats(
                 continue;
 
             auto stats = ttl_cache->getStats();
-            LOG_DEBUG(log, "getTTLCacheStats: returning stats for table={} uuid={}", ttl_cache->getName(), stats.table_uuid);
+            LOG_INFO(log, "getTTLCacheStats: returning stats for table={} uuid={}", ttl_cache->getName(), stats.table_uuid);
             auto * t = response->add_tables();
             t->set_table_name(ttl_cache->getName());
             t->set_table_uuid(stats.table_uuid);

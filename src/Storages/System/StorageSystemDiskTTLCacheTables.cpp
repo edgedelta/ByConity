@@ -7,7 +7,8 @@
 #include <Interpreters/Context.h>
 #include <Common/HostWithPorts.h>
 #include <CloudServices/CnchWorkerClient.h>
-#include <Interpreters/VirtualWarehousePool.h>
+#include <CloudServices/CnchWorkerClientPools.h>
+#include <ResourceManagement/ResourceManagerClient.h>
 #include <Protos/cnch_worker_rpc.pb.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
@@ -99,42 +100,38 @@ void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, Con
 {
     if (context->getServerType() == ServerType::cnch_server)
     {
-        // Fan out to all workers via RPC.
-        // Fall back to vw_default when no worker group is set in context (e.g. direct system table query).
-        std::vector<CnchWorkerClientPtr> workers;
-        auto worker_group = context->tryGetCurrentWorkerGroup();
-        if (worker_group)
+        // Fan out to all workers via RPC using RM worker list — same pattern as system.workers.
+        // This works in any context without requiring a VW to be set.
+        auto * log = &Poco::Logger::get("StorageSystemDiskTTLCacheTables");
+        std::vector<WorkerNodeResourceData> all_workers;
+        try
         {
-            workers = worker_group->getWorkerClients();
+            auto rm_client = context->getResourceManagerClient();
+            if (!rm_client)
+            {
+                LOG_WARNING(log, "ResourceManager client unavailable, returning empty result");
+                return;
+            }
+            rm_client->getAllWorkers(all_workers);
         }
-        else
+        catch (...)
         {
-            try
-            {
-                auto vw = context->getVirtualWarehousePool().get("vw_default");
-                workers = vw->getAllWorkers();
-            }
-            catch (...)
-            {
-                tryLogCurrentException(&Poco::Logger::get("StorageSystemDiskTTLCacheTables"),
-                    "Failed to get vw_default workers, returning empty result");
-            }
-        }
-        if (workers.empty())
+            tryLogCurrentException(log, "Failed to get workers from ResourceManager");
             return;
-        LOG_DEBUG(&Poco::Logger::get("StorageSystemDiskTTLCacheTables"),
-            "Querying TTL cache stats from {} worker(s)", workers.size());
-        for (const auto & worker : workers)
+        }
+
+        LOG_INFO(log, "Querying TTL cache stats from {} worker(s)", all_workers.size());
+        auto & pools = context->getCnchWorkerClientPools();
+        for (const auto & wd : all_workers)
         {
-            LOG_DEBUG(&Poco::Logger::get("StorageSystemDiskTTLCacheTables"),
-                "Sending getTTLCacheStats RPC to {}", worker->getRPCAddress());
+            LOG_INFO(log, "Sending getTTLCacheStats RPC to {}", wd.host_ports.getRPCAddress());
             try
             {
+                auto worker = pools.getWorker(wd.host_ports);
                 auto stats = worker->getTTLCacheStats();
-                LOG_DEBUG(&Poco::Logger::get("StorageSystemDiskTTLCacheTables"),
-                    "Got {} TTL cache entries from {}", stats.size(), worker->getRPCAddress());
+                LOG_INFO(log, "Got {} TTL cache entries from {}", stats.size(), wd.host_ports.getRPCAddress());
                 for (const auto & t : stats)
-                    fillRowFromProto(res_columns, worker->getRPCAddress(), t);
+                    fillRowFromProto(res_columns, wd.host_ports.getRPCAddress(), t);
             }
             catch (...)
             {
