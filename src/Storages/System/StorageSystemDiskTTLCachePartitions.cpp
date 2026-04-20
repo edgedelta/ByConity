@@ -6,6 +6,7 @@
 #include <CloudServices/CnchWorkerClient.h>
 #include <CloudServices/CnchWorkerClientPools.h>
 #include <ResourceManagement/ResourceManagerClient.h>
+#include <ResourceManagement/VirtualWarehouseType.h>
 #include <Protos/cnch_worker_rpc.pb.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
@@ -71,6 +72,8 @@ void StorageSystemDiskTTLCachePartitions::fillData(MutableColumns & res_columns,
         auto & pools = context->getCnchWorkerClientPools();
         for (const auto & wd : all_workers)
         {
+            if (wd.vw_name == ResourceManagement::toSystemVWName(ResourceManagement::VirtualWarehouseType::Write))
+                continue;
             try
             {
                 auto worker = pools.getWorker(wd.host_ports);

@@ -9,6 +9,7 @@
 #include <CloudServices/CnchWorkerClient.h>
 #include <CloudServices/CnchWorkerClientPools.h>
 #include <ResourceManagement/ResourceManagerClient.h>
+#include <ResourceManagement/VirtualWarehouseType.h>
 #include <Protos/cnch_worker_rpc.pb.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
@@ -124,6 +125,8 @@ void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, Con
         auto & pools = context->getCnchWorkerClientPools();
         for (const auto & wd : all_workers)
         {
+            if (wd.vw_name == ResourceManagement::toSystemVWName(ResourceManagement::VirtualWarehouseType::Write))
+                continue;
             LOG_INFO(log, "Sending getTTLCacheStats RPC to {}", wd.host_ports.getRPCAddress());
             try
             {
