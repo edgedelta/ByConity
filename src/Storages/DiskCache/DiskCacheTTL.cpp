@@ -373,58 +373,6 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
 
     ProfileEvents::increment(ProfileEvents::DiskCacheSetTotalOps, 1, Metrics::MetricType::Rate, {{"type", (is_preload ? "preload": "query")}});
 
-    // Check both global and local thresholds (both at 90%)
-    auto & factory = DiskCacheFactory::instance();
-    size_t global_usage = factory.getGlobalTTLUsage();
-    size_t global_limit = factory.getGlobalTTLLimit();
-
-    bool global_threshold_hit = (global_limit > 0 && global_usage > global_limit * 0.90);
-    bool local_threshold_hit = (max_size_bytes > 0 && total_size.load() > max_size_bytes * 0.90);
-
-    // Async size-based eviction: if either threshold hit, schedule background cleanup
-    if (global_threshold_hit || local_threshold_hit)
-    {
-        time_t now = time(nullptr);
-        time_t last_trigger = last_size_eviction_trigger.load();
-
-        // Rate limit: at most once per minute
-        if (now - last_trigger > 60)
-        {
-            if (last_size_eviction_trigger.compare_exchange_strong(last_trigger, now))
-            {
-                size_t target_free = max_size_bytes * 0.10;  // Free 10%
-
-                if (global_threshold_hit)
-                {
-                    cache_stats.async_eviction_triggered_global++;
-                    LOG_DEBUG(log, "Global cache at {}%, scheduling async eviction for table {}",
-                             (global_usage * 100 / global_limit), table_uuid);
-                }
-                else
-                {
-                    cache_stats.async_eviction_triggered++;
-                    LOG_DEBUG(log, "Table cache {}% full, scheduling async eviction to free {} bytes",
-                             (total_size.load() * 100 / max_size_bytes), target_free);
-                }
-
-                auto & thread_pool = IDiskCache::getEvictPool();
-                thread_pool.scheduleOrThrow([this, target_free] {
-                    Stopwatch watch;
-                    evictOldestPartitionsUntilSpace(target_free);
-                    LOG_INFO(log, "Async size-based eviction freed space in {} ms",
-                            watch.elapsedMilliseconds());
-                });
-            }
-        }
-        else
-        {
-            if (global_threshold_hit)
-                cache_stats.async_eviction_skipped_rate_limit_global++;
-            else
-                cache_stats.async_eviction_skipped_rate_limit++;
-        }
-    }
-
     auto key = hash(seg_name);
 
     // Check if already exists
@@ -486,6 +434,60 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
 
         if (fdb_index)
             fdb_index->onSet(key, seg_name, weight, part_ts);
+
+        // Check both global and local thresholds (both at 90%).
+        // Done after updatePartitionStats so the just-added partition is visible
+        // to evictOldestPartitionsUntilSpace when it fires.
+        auto & factory = DiskCacheFactory::instance();
+        size_t global_usage = factory.getGlobalTTLUsage();
+        size_t global_limit = factory.getGlobalTTLLimit();
+
+        bool global_threshold_hit = (global_limit > 0 && global_usage > global_limit * 0.90);
+        bool local_threshold_hit = (max_size_bytes > 0 && total_size.load() > max_size_bytes * 0.90);
+
+        // Async size-based eviction: if either threshold hit, schedule background cleanup
+        if (global_threshold_hit || local_threshold_hit)
+        {
+            time_t now = time(nullptr);
+            time_t last_trigger = last_size_eviction_trigger.load();
+
+            // Rate limit: at most once per minute
+            if (now - last_trigger > 60)
+            {
+                if (last_size_eviction_trigger.compare_exchange_strong(last_trigger, now))
+                {
+                    size_t target_free = max_size_bytes * 0.10;  // Free 10%
+
+                    if (global_threshold_hit)
+                    {
+                        cache_stats.async_eviction_triggered_global++;
+                        LOG_DEBUG(log, "Global cache at {}%, scheduling async eviction for table {}",
+                                 (global_usage * 100 / global_limit), table_uuid);
+                    }
+                    else
+                    {
+                        cache_stats.async_eviction_triggered++;
+                        LOG_DEBUG(log, "Table cache {}% full, scheduling async eviction to free {} bytes",
+                                 (total_size.load() * 100 / max_size_bytes), target_free);
+                    }
+
+                    auto & thread_pool = IDiskCache::getEvictPool();
+                    thread_pool.scheduleOrThrow([this, target_free] {
+                        Stopwatch watch;
+                        evictOldestPartitionsUntilSpace(target_free);
+                        LOG_INFO(log, "Async size-based eviction freed space in {} ms",
+                                watch.elapsedMilliseconds());
+                    });
+                }
+            }
+            else
+            {
+                if (global_threshold_hit)
+                    cache_stats.async_eviction_skipped_rate_limit_global++;
+                else
+                    cache_stats.async_eviction_skipped_rate_limit++;
+            }
+        }
     }
     catch(const Exception & e)
     {
