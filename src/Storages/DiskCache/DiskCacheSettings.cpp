@@ -54,7 +54,7 @@ void DiskCacheSettings::loadFromConfig(const Poco::Util::AbstractConfiguration &
 
     // TTL cache settings
     ttl_cache_max_size = config.getUInt64(config_prefix + ".ttl_cache_max_size", 0);
-    ttl_cache_max_percent = config.getUInt64(config_prefix + ".ttl_cache_max_percent", 80);
+    ttl_cache_max_percent = config.getDouble(config_prefix + ".ttl_cache_max_percent", 80.0);
 }
 
 std::string DiskCacheSettings::toString() const
