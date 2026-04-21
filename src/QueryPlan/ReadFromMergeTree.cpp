@@ -172,7 +172,8 @@ static bool isSamePartition(const RangesInDataPart & lhs, const RangesInDataPart
 static bool canReadInPartitionOrder(
     const StorageInMemoryMetadata & metadata,
     const InputOrderInfo & input_order_info,
-    const ASTSelectQuery & select)
+    const ASTSelectQuery & select,
+    ContextPtr context)
 {
     if (!metadata.isPartitionKeyDefined() || !metadata.isSortingKeyDefined())
         return false;
@@ -191,8 +192,27 @@ static bool canReadInPartitionOrder(
 
     /// sorting columns should contain partition column
     auto partition_column_it = std::find(sorting_columns.begin(), sorting_columns.end(), partition_column);
+
+    /// If partition_column is a MATERIALIZED alias (e.g. `date MATERIALIZED toDate(timestamp)`)
+    /// it won't appear directly in sorting columns.  Expand it and retry.
+    ExpressionActionsPtr expanded_expr;
     if (partition_column_it == sorting_columns.end())
-        return false;
+    {
+        auto col_default = metadata.getColumns().getDefault(partition_column);
+        if (!col_default || col_default->kind != ColumnDefaultKind::Materialized || !col_default->expression)
+            return false;
+
+        auto mat_key = KeyDescription::getKeyFromAST(col_default->expression, metadata.getColumns(), context);
+        Names mat_required = mat_key.expression->getRequiredColumns();
+        if (mat_required.size() != 1)
+            return false;
+
+        partition_column_it = std::find(sorting_columns.begin(), sorting_columns.end(), mat_required[0]);
+        if (partition_column_it == sorting_columns.end())
+            return false;
+
+        expanded_expr = mat_key.expression;
+    }
 
     /// Allow table "partition by c order by (a, b, c)" for query "where a={} and b={} order by c",
     /// where all sorting columns before partition column match single value,
@@ -227,9 +247,11 @@ static bool canReadInPartitionOrder(
     if (partition_key.column_names.front() == *partition_column_it)
         return true;
 
-    /// Allow "partition by func(x) order by (x)" where func is monotonic nondecreasing
+    /// Allow "partition by func(x) order by (x)" where func is monotonic nondecreasing.
+    /// For MATERIALIZED columns use the expanded expression; otherwise use the partition key expression.
+    const ExpressionActions & expr_for_monotonicity = expanded_expr ? *expanded_expr : *partition_key.expression;
     IFunction::Monotonicity monotonicity;
-    for (const auto & action : partition_key.expression->getActions())
+    for (const auto & action : expr_for_monotonicity.getActions())
     {
         if (action.node->type != ActionsDAG::ActionType::FUNCTION)
         {
@@ -1475,7 +1497,7 @@ void ReadFromMergeTree::initializePipeline(QueryPipeline & pipeline, const Build
         auto sorting_key_prefix_expr = ExpressionAnalyzer(order_key_prefix_ast, syntax_result, context).getActionsDAG(false);
 
         can_read_in_partition_order = (settings.optimize_read_in_partition_order || settings.force_read_in_partition_order)
-            && canReadInPartitionOrder(*metadata_for_reading, *input_order_info, query_info.query->as<ASTSelectQuery &>());
+            && canReadInPartitionOrder(*metadata_for_reading, *input_order_info, query_info.query->as<ASTSelectQuery &>(), context);
 
         if (can_read_in_partition_order && result.selected_partitions > 1)
         {

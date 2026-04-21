@@ -1110,10 +1110,11 @@ void DiskCacheTTL::updatePartitionStats(const String & partition_id, time_t part
     auto & pstats = cache_stats.partition_stats[partition_id];
 
     if (pstats.partition_id.empty())
-    {
         pstats.partition_id = partition_id;
+
+    // Only set from a real timestamp; get() misses pass 0 which must not poison the value.
+    if (partition_ts > 0 && pstats.partition_timestamp == 0)
         pstats.partition_timestamp = partition_ts;
-    }
 
     if (hit)
         pstats.hits++;
