@@ -804,6 +804,15 @@ void DiskCacheTTL::load()
             total_size = bytes;
             cache_stats.total_entries = entries;
             cache_stats.total_bytes = bytes;
+
+            // Populate partition_stats so size-based eviction can order and find recovered entries.
+            // reconcile() inserts into cache_map but never calls updatePartitionStats.
+            for (const auto & [key, meta] : cache_map)
+            {
+                if (meta && meta->size > 0)
+                    updatePartitionStats(formatPartitionId(meta->max_timestamp), meta->max_timestamp, false, meta->size);
+            }
+
             LOG_INFO(log, "TTL cache for {} recovered from FDB index: {} entries, {} bytes",
                 table_uuid, entries, bytes);
             return;
