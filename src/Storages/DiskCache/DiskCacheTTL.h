@@ -151,6 +151,10 @@ public:
         size_t cached_from_query{0};
         size_t cached_bytes_preload{0};
         size_t cached_bytes_query{0};
+
+        // Aggregated hit/miss counts across all partitions
+        size_t total_hits{0};
+        size_t total_misses{0};
     };
 
     // Internal stats with atomics

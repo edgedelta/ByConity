@@ -716,6 +716,7 @@ private:
     void writeHistogramMetrics(WriteBuffer & wb);
     void writeInternalMetrics(WriteBuffer & wb);
     void writePartMetrics(WriteBuffer & wb);
+    void writeTTLCacheMetrics(WriteBuffer & wb);
 
     static constexpr auto MAX_CONCURRENT_DEFAULT_QUERIES_KEY = "max_concurrent_default_queries";
     static constexpr auto MAX_CONCURRENT_INSERT_QUERIES_KEY = "max_concurrent_insert_queries";

@@ -1082,6 +1082,14 @@ DiskCacheTTL::TTLCacheStats DiskCacheTTL::getStats() const
     stats.cached_from_query = cache_stats.cached_from_query.load();
     stats.cached_bytes_preload = cache_stats.cached_bytes_preload.load();
     stats.cached_bytes_query = cache_stats.cached_bytes_query.load();
+    {
+        std::shared_lock<std::shared_mutex> lock(cache_stats.partition_stats_mutex);
+        for (const auto & [_, ps] : cache_stats.partition_stats)
+        {
+            stats.total_hits += ps.hits.load();
+            stats.total_misses += ps.misses.load();
+        }
+    }
     return stats;
 }
 
