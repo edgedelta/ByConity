@@ -195,6 +195,11 @@ public:
     size_t getMaxSizeBytes() const { return max_size_bytes; }
     void setFDBIndex(std::shared_ptr<TTLCacheFDBIndex> idx) { fdb_index = std::move(idx); }
 
+    /// Look up whether a peer worker has this segment cached via the FDB reverse index.
+    /// Returns peer RPC endpoint if found, nullopt if not found or FDB unavailable.
+    /// Gated on fdb_index being set; caller is responsible for checking stealing mode.
+    std::optional<String> findPeerOwner(const String & seg_name);
+
 private:
     size_t writeSegment(const String& seg_name, ReadBuffer& buffer, ReservationPtr& reservation);
 

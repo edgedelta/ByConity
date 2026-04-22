@@ -36,7 +36,8 @@ public:
         std::shared_ptr<Catalog::IMetaStore> metastore_,
         const String & name_space,
         const String & worker_id,
-        const String & table_uuid);
+        const String & table_uuid,
+        const String & own_endpoint_);
 
     ~TTLCacheFDBIndex();
 
@@ -46,6 +47,10 @@ public:
     /// Issue FDB clean() for all segments of one part (hash_high).
     /// partition_id: YYYYMMDD string derived from max_timestamp (same as path structure).
     void evictPart(const String & partition_id, UInt64 hash_high);
+
+    /// Look up whether any peer worker has this segment cached.
+    /// Returns peer RPC endpoint (host:port) if found, nullopt otherwise.
+    std::optional<String> findPeerOwner(UInt128 key, const String & partition_id);
 
     /// Scan FDB index and restore cache_map.
     /// Returns {entries, bytes} restored, or nullopt if index is empty/unavailable.
@@ -73,8 +78,13 @@ private:
     static String encodeValue(const String & seg_name, size_t size, time_t part_ts);
     static bool decodeValue(const String & raw, String & seg_name, size_t & size, time_t & part_ts);
 
+    String makeRevKey(UInt128 key, const String & partition_id) const;
+    String makeRevPartPrefix(const String & partition_id, UInt64 hash_high) const;
+
     std::shared_ptr<Catalog::IMetaStore> metastore;
-    String key_prefix;  // escapeString(ns) + "_DCI_" + escapeString(worker_id) + "_" + table_uuid
+    String key_prefix;      // escapeString(ns) + "_DCI_" + escapeString(worker_id) + "_" + table_uuid
+    String rev_key_prefix;  // escapeString(ns) + "_DCIREV_" + table_uuid
+    String own_endpoint;    // this worker's RPC address (host:port), used to skip self in findPeerOwner
 
     std::mutex mu;
     std::deque<PendingOp> queue;

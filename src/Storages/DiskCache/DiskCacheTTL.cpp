@@ -1112,6 +1112,18 @@ std::vector<DiskCacheTTL::PartitionStats> DiskCacheTTL::getPartitionStats() cons
     return result;
 }
 
+std::optional<String> DiskCacheTTL::findPeerOwner(const String & seg_name)
+{
+    if (!fdb_index)
+        return std::nullopt;
+
+    auto key = hash(seg_name);
+    String part_name = extractPartName(seg_name);
+    String partition_id = extractPartitionId(part_name);
+
+    return fdb_index->findPeerOwner(key, partition_id);
+}
+
 void DiskCacheTTL::updatePartitionStats(const String & partition_id, time_t partition_ts, bool hit, size_t bytes)
 {
     std::unique_lock<std::shared_mutex> lock(cache_stats.partition_stats_mutex);

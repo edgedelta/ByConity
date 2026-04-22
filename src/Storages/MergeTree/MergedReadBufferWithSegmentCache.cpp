@@ -18,6 +18,7 @@
 #include <optional>
 #include <math.h>
 #include <IO/createReadBufferFromFileBase.h>
+#include <Storages/DiskCache/DiskCacheTTL.h>
 #include <Storages/DiskCache/PartFileDiskCacheSegment.h>
 #include <Storages/MergeTree/MergeTreeSuffix.h>
 #include <Storages/MergeTree/MergedReadBufferWithSegmentCache.h>
@@ -370,11 +371,24 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
         if (settings.read_settings.disk_cache_mode == DiskCacheMode::FORCE_DISK_CACHE)
             throw Exception(ErrorCodes::DISK_CACHE_NOT_USED, "Can't find disk cache {} but enable `FORCE_DISK_CACHE`", segment_key);
 
-        if ((settings.remote_disk_cache_stealing == StealingCacheMode::READ_WRITE
-             || settings.remote_disk_cache_stealing == StealingCacheMode::READ_ONLY)
-            && parsed_assign_compute_host.has_value() && parsed_disk_cache_host.has_value()
-            && removeBracketsIfIpv6(parsed_assign_compute_host.value()) != removeBracketsIfIpv6(parsed_disk_cache_host.value()))
-            return seekToMarkInRemoteSegmentCache(segment_idx, mark_pos, segment_key);
+        if (settings.remote_disk_cache_stealing == StealingCacheMode::READ_WRITE
+            || settings.remote_disk_cache_stealing == StealingCacheMode::READ_ONLY)
+        {
+            // FDB-backed peer lookup: topology-aware, fires on scale events and post-restart gaps.
+            // Takes precedence over routing-hint stealing for TTL caches.
+            auto * ttl_cache = dynamic_cast<DiskCacheTTL *>(segment_cache);
+            if (ttl_cache)
+            {
+                if (auto peer_endpoint = ttl_cache->findPeerOwner(segment_key))
+                    return seekToMarkInRemoteSegmentCache(segment_idx, mark_pos, segment_key, *peer_endpoint);
+            }
+            else if (parsed_assign_compute_host.has_value() && parsed_disk_cache_host.has_value()
+                && removeBracketsIfIpv6(parsed_assign_compute_host.value()) != removeBracketsIfIpv6(parsed_disk_cache_host.value()))
+            {
+                // Legacy routing-hint stealing for non-TTL caches.
+                return seekToMarkInRemoteSegmentCache(segment_idx, mark_pos, segment_key, {});
+            }
+        }
         LOG_TRACE(
             logger,
             "Can't find disk cache key {} and fallback to read from remote fs. (current buffer at {}), segment {}, offset {}:{}",
@@ -410,9 +424,13 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
 }
 
 bool MergedReadBufferWithSegmentCache::seekToMarkInRemoteSegmentCache(size_t segment_idx,
-    const MarkInCompressedFile& mark_pos, const String & segment_key)
+    const MarkInCompressedFile& mark_pos, const String & segment_key, const String & endpoint)
 {
     if (!segment_cache)
+        return false;
+
+    const String & peer = endpoint.empty() ? part_host.disk_cache_host_port : endpoint;
+    if (peer.empty())
         return false;
 
     DistributedDataClientOption option{
@@ -423,7 +441,7 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInRemoteSegmentCache(size_t seg
         .retry_sleep_ms = segment_cache->getSettings().stealing_retry_sleep_ms,
         .max_queue_count = segment_cache->getSettings().stealing_max_queue_count,
     };
-    auto remote_data_client = std::make_shared<DistributedDataClient>(part_host.disk_cache_host_port, segment_key, option);
+    auto remote_data_client = std::make_shared<DistributedDataClient>(peer, segment_key, option);
     auto remote_cache_file = std::make_unique<ReadBufferFromRpcStreamFile>(remote_data_client, settings.read_settings.remote_fs_buffer_size);
     if (remote_cache_file->getFileName().empty())
         return false;
@@ -435,7 +453,7 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInRemoteSegmentCache(size_t seg
             logger,
             fmt::format(
                 "Seek to remote diskcache {}:{} (current buffer at {}), segment {}, offset {}:{}",
-                part_host.disk_cache_host_port,
+                peer,
                 remote_cache_file->getFileName(),
                 cache_buffer.initialized() ? cache_buffer.path() : "Uninitialized",
                 segment_idx,

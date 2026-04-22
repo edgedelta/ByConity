@@ -196,7 +196,8 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
             String ns = context.getCnchConfigRef().getString("catalog.name_space", "default");
             String worker_id = getWorkerID(context.shared_from_this());
             String uuid_str = UUIDHelpers::UUIDToString(table_uuid);
-            auto fdb_idx = std::make_shared<TTLCacheFDBIndex>(metastore, ns, worker_id, uuid_str);
+            String own_endpoint = context.getHostWithPorts().getRPCAddress();
+            auto fdb_idx = std::make_shared<TTLCacheFDBIndex>(metastore, ns, worker_id, uuid_str, own_endpoint);
             static_pointer_cast<DiskCacheTTL>(cache)->setFDBIndex(std::move(fdb_idx));
         }
         catch (...)

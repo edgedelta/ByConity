@@ -124,7 +124,8 @@ private:
     void seekToPosition(size_t segment_idx, const MarkInCompressedFile& mark_pos);
     bool seekToMarkInSegmentCache(size_t segment_idx, const MarkInCompressedFile& mark_pos);
     void initialize();
-    bool seekToMarkInRemoteSegmentCache(size_t segment_idx, const MarkInCompressedFile& mark_pos, const String & segment_key);
+    // endpoint: FDB-found peer address; empty = fall back to part_host.disk_cache_host_port
+    bool seekToMarkInRemoteSegmentCache(size_t segment_idx, const MarkInCompressedFile& mark_pos, const String & segment_key, const String & endpoint = {});
     void initCacheBufferIfNeeded(const DiskPtr & disk, const String & path, std::unique_ptr<ReadBufferFromRpcStreamFile> remote_cache = nullptr);
     void initSourceBufferIfNeeded();
 

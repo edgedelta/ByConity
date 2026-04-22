@@ -15,9 +15,12 @@ TTLCacheFDBIndex::TTLCacheFDBIndex(
     std::shared_ptr<Catalog::IMetaStore> metastore_,
     const String & name_space,
     const String & worker_id,
-    const String & table_uuid)
+    const String & table_uuid,
+    const String & own_endpoint_)
     : metastore(std::move(metastore_))
     , key_prefix(Catalog::escapeString(name_space) + "_DCI_" + Catalog::escapeString(worker_id) + "_" + table_uuid)
+    , rev_key_prefix(Catalog::escapeString(name_space) + "_DCIREV_" + table_uuid)
+    , own_endpoint(own_endpoint_)
     , log(&Poco::Logger::get("TTLCacheFDBIndex"))
 {
     bg = std::thread([this] { bgLoop(); });
@@ -42,6 +45,16 @@ String TTLCacheFDBIndex::makeSegKey(UInt128 key, const String & partition_id) co
 String TTLCacheFDBIndex::makePartPrefix(const String & partition_id, UInt64 hash_high) const
 {
     return key_prefix + "_" + partition_id + "_" + getHexUIntLowercase(hash_high) + "_";
+}
+
+String TTLCacheFDBIndex::makeRevKey(UInt128 key, const String & partition_id) const
+{
+    return rev_key_prefix + "_" + partition_id + "_" + getHexUIntLowercase(key.items[0]) + "_" + getHexUIntLowercase(key.items[1]);
+}
+
+String TTLCacheFDBIndex::makeRevPartPrefix(const String & partition_id, UInt64 hash_high) const
+{
+    return rev_key_prefix + "_" + partition_id + "_" + getHexUIntLowercase(hash_high) + "_";
 }
 
 String TTLCacheFDBIndex::encodeValue(const String & seg_name, size_t size, time_t part_ts)
@@ -77,27 +90,38 @@ void TTLCacheFDBIndex::onSet(UInt128 key, const String & seg_name, size_t size, 
     gmtime_r(&part_ts, &t);
     String partition_id = fmt::format("{:04d}{:02d}{:02d}", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
 
-    PendingOp op;
-    op.type  = PendingOp::Type::Set;
-    op.key   = makeSegKey(key, partition_id);
-    op.value = encodeValue(seg_name, size, part_ts);
+    PendingOp fwd;
+    fwd.type  = PendingOp::Type::Set;
+    fwd.key   = makeSegKey(key, partition_id);
+    fwd.value = encodeValue(seg_name, size, part_ts);
+
+    PendingOp rev;
+    rev.type  = PendingOp::Type::Set;
+    rev.key   = makeRevKey(key, partition_id);
+    rev.value = own_endpoint;
 
     {
         std::lock_guard lk(mu);
-        queue.push_back(std::move(op));
+        queue.push_back(std::move(fwd));
+        queue.push_back(std::move(rev));
     }
     cv.notify_one();
 }
 
 void TTLCacheFDBIndex::evictPart(const String & partition_id, UInt64 hash_high)
 {
-    PendingOp op;
-    op.type = PendingOp::Type::Evict;
-    op.key  = makePartPrefix(partition_id, hash_high);
+    PendingOp fwd;
+    fwd.type = PendingOp::Type::Evict;
+    fwd.key  = makePartPrefix(partition_id, hash_high);
+
+    PendingOp rev;
+    rev.type = PendingOp::Type::Evict;
+    rev.key  = makeRevPartPrefix(partition_id, hash_high);
 
     {
         std::lock_guard lk(mu);
-        queue.push_back(std::move(op));
+        queue.push_back(std::move(fwd));
+        queue.push_back(std::move(rev));
     }
     cv.notify_one();
 }
@@ -160,6 +184,27 @@ void TTLCacheFDBIndex::flush(std::vector<PendingOp> & ops)
             catch (...) { tryLogCurrentException(log, "TTLCacheFDBIndex: clean failed for " + op.key); }
         }
     }
+}
+
+std::optional<String> TTLCacheFDBIndex::findPeerOwner(UInt128 key, const String & partition_id)
+{
+    String rev_key = makeRevKey(key, partition_id);
+    String endpoint;
+    try
+    {
+        if (metastore->get(rev_key, endpoint) == 0)
+            return std::nullopt;  // key not found
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "TTLCacheFDBIndex: findPeerOwner FDB get failed");
+        return std::nullopt;
+    }
+
+    if (endpoint.empty() || endpoint == own_endpoint)
+        return std::nullopt;
+
+    return endpoint;
 }
 
 std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
