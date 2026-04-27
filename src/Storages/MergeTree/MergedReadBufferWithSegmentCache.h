@@ -180,7 +180,9 @@ private:
 
     // Per-stream cache stats flushed to DiskCacheFactory registry at segment boundaries and on eof.
     // Only populated when segment_cache is a DiskCacheTTL instance
-    bool is_ttl_cache{false};
+    // True when segment_cache is DiskCacheTTL AND query requested segment profile reporting.
+    // Captured at construction (query thread); safe to read on any thread.
+    bool collect_cache_stats{false};
     String cached_query_id;
     QueryCacheStatsSnapshot local_cache_stats;
     uint64_t active_segment_start_ms{0};  // wall-clock ms when current segment read started

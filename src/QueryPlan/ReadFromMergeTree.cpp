@@ -1858,36 +1858,38 @@ void ReadFromMergeTree::fillRuntimeAttributeDescriptions(const ReadFromMergeTree
         result.selected_ranges);
     attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::SelectParts, std::move(parts_desc));
 
+}
+
+void ReadFromMergeTree::injectPostExecutionAttributes()
+{
     auto query_id = CurrentThread::getQueryId().toString();
-    if (!query_id.empty())
-    {
-        auto cache_stats = DiskCacheFactory::instance().consumeQueryCacheStats(query_id);
-        if (cache_stats)
-        {
-            JSONBuilder::JSONMap cache_map;
-            cache_map.add("cache_hit_segs",   cache_stats->cache_hit_segs);
-            cache_map.add("cache_miss_segs",  cache_stats->cache_miss_segs);
-            cache_map.add("steal_segs",       cache_stats->steal_segs);
-            cache_map.add("s3_fallback_segs", cache_stats->s3_fallback_segs);
-            cache_map.add("cache_bytes",      cache_stats->cache_bytes);
-            cache_map.add("s3_bytes",         cache_stats->s3_bytes);
-            cache_map.add("cache_read_ms",    cache_stats->cache_read_ms);
-            cache_map.add("s3_read_ms",       cache_stats->s3_read_ms);
-            WriteBufferFromOwnString buf;
-            JSONBuilder::FormatSettings json_fmt{.settings = {}};
-            JSONBuilder::FormatContext fmt_ctx{.out = buf};
-            cache_map.format(json_fmt, fmt_ctx);
-            RuntimeAttributeDescription cache_desc;
-            cache_desc.description = buf.str();
-            cache_desc.name_and_detail.emplace_back("",
-                fmt::format("hit_segs={} miss_segs={} steal_segs={} s3_segs={} cache={:.1f}MB/{}ms s3={:.1f}MB/{}ms",
-                    cache_stats->cache_hit_segs, cache_stats->cache_miss_segs,
-                    cache_stats->steal_segs, cache_stats->s3_fallback_segs,
-                    cache_stats->cache_bytes / (1024.0 * 1024.0), cache_stats->cache_read_ms,
-                    cache_stats->s3_bytes / (1024.0 * 1024.0), cache_stats->s3_read_ms));
-            attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::CacheStats, std::move(cache_desc));
-        }
-    }
+    if (query_id.empty())
+        return;
+    auto cache_stats = DiskCacheFactory::instance().consumeQueryCacheStats(query_id);
+    if (!cache_stats)
+        return;
+    JSONBuilder::JSONMap cache_map;
+    cache_map.add("cache_hit_segs",   cache_stats->cache_hit_segs);
+    cache_map.add("cache_miss_segs",  cache_stats->cache_miss_segs);
+    cache_map.add("steal_segs",       cache_stats->steal_segs);
+    cache_map.add("s3_fallback_segs", cache_stats->s3_fallback_segs);
+    cache_map.add("cache_bytes",      cache_stats->cache_bytes);
+    cache_map.add("s3_bytes",         cache_stats->s3_bytes);
+    cache_map.add("cache_read_ms",    cache_stats->cache_read_ms);
+    cache_map.add("s3_read_ms",       cache_stats->s3_read_ms);
+    WriteBufferFromOwnString buf;
+    JSONBuilder::FormatSettings json_fmt{.settings = {}};
+    JSONBuilder::FormatContext fmt_ctx{.out = buf};
+    cache_map.format(json_fmt, fmt_ctx);
+    RuntimeAttributeDescription cache_desc;
+    cache_desc.description = buf.str();
+    cache_desc.name_and_detail.emplace_back("",
+        fmt::format("hit_segs={} miss_segs={} steal_segs={} s3_segs={} cache={:.1f}MB/{}ms s3={:.1f}MB/{}ms",
+            cache_stats->cache_hit_segs, cache_stats->cache_miss_segs,
+            cache_stats->steal_segs, cache_stats->s3_fallback_segs,
+            cache_stats->cache_bytes / (1024.0 * 1024.0), cache_stats->cache_read_ms,
+            cache_stats->s3_bytes / (1024.0 * 1024.0), cache_stats->s3_read_ms));
+    attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::CacheStats, std::move(cache_desc));
 }
 
 bool MergeTreeDataSelectAnalysisResult::error() const

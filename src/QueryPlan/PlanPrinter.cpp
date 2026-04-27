@@ -686,10 +686,15 @@ String PlanPrinter::TextPrinter::printAttributes(PlanNodeBase & plan, const Text
     size_t step_id = plan.getId();
     if (!profiles.contains(step_id) || profiles.at(step_id)->address_to_attributes.empty())
         return "";
-    if (!settings.query_plan_options.indexes && !settings.selected_parts)
+    const auto & address_to_attributes = profiles.at(step_id)->address_to_attributes;
+    bool has_priority_attrs = std::any_of(address_to_attributes.begin(), address_to_attributes.end(),
+        [](const auto & p) {
+            return p.second.count(RuntimeAttributeKeys::CacheStats)
+                || p.second.count(RuntimeAttributeKeys::Indexes);
+        });
+    if (!settings.query_plan_options.indexes && !settings.selected_parts && !has_priority_attrs)
         return "";
     std::stringstream out;
-    const auto & address_to_attributes = profiles.at(step_id)->address_to_attributes;
     if (plan.getStep()->getType() == IQueryPlanStep::Type::TableScan)
     {
         String space;

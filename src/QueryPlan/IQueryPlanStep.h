@@ -325,6 +325,10 @@ public:
     {
     }
 
+    // Called after pipeline execution completes (and pipeline is destroyed) to inject
+    // execution-time attributes (e.g. CacheStats) into attribute_descriptions.
+    virtual void injectPostExecutionAttributes() {};
+
     std::unordered_map<String, RuntimeAttributeDescription> & getAttributeDescriptions()
     {
         return attribute_descriptions;

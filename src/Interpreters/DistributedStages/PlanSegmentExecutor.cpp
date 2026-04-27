@@ -324,18 +324,6 @@ void fillPlanSegmentProfile(
         auto step_profile = GroupedProcessorProfile::aggregateOperatorProfileToStepLevel(grouped_profiles);
         for (auto & [step_id, profile] : step_profile)
             segment_profile->profiles.emplace(step_id, profile);
-        auto & plan = plan_segment->getQueryPlan();
-        for (auto & node : plan.getNodes())
-        {
-            if (!node.step->getAttributeDescriptions().empty() && segment_profile->profiles.contains(node.id))
-            {
-                for (auto & att : node.step->getAttributeDescriptions())
-                {
-                    auto attribute_ptr = std::make_shared<RuntimeAttributeDescription>(att.second);
-                    segment_profile->profiles.at(node.id)->attributes.emplace(att.first, attribute_ptr);
-                }
-            }
-        }
     }
 }
 
@@ -501,14 +489,43 @@ void PlanSegmentExecutor::doExecute()
     if (context->getSettingsRef().log_processors_profiles)
     {
         auto processors_profile_log = context->getProcessorsProfileLog();
+        if (processors_profile_log)
+            processors_profile_log->addLogs(pipeline.get(),
+                                            context->getClientInfo().initial_query_id,
+                                            std::chrono::system_clock::now(),
+                                            plan_segment->getPlanSegmentId());
+    }
 
-        if (!processors_profile_log)
-            return;
+    // Reset executor first (holds Processors& ref), then pipeline (fires destructors,
+    // flushing the last partial segment's cache stats to DiskCacheFactory).
+    pipeline_executor.reset();
+    if (pipeline)
+    {
+        pipeline->clearUncompletedCache(context);
+        pipeline.reset();
+    }
 
-        processors_profile_log->addLogs(pipeline.get(),
-                                        context->getClientInfo().initial_query_id,
-                                        std::chrono::system_clock::now(),
-                                        plan_segment->getPlanSegmentId());
+    // Inject post-execution attributes (e.g. CacheStats) and propagate all
+    // attribute_descriptions into the segment profile for every plan node.
+    if (segment_profile && plan_segment)
+    {
+        auto & plan = plan_segment->getQueryPlan();
+        for (auto & node : plan.getNodes())
+        {
+            node.step->injectPostExecutionAttributes();
+            auto & descs = node.step->getAttributeDescriptions();
+            if (descs.empty())
+                continue;
+            if (!segment_profile->profiles.contains(node.id))
+            {
+                auto m = std::make_shared<ProfileMetric>();
+                m->id = node.id;
+                segment_profile->profiles.emplace(node.id, m);
+            }
+            for (auto & [k, v] : descs)
+                segment_profile->profiles.at(node.id)->attributes.insert_or_assign(
+                    k, std::make_shared<RuntimeAttributeDescription>(v));
+        }
     }
 }
 

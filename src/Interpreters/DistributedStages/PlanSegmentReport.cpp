@@ -136,7 +136,7 @@ PlanSegmentExecutor::ExecutionResult convertSuccessPlanSegmentStatusToResult(
     result.runtime_segment_status.message = "execute success";
     result.runtime_segment_status.metrics.final_progress = final_progress.toProto();
     result.sender_metrics = senderMetricsToProto(plan_segment_outputs, sender_metrics, execution_address);
-    if (query_context->getSettingsRef().report_segment_profiles && segment_profile)
+    if ((query_context->getSettingsRef().report_segment_profiles || query_context->getSettingsRef().log_segment_profiles) && segment_profile)
         result.segment_profile = segment_profile;
 
     return result;
