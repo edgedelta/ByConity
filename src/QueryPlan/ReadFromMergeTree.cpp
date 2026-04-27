@@ -1822,7 +1822,7 @@ void ReadFromMergeTree::fillRuntimeAttributeDescriptions(const ReadFromMergeTree
             if (!stat.condition.empty())
                 stage->add("condition", stat.condition);
             if (!stat.used_keys.empty())
-                stage->add("keys", fmt::join(stat.used_keys, ","));
+                stage->add("keys", fmt::to_string(fmt::join(stat.used_keys, ",")));
             stage->add("parts_after", stat.num_parts_after);
             stage->add("granules_after", stat.num_granules_after);
             stages_array->add(std::move(stage));
