@@ -1699,6 +1699,7 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
                      log_queries_min_type = settings.log_queries_min_type,
                      log_queries_min_query_duration_ms = settings.log_queries_min_query_duration_ms.totalMilliseconds(),
                      log_processors_profiles = settings.log_processors_profiles,
+                     log_segment_profiles = settings.log_segment_profiles,
                      status_info_to_query_log,
                      query_id,
                      finish_current_transaction](
@@ -1843,7 +1844,7 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
                         elem.used_table_functions = factories_info.table_functions;
                         elem.partition_ids = context->getPartitionIds();
 
-                        if (settings.log_segment_profiles)
+                        if (log_segment_profiles)
                         {
                             if (auto scheduler = context->getSegmentScheduler())
                             {
