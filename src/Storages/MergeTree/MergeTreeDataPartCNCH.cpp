@@ -1240,6 +1240,11 @@ void MergeTreeDataPartCNCH::preload(UInt64 preload_level, UInt64 submit_ts) cons
         // Get cache from storage (TTL cache if enabled, otherwise global LRU)
         auto disk_cache = storage.getDiskCache();
         auto cache_strategy = disk_cache->getStrategy();
+        // Marks are small and well-served by in-memory MarkCache; always use global LRU
+        // for mark disk cache so TTL cache is never used for marks (its hash requires two
+        // slashes but mark keys only have one after part_name collapses)
+        auto global_lru = DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
+        IDiskCache * mark_disk_cache = global_lru ? global_lru->getMetaCache().get() : nullptr;
 
         MarkRanges all_mark_ranges{MarkRange(0, getMarksCount())};
         MarkCachePtr mark_cache_holder = storage.getContext()->getMarkCache();
@@ -1270,7 +1275,7 @@ void MergeTreeDataPartCNCH::preload(UInt64 preload_level, UInt64 submit_ts) cons
                     PartFileDiskCacheSegment::FileOffsetAndSize{getFileOffsetOrZero(mark_file_name), getFileSizeOrZero(mark_file_name)},
                     getMarksCount(),
                     mark_cache_holder.get(),
-                    disk_cache->getMetaCache().get(),
+                    mark_disk_cache,
                     stream_name,
                     DATA_FILE_EXTENSION,
                     PartFileDiskCacheSegment::FileOffsetAndSize{getFileOffsetOrZero(data_file_name), getFileSizeOrZero(data_file_name)},
@@ -1397,7 +1402,7 @@ void MergeTreeDataPartCNCH::preload(UInt64 preload_level, UInt64 submit_ts) cons
                             PartFileDiskCacheSegment::FileOffsetAndSize{mark_file_offset, mark_file_size},
                             skip_index_marks_count,
                             mark_cache_holder.get(),
-                            disk_cache->getMetaCache().get(),
+                            mark_disk_cache,
                             index_name,
                             INDEX_FILE_EXTENSION,
                             PartFileDiskCacheSegment::FileOffsetAndSize{data_file_offset, data_file_size},
