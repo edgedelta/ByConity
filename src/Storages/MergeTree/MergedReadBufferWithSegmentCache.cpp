@@ -165,11 +165,6 @@ MergedReadBufferWithSegmentCache::MergedReadBufferWithSegmentCache(
     initialize();
 }
 
-MergedReadBufferWithSegmentCache::~MergedReadBufferWithSegmentCache()
-{
-    flushLocalCacheStats();
-}
-
 void MergedReadBufferWithSegmentCache::flushLocalCacheStats()
 {
     if (!collect_cache_stats || local_cache_stats.empty())
@@ -327,9 +322,6 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
             }
         }
     }
-
-    if (encounter_eof && collect_cache_stats)
-        flushLocalCacheStats();
 
     return !encounter_eof;
 }

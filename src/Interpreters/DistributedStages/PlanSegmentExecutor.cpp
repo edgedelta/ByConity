@@ -59,6 +59,7 @@
 #include <Processors/Transforms/CopyTransform.h>
 #include <Protos/plan_segment_manager.pb.h>
 #include <Protos/registry.pb.h>
+#include <Storages/MergeTree/MergedReadBufferWithSegmentCache.h>
 #include <QueryPlan/BuildQueryPipelineSettings.h>
 #include <QueryPlan/GraphvizPrinter.h>
 #include <QueryPlan/Optimizations/QueryPlanOptimizationSettings.h>
@@ -481,6 +482,13 @@ void PlanSegmentExecutor::doExecute()
     }
     if ((context->getSettingsRef().report_segment_profiles || context->getSettingsRef().log_segment_profiles) && plan_segment)
     {
+        // Flush the last partial segment's cache stats before reading them.
+        // Per-boundary flushes cover completed segments; this covers the segment
+        // that was in progress when execution stopped (e.g. LIMIT queries).
+        for (auto & processor : pipeline->getProcessors())
+            if (auto * reader = dynamic_cast<MergedReadBufferWithSegmentCache *>(processor.get()))
+                reader->finalize();
+
         segment_profile = std::make_shared<PlanSegmentProfile>(query_log_element->client_info.initial_query_id, plan_segment->getPlanSegmentId());
         fillPlanSegmentProfile(
             segment_profile, pipeline, plan_segment->getProfileType(), &process_plan_segment_entry->get(), context, plan_segment);
@@ -494,15 +502,6 @@ void PlanSegmentExecutor::doExecute()
                                             context->getClientInfo().initial_query_id,
                                             std::chrono::system_clock::now(),
                                             plan_segment->getPlanSegmentId());
-    }
-
-    // Reset executor first (holds Processors& ref), then pipeline (fires destructors,
-    // flushing the last partial segment's cache stats to DiskCacheFactory).
-    pipeline_executor.reset();
-    if (pipeline)
-    {
-        pipeline->clearUncompletedCache(context);
-        pipeline.reset();
     }
 
     // Inject post-execution attributes (e.g. CacheStats) and propagate all

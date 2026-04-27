@@ -50,7 +50,8 @@ public:
         clockid_t clock_type_ = CLOCK_MONOTONIC_COARSE,
         String stream_extension_ = DATA_FILE_EXTENSION);
 
-    ~MergedReadBufferWithSegmentCache() override;
+    // Flush any accumulated cache stats to DiskCacheFactory. Idempotent.
+    void finalize() { flushLocalCacheStats(); }
 
     virtual size_t readBig(char* to, size_t n) override;
     virtual bool nextImpl() override;
