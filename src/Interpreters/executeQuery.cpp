@@ -92,10 +92,9 @@
 #include <Interpreters/QueryLog.h>
 #include <Interpreters/QueueManager.h>
 #include <Interpreters/SegmentScheduler.h>
-#include <Interpreters/profile/PlanSegmentProfile.h>
 #include <QueryPlan/IQueryPlanStep.h>
 #include <Common/JSONBuilder.h>
-#include <IO/WriteBufferFromOwnString.h>
+#include <IO/WriteBufferFromString.h>
 #include <Poco/JSON/Parser.h>
 #include <Interpreters/ReplaceQueryParameterVisitor.h>
 #include <Interpreters/SelectIntersectExceptQueryVisitor.h>
