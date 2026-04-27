@@ -1645,7 +1645,7 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
     setStepDescription(step_desc.str());
     RuntimeAttributeDescription tablescan_desc;
     tablescan_desc.description = step_desc.str();
-    attribute_descriptions.emplace("TableScanDescription", tablescan_desc);
+    attribute_descriptions.emplace(RuntimeAttributeKeys::TableScanDescription, tablescan_desc);
 
     LOG_DEBUG(log, "init pipeline total run time: {} ms, table scan descriptiion: {}", total_watch.elapsedMillisecondsAsDouble(), step_desc.str());
 }

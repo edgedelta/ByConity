@@ -19,6 +19,9 @@
 #include <Storages/DiskCache/DiskCache_fwd.h>
 #include <common/singleton.h>
 #include <common/types.h>
+#include <atomic>
+#include <optional>
+#include <shared_mutex>
 #include <unordered_map>
 #include <Poco/Exception.h>
 
@@ -35,6 +38,34 @@ class IVolume;
 class Throttler;
 using VolumePtr = std::shared_ptr<IVolume>;
 using ThrottlerPtr = std::shared_ptr<Throttler>;
+
+/// Per-query cache stats accumulated on workers and surfaced via segment profiles.
+struct QueryCacheStats
+{
+    std::atomic<size_t> cache_hit_segs{0};    // segments served from local TTL cache
+    std::atomic<size_t> cache_miss_segs{0};   // segments not found in local cache
+    std::atomic<size_t> steal_segs{0};        // segments fetched from peer via steal RPC
+    std::atomic<size_t> s3_fallback_segs{0};  // segments read directly from S3
+    std::atomic<size_t> cache_bytes{0};       // bytes through cache_buffer (local + steal)
+    std::atomic<size_t> s3_bytes{0};          // bytes through source_buffer (S3)
+    std::atomic<uint64_t> cache_read_ms{0};
+    std::atomic<uint64_t> s3_read_ms{0};
+};
+
+/// Plain snapshot, used for local accumulation and return values.
+struct QueryCacheStatsSnapshot
+{
+    size_t cache_hit_segs{0};
+    size_t cache_miss_segs{0};
+    size_t steal_segs{0};
+    size_t s3_fallback_segs{0};
+    size_t cache_bytes{0};
+    size_t s3_bytes{0};
+    uint64_t cache_read_ms{0};
+    uint64_t s3_read_ms{0};
+
+    bool empty() const { return cache_hit_segs == 0 && cache_miss_segs == 0 && steal_segs == 0 && s3_fallback_segs == 0; }
+};
 
 enum class DiskCacheType {
     File, // for generic file disk cache
@@ -103,6 +134,11 @@ public:
     size_t getGlobalTTLUsage() const { return global_ttl_cache_usage.load(); }
     size_t getGlobalTTLLimit() const;
 
+    /// Per-query cache stats registry.
+    /// unique_lock only for first insertion, then atomic fetch_add on the fields.
+    void mergeQueryCacheStats(const String & query_id, const QueryCacheStatsSnapshot & local);
+    std::optional<QueryCacheStatsSnapshot> consumeQueryCacheStats(const String & query_id);
+
 private:
     void addNewCache(Context & context, const std::string & cache_name, bool create_default);
     std::unordered_map<DiskCacheType, IDiskCachePtr> caches;
@@ -113,5 +149,9 @@ private:
 
     /// Global TTL cache usage tracking
     std::atomic<size_t> global_ttl_cache_usage{0};
+
+    /// Per-query cache stats (query_id → shared stats object)
+    std::unordered_map<String, std::shared_ptr<QueryCacheStats>> query_cache_stats_map;
+    mutable std::shared_mutex query_cache_stats_mutex;
 };
 }

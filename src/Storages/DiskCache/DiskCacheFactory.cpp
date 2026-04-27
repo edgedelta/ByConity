@@ -293,4 +293,54 @@ void DiskCacheFactory::addNewCache(Context & context, const std::string & cache_
     }
 }
 
+void DiskCacheFactory::mergeQueryCacheStats(const String & query_id, const QueryCacheStatsSnapshot & local)
+{
+    if (local.empty())
+        return;
+
+    std::shared_ptr<QueryCacheStats> entry;
+    {
+        std::shared_lock rl(query_cache_stats_mutex);
+        auto it = query_cache_stats_map.find(query_id);
+        if (it != query_cache_stats_map.end())
+            entry = it->second;
+    }
+    if (!entry)
+    {
+        std::unique_lock wl(query_cache_stats_mutex);
+        auto [it, inserted] = query_cache_stats_map.emplace(query_id, std::make_shared<QueryCacheStats>());
+        entry = it->second;
+    }
+    // Lock-free updates after entry is visible
+    entry->cache_hit_segs.fetch_add(local.cache_hit_segs, std::memory_order_relaxed);
+    entry->cache_miss_segs.fetch_add(local.cache_miss_segs, std::memory_order_relaxed);
+    entry->steal_segs.fetch_add(local.steal_segs, std::memory_order_relaxed);
+    entry->s3_fallback_segs.fetch_add(local.s3_fallback_segs, std::memory_order_relaxed);
+    entry->cache_bytes.fetch_add(local.cache_bytes, std::memory_order_relaxed);
+    entry->s3_bytes.fetch_add(local.s3_bytes, std::memory_order_relaxed);
+    entry->cache_read_ms.fetch_add(local.cache_read_ms, std::memory_order_relaxed);
+    entry->s3_read_ms.fetch_add(local.s3_read_ms, std::memory_order_relaxed);
+}
+
+std::optional<QueryCacheStatsSnapshot> DiskCacheFactory::consumeQueryCacheStats(const String & query_id)
+{
+    std::unique_lock wl(query_cache_stats_mutex);
+    auto it = query_cache_stats_map.find(query_id);
+    if (it == query_cache_stats_map.end())
+        return std::nullopt;
+
+    const auto & e = *it->second;
+    QueryCacheStatsSnapshot snap;
+    snap.cache_hit_segs   = e.cache_hit_segs.load(std::memory_order_relaxed);
+    snap.cache_miss_segs  = e.cache_miss_segs.load(std::memory_order_relaxed);
+    snap.steal_segs       = e.steal_segs.load(std::memory_order_relaxed);
+    snap.s3_fallback_segs = e.s3_fallback_segs.load(std::memory_order_relaxed);
+    snap.cache_bytes      = e.cache_bytes.load(std::memory_order_relaxed);
+    snap.s3_bytes         = e.s3_bytes.load(std::memory_order_relaxed);
+    snap.cache_read_ms    = e.cache_read_ms.load(std::memory_order_relaxed);
+    snap.s3_read_ms       = e.s3_read_ms.load(std::memory_order_relaxed);
+    query_cache_stats_map.erase(it);
+    return snap;
+}
+
 }

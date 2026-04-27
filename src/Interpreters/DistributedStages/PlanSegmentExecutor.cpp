@@ -491,7 +491,7 @@ void PlanSegmentExecutor::doExecute()
             PlanSegmentDescription::getPlanSegmentDescription(plan_segment_instance->plan_segment, true)
                 ->jsonPlanSegmentDescriptionAsString(collectStepRuntimeProfiles(pipeline)));
     }
-    if (context->getSettingsRef().report_segment_profiles && plan_segment)
+    if ((context->getSettingsRef().report_segment_profiles || context->getSettingsRef().log_segment_profiles) && plan_segment)
     {
         segment_profile = std::make_shared<PlanSegmentProfile>(query_log_element->client_info.initial_query_id, plan_segment->getPlanSegmentId());
         fillPlanSegmentProfile(

@@ -700,19 +700,25 @@ String PlanPrinter::TextPrinter::printAttributes(PlanNodeBase & plan, const Text
                 out << intent.detailIntent() << address;
                 space = "    ";
             }
-            if (settings.query_plan_options.indexes && attribute.contains("Indexes"))
+            if (settings.query_plan_options.indexes && attribute.contains(RuntimeAttributeKeys::Indexes))
             {
                 out << intent.detailIntent() << space << "Indexes:";
-                auto index_desc = attribute.at("Indexes");
+                auto index_desc = attribute.at(RuntimeAttributeKeys::Indexes);
                 for (const auto & desc : index_desc->name_and_detail)
                     out << intent.detailIntent() << space << "    " << desc.second;
             }
             if (settings.selected_parts)
             {
-                if (attribute.contains("SelectParts"))
-                    out << intent.detailIntent() << space << attribute.at("SelectParts")->description;
-                if (attribute.contains("TableScanDescription"))
-                    out << intent.detailIntent() << space << attribute.at("TableScanDescription")->description;
+                if (attribute.contains(RuntimeAttributeKeys::SelectParts))
+                    out << intent.detailIntent() << space << attribute.at(RuntimeAttributeKeys::SelectParts)->description;
+                if (attribute.contains(RuntimeAttributeKeys::TableScanDescription))
+                    out << intent.detailIntent() << space << attribute.at(RuntimeAttributeKeys::TableScanDescription)->description;
+            }
+            if (attribute.contains(RuntimeAttributeKeys::CacheStats))
+            {
+                out << intent.detailIntent() << space << "CacheStats:";
+                for (const auto & desc : attribute.at(RuntimeAttributeKeys::CacheStats)->name_and_detail)
+                    out << intent.detailIntent() << space << "    " << desc.second;
             }
         }
         return out.str();

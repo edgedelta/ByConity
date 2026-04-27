@@ -32,7 +32,10 @@
 #include <DataTypes/MapHelpers.h>
 #include <Functions/IFunction.h>
 #include <common/logger_useful.h>
+#include <Common/CurrentThread.h>
 #include <Common/JSONBuilder.h>
+#include <IO/WriteBufferFromString.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Common/escapeForFileName.h>
 #include "Storages/MergeTree/MergeTreeIOSettings.h"
 #include <Parsers/queryToString.h>
@@ -1419,7 +1422,7 @@ void ReadFromMergeTree::initializePipeline(QueryPipeline & pipeline, const Build
         result.selected_marks,
         result.selected_ranges);
 
-    if (context->getSettingsRef().report_segment_profiles)
+    if (context->getSettingsRef().report_segment_profiles || context->getSettingsRef().log_segment_profiles)
         fillRuntimeAttributeDescriptions(result);
 
     ProfileEvents::increment(ProfileEvents::SelectedParts, result.selected_parts);
@@ -1781,54 +1784,110 @@ std::shared_ptr<IQueryPlanStep> ReadFromMergeTree::copy(ContextPtr) const
 
 void ReadFromMergeTree::fillRuntimeAttributeDescriptions(const ReadFromMergeTree::AnalysisResult & result)
 {
-    auto index_stats = result.index_stats;
-    if (!result.index_stats.empty())
+    const auto & index_stats = result.index_stats;
+    if (!index_stats.empty())
     {
         RuntimeAttributeDescription index_desc;
-        for (size_t i = 0; i < index_stats.size(); ++i)
+        auto stages_array = std::make_unique<JSONBuilder::JSONArray>();
+        UInt64 prev_parts = 0;
+        UInt64 prev_granules = 0;
+        bool has_prev = false;
+        for (const auto & stat : index_stats)
         {
-            const auto & stat = index_stats[i];
             if (stat.type == IndexType::None)
                 continue;
-            std::stringstream out;
-            out << "Type: " << indexTypeToString(stat.type) << ";";
+            String entry = fmt::format("Type: {};", indexTypeToString(stat.type));
             if (!stat.name.empty())
-                out << " Name: " << stat.name << ";";
+                entry += fmt::format(" Name: {};", stat.name);
             if (!stat.description.empty())
-                out << " Description: " << stat.description << ";";
+                entry += fmt::format(" Description: {};", stat.description);
             if (!stat.used_keys.empty())
-            {
-                String keys = fmt::format("{}", fmt::join(stat.used_keys, ","));
-                out << " Keys: " << keys << ";";
-            }
+                entry += fmt::format(" Keys: {};", fmt::join(stat.used_keys, ","));
             if (!stat.condition.empty())
-                out << " Condition: " << stat.condition << ";";
-            out << " Parts: " << stat.num_parts_after;
-            if (i)
-                out << '/' << index_stats[i - 1].num_parts_after;
-            out << ";";
-            out << " Granules: " << stat.num_granules_after;
-            if (i)
-                out << '/' << index_stats[i - 1].num_granules_after;
-            out << ";";
-            index_desc.name_and_detail.emplace_back(indexTypeToString(stat.type), out.str());
+                entry += fmt::format(" Condition: {};", stat.condition);
+            if (has_prev)
+                entry += fmt::format(" Parts: {}/{};", stat.num_parts_after, prev_parts);
+            else
+                entry += fmt::format(" Parts: {};", stat.num_parts_after);
+            if (has_prev)
+                entry += fmt::format(" Granules: {}/{};", stat.num_granules_after, prev_granules);
+            else
+                entry += fmt::format(" Granules: {};", stat.num_granules_after);
+            index_desc.name_and_detail.emplace_back(indexTypeToString(stat.type), std::move(entry));
+
+            auto stage = std::make_unique<JSONBuilder::JSONMap>();
+            stage->add("type", indexTypeToString(stat.type));
+            if (!stat.name.empty())
+                stage->add("name", stat.name);
+            if (!stat.condition.empty())
+                stage->add("condition", stat.condition);
+            if (!stat.used_keys.empty())
+                stage->add("keys", fmt::join(stat.used_keys, ","));
+            stage->add("parts_after", stat.num_parts_after);
+            stage->add("granules_after", stat.num_granules_after);
+            stages_array->add(std::move(stage));
+
+            prev_parts = stat.num_parts_after;
+            prev_granules = stat.num_granules_after;
+            has_prev = true;
         }
-        index_desc.description = "Indexes";
-        attribute_descriptions.emplace(index_desc.description, std::move(index_desc));
+
+        auto idx_json = std::make_unique<JSONBuilder::JSONMap>();
+        idx_json->add("total_parts", result.total_parts);
+        idx_json->add("stages", std::move(stages_array));
+        WriteBufferFromOwnString idx_buf;
+        JSONBuilder::FormatSettings idx_fmt{.settings = {}};
+        JSONBuilder::FormatContext idx_ctx{.out = idx_buf};
+        idx_json->format(idx_fmt, idx_ctx);
+        index_desc.additional = idx_buf.str();
+
+        index_desc.description = RuntimeAttributeKeys::Indexes;
+        attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::Indexes, std::move(index_desc));
     }
 
     RuntimeAttributeDescription parts_desc;
-    String selected_parts_info = fmt::format(
-        "Selected {}/{} parts by partition key, {} parts by primary key, {}/{} marks by primary key, {} marks to read from {} ranges",
+    parts_desc.description = fmt::format(
+        "Selected {}/{} parts by partition key ({} partitions), {} parts by primary key, {}/{} marks by primary key, {} marks to read from {} ranges",
         result.parts_before_pk,
         result.total_parts,
+        result.selected_partitions,
         result.selected_parts,
         result.selected_marks_pk,
         result.total_marks_pk,
         result.selected_marks,
         result.selected_ranges);
-    parts_desc.description = selected_parts_info;
-    attribute_descriptions.emplace("SelectParts", std::move(parts_desc));
+    attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::SelectParts, std::move(parts_desc));
+
+    auto query_id = CurrentThread::getQueryId().toString();
+    if (!query_id.empty())
+    {
+        auto cache_stats = DiskCacheFactory::instance().consumeQueryCacheStats(query_id);
+        if (cache_stats)
+        {
+            JSONBuilder::JSONMap cache_map;
+            cache_map.add("cache_hit_segs",   cache_stats->cache_hit_segs);
+            cache_map.add("cache_miss_segs",  cache_stats->cache_miss_segs);
+            cache_map.add("steal_segs",       cache_stats->steal_segs);
+            cache_map.add("s3_fallback_segs", cache_stats->s3_fallback_segs);
+            cache_map.add("cache_bytes",      cache_stats->cache_bytes);
+            cache_map.add("s3_bytes",         cache_stats->s3_bytes);
+            cache_map.add("cache_read_ms",    cache_stats->cache_read_ms);
+            cache_map.add("s3_read_ms",       cache_stats->s3_read_ms);
+            WriteBufferFromOwnString buf;
+            JSONBuilder::FormatSettings json_fmt{.settings = {}};
+            JSONBuilder::FormatContext fmt_ctx{.out = buf};
+            cache_map.format(json_fmt, fmt_ctx);
+            RuntimeAttributeDescription cache_desc;
+            cache_desc.description = buf.str();
+            cache_desc.name_and_detail.emplace_back("",
+                fmt::format("hit_segs={} miss_segs={} steal_segs={} s3_segs={} cache={:.1f}MB/{}ms s3={:.1f}MB/{}ms",
+                    cache_stats->cache_hit_segs, cache_stats->cache_miss_segs,
+                    cache_stats->steal_segs, cache_stats->s3_fallback_segs,
+                    cache_stats->cache_bytes / (1024.0 * 1024.0), cache_stats->cache_read_ms,
+                    cache_stats->s3_bytes / (1024.0 * 1024.0), cache_stats->s3_read_ms));
+            attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::CacheStats, std::move(cache_desc));
+        }
+    }
 }
 
 bool MergeTreeDataSelectAnalysisResult::error() const

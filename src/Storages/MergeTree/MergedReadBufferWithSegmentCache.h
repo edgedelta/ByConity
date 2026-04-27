@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <ctime>
 #include <memory>
+#include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Compression/CachedCompressedReadBuffer.h>
 #include <Compression/CompressedReadBufferFromFile.h>
 #include <Interpreters/StorageID.h>
@@ -48,6 +49,8 @@ public:
         const ProgressCallback & internal_progress_cb_ = {},
         clockid_t clock_type_ = CLOCK_MONOTONIC_COARSE,
         String stream_extension_ = DATA_FILE_EXTENSION);
+
+    ~MergedReadBufferWithSegmentCache() override;
 
     virtual size_t readBig(char* to, size_t n) override;
     virtual bool nextImpl() override;
@@ -174,6 +177,16 @@ private:
     Poco::Logger* logger;
 
     off_t read_until_position = 0;
+
+    // Per-stream cache stats flushed to DiskCacheFactory registry at segment boundaries and on eof.
+    // Only populated when segment_cache is a DiskCacheTTL instance
+    bool is_ttl_cache{false};
+    String cached_query_id;
+    QueryCacheStatsSnapshot local_cache_stats;
+    uint64_t active_segment_start_ms{0};  // wall-clock ms when current segment read started
+    bool active_is_cache{false};          // true = cache_buffer active, false = source_buffer
+
+    void flushLocalCacheStats();
 };
 
 }
