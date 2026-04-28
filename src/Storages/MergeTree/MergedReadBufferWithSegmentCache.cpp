@@ -156,12 +156,15 @@ MergedReadBufferWithSegmentCache::MergedReadBufferWithSegmentCache(
         logger(&Poco::Logger::get("MergedReadBufferWithSegmentCache")),
         cached_query_id(CurrentThread::getQueryId().toString())
 {
-    if (dynamic_cast<DiskCacheTTL *>(segment_cache_) != nullptr)
+    bool is_ttl_cache = dynamic_cast<DiskCacheTTL *>(segment_cache_) != nullptr;
+    if (is_ttl_cache)
     {
         if (auto ctx = CurrentThread::get().getQueryContext())
             collect_cache_stats = ctx->getSettingsRef().report_segment_profiles
                                || ctx->getSettingsRef().log_segment_profiles;
     }
+    LOG_DEBUG(logger, "MergedReadBufferWithSegmentCache: part={} stream={} query_id={} is_ttl={} collect_stats={}",
+        part_name_, stream_name_, cached_query_id, is_ttl_cache, collect_cache_stats);
     if (collect_cache_stats)
     {
         alive_token = std::make_shared<std::monostate>();

@@ -149,7 +149,7 @@ public:
     std::shared_ptr<IQueryPlanStep> copy(ContextPtr ptr) const override;
 
     void fillRuntimeAttributeDescriptions(const ReadFromMergeTree::AnalysisResult & result);
-    void injectPostExecutionAttributes() override;
+    void collectCacheStats();
 
     StorageID getStorageID() const { return data.getStorageID(); }
     UInt64 getSelectedParts() const { return selected_parts; }

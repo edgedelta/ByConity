@@ -1860,14 +1860,22 @@ void ReadFromMergeTree::fillRuntimeAttributeDescriptions(const ReadFromMergeTree
 
 }
 
-void ReadFromMergeTree::injectPostExecutionAttributes()
+void ReadFromMergeTree::collectCacheStats()
 {
     auto query_id = CurrentThread::getQueryId().toString();
+    LOG_DEBUG(log, "collectCacheStats: query_id={}", query_id);
     if (query_id.empty())
         return;
     auto cache_stats = DiskCacheFactory::instance().consumeQueryCacheStats(query_id);
     if (!cache_stats)
+    {
+        LOG_DEBUG(log, "collectCacheStats: no stats found for query_id={}", query_id);
         return;
+    }
+    LOG_DEBUG(log, "collectCacheStats: hit={} miss={} steal={} s3_fallback={} cache_bytes={} s3_bytes={}",
+        cache_stats->cache_hit_segs, cache_stats->cache_miss_segs,
+        cache_stats->steal_segs, cache_stats->s3_fallback_segs,
+        cache_stats->cache_bytes, cache_stats->s3_bytes);
     JSONBuilder::JSONMap cache_map;
     cache_map.add("cache_hit_segs",   cache_stats->cache_hit_segs);
     cache_map.add("cache_miss_segs",  cache_stats->cache_miss_segs);

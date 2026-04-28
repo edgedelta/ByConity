@@ -87,6 +87,7 @@ public:
     Type getType() const override { return Type::TableScan; }
 
     void initializePipeline(QueryPipeline & pipeline, const BuildQueryPipelineSettings &) override;
+    void collectPostExecutionAttributes();
     void toProto(Protos::TableScanStep & proto, bool for_hash_equals = false) const;
     static std::shared_ptr<TableScanStep> fromProto(const Protos::TableScanStep & proto, ContextPtr context);
 
@@ -219,6 +220,7 @@ private:
 
     // Only for worker.
     bool is_null_source{false};
+    QueryPlan inner_plan;
 
     // Optimises the where clauses for a bucket table by rewriting the IN clause and hence reducing the IN set size
     void rewriteInForBucketTable(ContextPtr context) const;

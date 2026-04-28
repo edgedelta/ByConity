@@ -17,6 +17,7 @@
 #include <optional>
 #include <QueryPlan/TableScanStep.h>
 #include <QueryPlan/ExecutePlanElement.h>
+#include <QueryPlan/ReadFromMergeTree.h>
 
 #include <Analyzers/TypeAnalyzer.h>
 #include <Formats/FormatSettings.h>
@@ -1341,19 +1342,18 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
             QueryPlanOptimizationSettings::fromContext(build_context.context),
             BuildQueryPipelineSettings::fromContext(build_context.context));
 
+        for (auto & node : storage_plan.getNodes())
         {
-            for (auto & node : storage_plan.getNodes())
+            auto & att_descs = node.step->getAttributeDescriptions();
+            if (att_descs.empty())
+                continue;
+            for (auto & desc : att_descs)
             {
-                auto & att_descs = node.step->getAttributeDescriptions();
-                if (att_descs.empty())
-                    continue;
-                for (auto & desc : att_descs)
-                {
-                    if (!attribute_descriptions.contains(desc.first))
-                        attribute_descriptions.emplace(desc.first, desc.second);
-                }
+                if (!attribute_descriptions.contains(desc.first))
+                    attribute_descriptions.emplace(desc.first, desc.second);
             }
         }
+        inner_plan = std::move(storage_plan);
 
         if (pipe.getCacheHolder())
             pipeline.addCacheHolder(pipe.getCacheHolder());
@@ -2084,6 +2084,23 @@ void TableScanStep::fillQueryInfoV2(ContextPtr context)
 
     /// 4. build index context
     query_info.index_context = std::make_shared<MergeTreeIndexContext>();
+}
+
+void TableScanStep::collectPostExecutionAttributes()
+{
+    for (auto & node : inner_plan.getNodes())
+    {
+        auto * rmt = dynamic_cast<ReadFromMergeTree *>(node.step.get());
+        if (!rmt)
+            continue;
+        rmt->collectCacheStats();
+        auto & rmt_descs = rmt->getAttributeDescriptions();
+        LOG_DEBUG(log, "collectPostExecutionAttributes: collected {} attribute(s) from ReadFromMergeTree, has_cache_stats={}",
+            rmt_descs.size(), rmt_descs.contains(RuntimeAttributeKeys::CacheStats));
+        for (auto & [k, v] : rmt_descs)
+            attribute_descriptions.insert_or_assign(k, v);
+    }
+    inner_plan = QueryPlan{};
 }
 
 }

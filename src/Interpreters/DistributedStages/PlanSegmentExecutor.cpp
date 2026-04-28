@@ -64,6 +64,7 @@
 #include <QueryPlan/Optimizations/QueryPlanOptimizationSettings.h>
 #include <QueryPlan/PlanPrinter.h>
 #include <QueryPlan/QueryPlan.h>
+#include <QueryPlan/TableScanStep.h>
 #include <brpc/callback.h>
 #include <fmt/core.h>
 #include <incubator-brpc/src/brpc/controller.h>
@@ -496,17 +497,24 @@ void PlanSegmentExecutor::doExecute()
                                             plan_segment->getPlanSegmentId());
     }
 
-    // Inject post-execution attributes (e.g. CacheStats) and propagate all
-    // attribute_descriptions into the segment profile for every plan node.
+    // Collect post-execution attributes (e.g. CacheStats from TTL disk cache) into
+    // attribute_descriptions on TableScanStep, then propagate all attribute_descriptions
+    // from every plan node into the segment profile.
     if (segment_profile && plan_segment)
     {
         auto & plan = plan_segment->getQueryPlan();
         for (auto & node : plan.getNodes())
         {
-            node.step->injectPostExecutionAttributes();
+            if (auto * ts = dynamic_cast<TableScanStep *>(node.step.get()))
+            {
+                LOG_DEBUG(logger, "Collecting post-execution attributes for TableScanStep node {}", node.id);
+                ts->collectPostExecutionAttributes();
+            }
             auto & descs = node.step->getAttributeDescriptions();
             if (descs.empty())
                 continue;
+            LOG_DEBUG(logger, "Propagating {} attribute(s) from node {} ({}) into segment profile",
+                descs.size(), node.id, node.step->getName());
             if (!segment_profile->profiles.contains(node.id))
             {
                 auto m = std::make_shared<ProfileMetric>();
