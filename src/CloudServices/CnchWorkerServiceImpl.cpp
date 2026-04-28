@@ -1354,6 +1354,14 @@ void CnchWorkerServiceImpl::getTTLCacheStats(
             t->set_count_query(stats.cached_from_query);
             t->set_bytes_preload(stats.cached_bytes_preload);
             t->set_bytes_query(stats.cached_bytes_query);
+            t->set_idx_count_preload(stats.cached_idx_from_preload);
+            t->set_idx_bytes_preload(stats.cached_idx_bytes_preload);
+            t->set_idx_count_query(stats.cached_idx_from_query);
+            t->set_idx_bytes_query(stats.cached_idx_bytes_query);
+            t->set_data_hits(stats.data_hits);
+            t->set_data_misses(stats.data_misses);
+            t->set_idx_hits(stats.idx_hits);
+            t->set_idx_misses(stats.idx_misses);
         }
     });
 }

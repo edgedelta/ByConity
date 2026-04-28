@@ -29,6 +29,7 @@ NamesAndTypesList StorageSystemDiskTTLCacheTables::getNamesAndTypes()
         {"eviction_stats", std::make_shared<DataTypeMap>(std::make_shared<DataTypeString>(), std::make_shared<DataTypeUInt64>())},
         {"rejection_stats", std::make_shared<DataTypeMap>(std::make_shared<DataTypeString>(), std::make_shared<DataTypeUInt64>())},
         {"write_stats", std::make_shared<DataTypeMap>(std::make_shared<DataTypeString>(), std::make_shared<DataTypeUInt64>())},
+        {"hit_stats", std::make_shared<DataTypeMap>(std::make_shared<DataTypeString>(), std::make_shared<DataTypeUInt64>())},
     };
 }
 
@@ -95,7 +96,19 @@ static void fillRowFromProto(MutableColumns & res_columns, const String & worker
         write_map["bytes_query"] = t.bytes_query();
         write_map["count_restored"] = t.count_restored();
         write_map["bytes_restored"] = t.bytes_restored();
+        write_map["idx_count_preload"] = t.idx_count_preload();
+        write_map["idx_bytes_preload"] = t.idx_bytes_preload();
+        write_map["idx_count_query"] = t.idx_count_query();
+        write_map["idx_bytes_query"] = t.idx_bytes_query();
         dumpStatsToMapColumn(write_map, res_columns[col_idx++].get());
+    }
+    {
+        std::unordered_map<String, UInt64> hit_map;
+        hit_map["data_hits"] = t.data_hits();
+        hit_map["data_misses"] = t.data_misses();
+        hit_map["idx_hits"] = t.idx_hits();
+        hit_map["idx_misses"] = t.idx_misses();
+        dumpStatsToMapColumn(hit_map, res_columns[col_idx++].get());
     }
 }
 
@@ -177,6 +190,14 @@ void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, Con
         t.set_bytes_query(stats.cached_bytes_query);
         t.set_count_restored(stats.cached_from_restored);
         t.set_bytes_restored(stats.cached_bytes_restored);
+        t.set_idx_count_preload(stats.cached_idx_from_preload);
+        t.set_idx_bytes_preload(stats.cached_idx_bytes_preload);
+        t.set_idx_count_query(stats.cached_idx_from_query);
+        t.set_idx_bytes_query(stats.cached_idx_bytes_query);
+        t.set_data_hits(stats.data_hits);
+        t.set_data_misses(stats.data_misses);
+        t.set_idx_hits(stats.idx_hits);
+        t.set_idx_misses(stats.idx_misses);
 
         fillRowFromProto(res_columns, worker_id, t);
     }

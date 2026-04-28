@@ -153,10 +153,19 @@ public:
         size_t cached_bytes_query{0};
         size_t cached_from_restored{0};
         size_t cached_bytes_restored{0};
+        // Skip-index write breakdown (same events, idx extension only)
+        size_t cached_idx_from_preload{0};
+        size_t cached_idx_bytes_preload{0};
+        size_t cached_idx_from_query{0};
+        size_t cached_idx_bytes_query{0};
 
-        // Aggregated hit/miss counts across all partitions
+        // Aggregated hit/miss counts across all partitions, by segment type
         size_t total_hits{0};
         size_t total_misses{0};
+        size_t data_hits{0};
+        size_t data_misses{0};
+        size_t idx_hits{0};
+        size_t idx_misses{0};
     };
 
     // Internal stats with atomics
@@ -186,6 +195,17 @@ public:
         std::atomic<size_t> cached_bytes_query{0};
         std::atomic<size_t> cached_from_restored{0};
         std::atomic<size_t> cached_bytes_restored{0};
+        // Skip-index write breakdown
+        std::atomic<size_t> cached_idx_from_preload{0};
+        std::atomic<size_t> cached_idx_bytes_preload{0};
+        std::atomic<size_t> cached_idx_from_query{0};
+        std::atomic<size_t> cached_idx_bytes_query{0};
+
+        // Aggregated hit/miss by segment type
+        std::atomic<size_t> data_hits{0};
+        std::atomic<size_t> data_misses{0};
+        std::atomic<size_t> idx_hits{0};
+        std::atomic<size_t> idx_misses{0};
 
         // Per-partition breakdown
         mutable std::shared_mutex partition_stats_mutex;

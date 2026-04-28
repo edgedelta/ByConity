@@ -411,16 +411,17 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
             cache_stats.total_entries++;
             cache_stats.total_bytes += weight;
 
-            // Track write source (preload vs query)
+            // Track write source (preload vs query), split by segment type
+            bool is_idx_seg = endsWith(seg_name, INDEX_FILE_EXTENSION);
             if (is_preload)
             {
-                cache_stats.cached_from_preload++;
-                cache_stats.cached_bytes_preload += weight;
+                if (is_idx_seg) { cache_stats.cached_idx_from_preload++; cache_stats.cached_idx_bytes_preload += weight; }
+                else { cache_stats.cached_from_preload++; cache_stats.cached_bytes_preload += weight; }
             }
             else
             {
-                cache_stats.cached_from_query++;
-                cache_stats.cached_bytes_query += weight;
+                if (is_idx_seg) { cache_stats.cached_idx_from_query++; cache_stats.cached_idx_bytes_query += weight; }
+                else { cache_stats.cached_from_query++; cache_stats.cached_bytes_query += weight; }
             }
 
             // Update global TTL usage
@@ -525,10 +526,13 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
     String part_name = extractPartName(seg_name);
     String partition_id = extractPartitionId(part_name);
 
+    bool is_idx_seg = endsWith(seg_name, INDEX_FILE_EXTENSION);
+
     std::lock_guard<std::mutex> lock(cache_mutex);
     auto it = cache_map.find(key);
     if (it == cache_map.end() || it->second->state != DiskCacheTTLMeta::State::Cached)
     {
+        if (is_idx_seg) cache_stats.idx_misses++; else cache_stats.data_misses++;
         updatePartitionStats(partition_id, 0, false, 0);
         return {};
     }
@@ -536,6 +540,7 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
     if (unlikely(it->second->disk == nullptr))
     {
         cache_map.erase(it);
+        if (is_idx_seg) cache_stats.idx_misses++; else cache_stats.data_misses++;
         updatePartitionStats(partition_id, 0, false, 0);
         return {};
     }
@@ -545,10 +550,12 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
     if (!shouldCache(part_ts))
     {
         // Expired, return miss
+        if (is_idx_seg) cache_stats.idx_misses++; else cache_stats.data_misses++;
         updatePartitionStats(partition_id, part_ts, false, 0);
         return {};
     }
 
+    if (is_idx_seg) cache_stats.idx_hits++; else cache_stats.data_hits++;
     updatePartitionStats(partition_id, part_ts, true, 0);
     return {it->second->disk, getRelativePath(key, seg_name)};
 }
@@ -1088,6 +1095,14 @@ DiskCacheTTL::TTLCacheStats DiskCacheTTL::getStats() const
     stats.cached_bytes_query = cache_stats.cached_bytes_query.load();
     stats.cached_from_restored = cache_stats.cached_from_restored.load();
     stats.cached_bytes_restored = cache_stats.cached_bytes_restored.load();
+    stats.cached_idx_from_preload = cache_stats.cached_idx_from_preload.load();
+    stats.cached_idx_bytes_preload = cache_stats.cached_idx_bytes_preload.load();
+    stats.cached_idx_from_query = cache_stats.cached_idx_from_query.load();
+    stats.cached_idx_bytes_query = cache_stats.cached_idx_bytes_query.load();
+    stats.data_hits = cache_stats.data_hits.load();
+    stats.data_misses = cache_stats.data_misses.load();
+    stats.idx_hits = cache_stats.idx_hits.load();
+    stats.idx_misses = cache_stats.idx_misses.load();
     {
         std::shared_lock<std::shared_mutex> lock(cache_stats.partition_stats_mutex);
         for (const auto & [_, ps] : cache_stats.partition_stats)

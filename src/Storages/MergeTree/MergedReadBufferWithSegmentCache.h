@@ -171,6 +171,7 @@ private:
     PartHostInfo part_host;
 
     String stream_extension;
+    bool is_idx{false};  // true when stream_extension == ".idx" (skip-index segment)
 
     Poco::Logger* logger;
 

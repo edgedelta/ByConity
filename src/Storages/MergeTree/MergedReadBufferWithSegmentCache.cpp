@@ -153,6 +153,7 @@ MergedReadBufferWithSegmentCache::MergedReadBufferWithSegmentCache(
         total_segment_count(total_segment_count_), marks_loader(marks_loader_),
         current_segment_idx(0), current_compressed_offset(std::nullopt), part_host(part_host_),
         stream_extension(stream_extension_),
+        is_idx(stream_extension_ == INDEX_FILE_EXTENSION),
         logger(&Poco::Logger::get("MergedReadBufferWithSegmentCache")),
         cached_query_id(CurrentThread::getQueryId().toString())
 {
@@ -189,10 +190,16 @@ void MergedReadBufferWithSegmentCache::flushLocalCacheStats()
         uint64_t elapsed = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count()) - active_segment_start_ms;
-        if (active_is_cache)
-            local_cache_stats.cache_read_ms += elapsed;
+        if (is_idx)
+        {
+            if (active_is_cache) local_cache_stats.idx_cache_read_ms += elapsed;
+            else local_cache_stats.idx_s3_read_ms += elapsed;
+        }
         else
-            local_cache_stats.s3_read_ms += elapsed;
+        {
+            if (active_is_cache) local_cache_stats.cache_read_ms += elapsed;
+            else local_cache_stats.s3_read_ms += elapsed;
+        }
         active_segment_start_ms = 0;
     }
     if (!cached_query_id.empty())
@@ -237,7 +244,10 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
             ProfileEvents::increment(ProfileEvents::CnchReadSizeFromDiskCache,
                 buf_size);
             if (collect_cache_stats)
-                local_cache_stats.cache_bytes += buf_size;
+            {
+                if (is_idx) local_cache_stats.idx_cache_bytes += buf_size;
+                else local_cache_stats.cache_bytes += buf_size;
+            }
             if (progress_callback)
                 progress_callback({0, 0, 0, 0, buf_size});
 
@@ -255,10 +265,16 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
             uint64_t elapsed = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count()) - active_segment_start_ms;
-            if (active_is_cache)
-                local_cache_stats.cache_read_ms += elapsed;
+            if (is_idx)
+            {
+                if (active_is_cache) local_cache_stats.idx_cache_read_ms += elapsed;
+                else local_cache_stats.idx_s3_read_ms += elapsed;
+            }
             else
-                local_cache_stats.s3_read_ms += elapsed;
+            {
+                if (active_is_cache) local_cache_stats.cache_read_ms += elapsed;
+                else local_cache_stats.s3_read_ms += elapsed;
+            }
             active_segment_start_ms = 0;
         }
         if (collect_cache_stats && !local_cache_stats.empty())
@@ -315,8 +331,16 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
             buf_size);
         if (collect_cache_stats)
         {
-            if (cache_buffer.initialized()) local_cache_stats.cache_bytes += buf_size;
-            else local_cache_stats.s3_bytes += buf_size;
+            if (is_idx)
+            {
+                if (cache_buffer.initialized()) local_cache_stats.idx_cache_bytes += buf_size;
+                else local_cache_stats.idx_s3_bytes += buf_size;
+            }
+            else
+            {
+                if (cache_buffer.initialized()) local_cache_stats.cache_bytes += buf_size;
+                else local_cache_stats.s3_bytes += buf_size;
+            }
         }
             if (cache_buffer.initialized() && progress_callback)
                 progress_callback({0, 0, 0, 0, buf_size});
@@ -398,7 +422,9 @@ void MergedReadBufferWithSegmentCache::seekToPosition(size_t segment_idx,
     // No segment cache, trying to use source reader
     if (collect_cache_stats)
     {
-        ++local_cache_stats.s3_fallback_segs;
+        // For data: count s3_fallback_segs here (complements cache_miss_segs from seekToMarkInSegmentCache).
+        // For idx: miss already counted in seekToMarkInSegmentCache; skip here to avoid double-count.
+        if (!is_idx) ++local_cache_stats.s3_fallback_segs;
         active_segment_start_ms = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -462,7 +488,12 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
                 if (auto peer_endpoint = ttl_cache->findPeerOwner(segment_key))
                 {
                     bool stolen = seekToMarkInRemoteSegmentCache(segment_idx, mark_pos, segment_key, *peer_endpoint);
-                    if (collect_cache_stats) stolen ? ++local_cache_stats.steal_segs : ++local_cache_stats.cache_miss_segs;
+                    if (collect_cache_stats)
+                    {
+                        if (stolen) ++local_cache_stats.steal_segs;
+                        else if (is_idx) ++local_cache_stats.idx_miss_segs;
+                        else ++local_cache_stats.cache_miss_segs;
+                    }
                     return stolen;
                 }
             }
@@ -473,7 +504,11 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
                 return seekToMarkInRemoteSegmentCache(segment_idx, mark_pos, segment_key, {});
             }
         }
-        if (collect_cache_stats) ++local_cache_stats.cache_miss_segs;
+        if (collect_cache_stats)
+        {
+            if (is_idx) ++local_cache_stats.idx_miss_segs;
+            else ++local_cache_stats.cache_miss_segs;
+        }
         LOG_TRACE(
             logger,
             "Can't find disk cache key {} and fallback to read from remote fs. (current buffer at {}), segment {}, offset {}:{}",
@@ -499,7 +534,8 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
         current_segment_idx = segment_idx;
         if (collect_cache_stats)
         {
-            ++local_cache_stats.cache_hit_segs;
+            if (is_idx) ++local_cache_stats.idx_hit_segs;
+            else ++local_cache_stats.cache_hit_segs;
             active_segment_start_ms = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count());

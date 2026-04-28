@@ -44,14 +44,21 @@ using ThrottlerPtr = std::shared_ptr<Throttler>;
 /// Per-query cache stats accumulated on workers and surfaced via segment profiles.
 struct QueryCacheStats
 {
-    std::atomic<size_t> cache_hit_segs{0};    // segments served from local TTL cache
-    std::atomic<size_t> cache_miss_segs{0};   // segments not found in local cache
+    std::atomic<size_t> cache_hit_segs{0};    // data segments served from local TTL cache
+    std::atomic<size_t> cache_miss_segs{0};   // data segments not found in local cache
     std::atomic<size_t> steal_segs{0};        // segments fetched from peer via steal RPC
-    std::atomic<size_t> s3_fallback_segs{0};  // segments read directly from S3
-    std::atomic<size_t> cache_bytes{0};       // bytes through cache_buffer (local + steal)
-    std::atomic<size_t> s3_bytes{0};          // bytes through source_buffer (S3)
+    std::atomic<size_t> s3_fallback_segs{0};  // data segments read directly from S3
+    std::atomic<size_t> cache_bytes{0};       // bytes through cache_buffer for data (local + steal)
+    std::atomic<size_t> s3_bytes{0};          // bytes through source_buffer for data (S3)
     std::atomic<uint64_t> cache_read_ms{0};
     std::atomic<uint64_t> s3_read_ms{0};
+    // Skip-index segment counters (extension .idx)
+    std::atomic<size_t> idx_hit_segs{0};
+    std::atomic<size_t> idx_miss_segs{0};
+    std::atomic<size_t> idx_cache_bytes{0};
+    std::atomic<size_t> idx_s3_bytes{0};
+    std::atomic<uint64_t> idx_cache_read_ms{0};
+    std::atomic<uint64_t> idx_s3_read_ms{0};
 };
 
 /// Plain snapshot, used for local accumulation and return values.
@@ -65,8 +72,16 @@ struct QueryCacheStatsSnapshot
     size_t s3_bytes{0};
     uint64_t cache_read_ms{0};
     uint64_t s3_read_ms{0};
+    // Skip-index segment counters (extension .idx)
+    size_t idx_hit_segs{0};
+    size_t idx_miss_segs{0};
+    size_t idx_cache_bytes{0};
+    size_t idx_s3_bytes{0};
+    uint64_t idx_cache_read_ms{0};
+    uint64_t idx_s3_read_ms{0};
 
-    bool empty() const { return cache_hit_segs == 0 && cache_miss_segs == 0 && steal_segs == 0 && s3_fallback_segs == 0; }
+    bool empty() const { return cache_hit_segs == 0 && cache_miss_segs == 0 && steal_segs == 0 && s3_fallback_segs == 0
+        && idx_hit_segs == 0 && idx_miss_segs == 0; }
 };
 
 enum class DiskCacheType {
