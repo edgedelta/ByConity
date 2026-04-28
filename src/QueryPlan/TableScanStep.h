@@ -220,7 +220,9 @@ private:
 
     // Only for worker.
     bool is_null_source{false};
-    QueryPlan inner_plan;
+    // Kept alive after initializePipeline to allow collectPostExecutionAttributes
+    // to harvest CacheStats after pipeline execution.
+    std::shared_ptr<IQueryPlanStep> read_step;
 
     // Optimises the where clauses for a bucket table by rewriting the IN clause and hence reducing the IN set size
     void rewriteInForBucketTable(ContextPtr context) const;

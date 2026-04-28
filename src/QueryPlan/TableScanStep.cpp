@@ -1344,6 +1344,8 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
 
         for (auto & node : storage_plan.getNodes())
         {
+            if (!read_step && dynamic_cast<ReadFromMergeTree *>(node.step.get()))
+                read_step = node.step;
             auto & att_descs = node.step->getAttributeDescriptions();
             if (att_descs.empty())
                 continue;
@@ -1353,7 +1355,6 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
                     attribute_descriptions.emplace(desc.first, desc.second);
             }
         }
-        inner_plan = std::move(storage_plan);
 
         if (pipe.getCacheHolder())
             pipeline.addCacheHolder(pipe.getCacheHolder());
@@ -2088,19 +2089,16 @@ void TableScanStep::fillQueryInfoV2(ContextPtr context)
 
 void TableScanStep::collectPostExecutionAttributes()
 {
-    for (auto & node : inner_plan.getNodes())
-    {
-        auto * rmt = dynamic_cast<ReadFromMergeTree *>(node.step.get());
-        if (!rmt)
-            continue;
-        rmt->collectCacheStats();
-        auto & rmt_descs = rmt->getAttributeDescriptions();
-        LOG_DEBUG(log, "collectPostExecutionAttributes: collected {} attribute(s) from ReadFromMergeTree, has_cache_stats={}",
-            rmt_descs.size(), rmt_descs.contains(RuntimeAttributeKeys::CacheStats));
-        for (auto & [k, v] : rmt_descs)
-            attribute_descriptions.insert_or_assign(k, v);
-    }
-    inner_plan = QueryPlan{};
+    auto * rmt = dynamic_cast<ReadFromMergeTree *>(read_step.get());
+    if (!rmt)
+        return;
+    rmt->collectCacheStats();
+    auto & rmt_descs = rmt->getAttributeDescriptions();
+    LOG_DEBUG(log, "collectPostExecutionAttributes: collected {} attribute(s) from ReadFromMergeTree, has_cache_stats={}",
+        rmt_descs.size(), rmt_descs.contains(RuntimeAttributeKeys::CacheStats));
+    for (auto & [k, v] : rmt_descs)
+        attribute_descriptions.insert_or_assign(k, v);
+    read_step.reset();
 }
 
 }
