@@ -812,7 +812,11 @@ void DiskCacheTTL::load()
             for (const auto & [key, meta] : cache_map)
             {
                 if (meta && meta->size > 0)
-                    updatePartitionStats(formatPartitionId(meta->max_timestamp), meta->max_timestamp, false, meta->size);
+                {
+                    updatePartitionStats(formatPartitionId(meta->max_timestamp), meta->max_timestamp, false, meta->size, /*is_reconcile=*/true);
+                    cache_stats.cached_from_restored++;
+                    cache_stats.cached_bytes_restored += meta->size;
+                }
             }
 
             LOG_INFO(log, "TTL cache for {} recovered from FDB index: {} entries, {} bytes",
@@ -1082,6 +1086,8 @@ DiskCacheTTL::TTLCacheStats DiskCacheTTL::getStats() const
     stats.cached_from_query = cache_stats.cached_from_query.load();
     stats.cached_bytes_preload = cache_stats.cached_bytes_preload.load();
     stats.cached_bytes_query = cache_stats.cached_bytes_query.load();
+    stats.cached_from_restored = cache_stats.cached_from_restored.load();
+    stats.cached_bytes_restored = cache_stats.cached_bytes_restored.load();
     {
         std::shared_lock<std::shared_mutex> lock(cache_stats.partition_stats_mutex);
         for (const auto & [_, ps] : cache_stats.partition_stats)
@@ -1124,7 +1130,7 @@ std::optional<String> DiskCacheTTL::findPeerOwner(const String & seg_name)
     return fdb_index->findPeerOwner(key, partition_id);
 }
 
-void DiskCacheTTL::updatePartitionStats(const String & partition_id, time_t partition_ts, bool hit, size_t bytes)
+void DiskCacheTTL::updatePartitionStats(const String & partition_id, time_t partition_ts, bool hit, size_t bytes, bool is_reconcile)
 {
     std::unique_lock<std::shared_mutex> lock(cache_stats.partition_stats_mutex);
     auto & pstats = cache_stats.partition_stats[partition_id];
@@ -1136,10 +1142,13 @@ void DiskCacheTTL::updatePartitionStats(const String & partition_id, time_t part
     if (partition_ts > 0 && pstats.partition_timestamp == 0)
         pstats.partition_timestamp = partition_ts;
 
-    if (hit)
-        pstats.hits++;
-    else
-        pstats.misses++;
+    if (!is_reconcile)
+    {
+        if (hit)
+            pstats.hits++;
+        else
+            pstats.misses++;
+    }
 
     if (bytes > 0)
     {

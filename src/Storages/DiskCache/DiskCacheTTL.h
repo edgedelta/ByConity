@@ -146,11 +146,13 @@ public:
         size_t async_eviction_triggered_global{0};
         size_t async_eviction_skipped_rate_limit_global{0};
 
-        // Write source breakdown (preload vs query-triggered)
+        // Write source breakdown (preload vs query-triggered vs restored from FDB on startup)
         size_t cached_from_preload{0};
         size_t cached_from_query{0};
         size_t cached_bytes_preload{0};
         size_t cached_bytes_query{0};
+        size_t cached_from_restored{0};
+        size_t cached_bytes_restored{0};
 
         // Aggregated hit/miss counts across all partitions
         size_t total_hits{0};
@@ -177,11 +179,13 @@ public:
         std::atomic<size_t> async_eviction_triggered_global{0};
         std::atomic<size_t> async_eviction_skipped_rate_limit_global{0};
 
-        // Write source breakdown (preload vs query-triggered)
+        // Write source breakdown (preload vs query-triggered vs restored from FDB on startup)
         std::atomic<size_t> cached_from_preload{0};
         std::atomic<size_t> cached_from_query{0};
         std::atomic<size_t> cached_bytes_preload{0};
         std::atomic<size_t> cached_bytes_query{0};
+        std::atomic<size_t> cached_from_restored{0};
+        std::atomic<size_t> cached_bytes_restored{0};
 
         // Per-partition breakdown
         mutable std::shared_mutex partition_stats_mutex;
@@ -213,7 +217,7 @@ private:
     void evictOldestPartitionsUntilSpace(size_t needed_bytes);
 
     /// Update partition-level stats
-    void updatePartitionStats(const String & partition_id, time_t partition_ts, bool hit, size_t bytes);
+    void updatePartitionStats(const String & partition_id, time_t partition_ts, bool hit, size_t bytes, bool is_reconcile = false);
 
     struct DiskIterator : private boost::noncopyable
     {

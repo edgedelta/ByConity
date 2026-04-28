@@ -50,9 +50,6 @@ public:
         clockid_t clock_type_ = CLOCK_MONOTONIC_COARSE,
         String stream_extension_ = DATA_FILE_EXTENSION);
 
-    // Flush any accumulated cache stats to DiskCacheFactory. Idempotent.
-    void finalize() { flushLocalCacheStats(); }
-
     virtual size_t readBig(char* to, size_t n) override;
     virtual bool nextImpl() override;
 
@@ -186,6 +183,9 @@ private:
     bool collect_cache_stats{false};
     String cached_query_id;
     QueryCacheStatsSnapshot local_cache_stats;
+    // Lifetime token: when this object is destroyed, alive_token drops to zero
+    // and any registered flush callback becomes a no-op.
+    std::shared_ptr<std::monostate> alive_token;
     uint64_t active_segment_start_ms{0};  // wall-clock ms when current segment read started
     bool active_is_cache{false};          // true = cache_buffer active, false = source_buffer
 

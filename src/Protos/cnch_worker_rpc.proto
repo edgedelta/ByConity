@@ -202,6 +202,8 @@ message TTLCacheTableStats
   optional uint64 count_query = 15;
   optional uint64 bytes_preload = 16;
   optional uint64 bytes_query = 17;
+  optional uint64 count_restored = 18;
+  optional uint64 bytes_restored = 19;
 }
 
 message GetTTLCacheStatsReq

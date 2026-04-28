@@ -79,7 +79,7 @@ void StorageSystemDiskTTLCachePartitions::fillData(MutableColumns & res_columns,
                 auto worker = pools.getWorker(wd.host_ports);
                 auto partitions = worker->getTTLCachePartitionStats();
                 for (const auto & p : partitions)
-                    fillPartitionRow(res_columns, wd.host_ports.getRPCAddress(), p);
+                    fillPartitionRow(res_columns, wd.id.empty() ? wd.host_ports.getRPCAddress() : wd.id, p);
             }
             catch (...)
             {

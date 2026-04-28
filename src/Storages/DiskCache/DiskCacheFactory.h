@@ -20,9 +20,11 @@
 #include <common/singleton.h>
 #include <common/types.h>
 #include <atomic>
+#include <functional>
 #include <optional>
 #include <shared_mutex>
 #include <unordered_map>
+#include <vector>
 #include <Poco/Exception.h>
 
 namespace DB::ErrorCodes
@@ -139,6 +141,10 @@ public:
     void mergeQueryCacheStats(const String & query_id, const QueryCacheStatsSnapshot & local);
     std::optional<QueryCacheStatsSnapshot> consumeQueryCacheStats(const String & query_id);
 
+    /// Register a callback to be fired by consumeQueryCacheStats before reading stats.
+    /// Used to flush the last partial segment's stats from live read buffers.
+    void registerFlushCallback(const String & query_id, std::function<void()> callback);
+
 private:
     void addNewCache(Context & context, const std::string & cache_name, bool create_default);
     std::unordered_map<DiskCacheType, IDiskCachePtr> caches;
@@ -152,6 +158,8 @@ private:
 
     /// Per-query cache stats (query_id → shared stats object)
     std::unordered_map<String, std::shared_ptr<QueryCacheStats>> query_cache_stats_map;
+    /// Per-query flush callbacks fired before consume (query_id → callbacks list)
+    std::unordered_map<String, std::vector<std::function<void()>>> query_flush_callbacks_map;
     mutable std::shared_mutex query_cache_stats_mutex;
 };
 }

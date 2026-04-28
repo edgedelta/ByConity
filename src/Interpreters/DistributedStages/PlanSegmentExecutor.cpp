@@ -59,7 +59,6 @@
 #include <Processors/Transforms/CopyTransform.h>
 #include <Protos/plan_segment_manager.pb.h>
 #include <Protos/registry.pb.h>
-#include <Storages/MergeTree/MergedReadBufferWithSegmentCache.h>
 #include <QueryPlan/BuildQueryPipelineSettings.h>
 #include <QueryPlan/GraphvizPrinter.h>
 #include <QueryPlan/Optimizations/QueryPlanOptimizationSettings.h>
@@ -72,6 +71,7 @@
 #include <Common/Brpc/BrpcChannelPoolOptions.h>
 #include <Common/CurrentThread.h>
 #include <Common/Exception.h>
+#include <Common/HostWithPorts.h>
 #include <Common/ThreadStatus.h>
 #include <Common/time.h>
 #include <common/defines.h>
@@ -297,8 +297,7 @@ void fillPlanSegmentProfile(
     ContextPtr context,
     PlanSegment * plan_segment)
 {
-    AddressInfo current_address = getLocalAddress(*context);
-    segment_profile->worker_address = extractExchangeHostPort(current_address);
+    segment_profile->worker_address = getWorkerID(context);
     if (query_status)
     {
         auto query_status_info = query_status->getInfo(true, context->getSettingsRef().log_profile_events);
@@ -482,13 +481,6 @@ void PlanSegmentExecutor::doExecute()
     }
     if ((context->getSettingsRef().report_segment_profiles || context->getSettingsRef().log_segment_profiles) && plan_segment)
     {
-        // Flush the last partial segment's cache stats before reading them.
-        // Per-boundary flushes cover completed segments; this covers the segment
-        // that was in progress when execution stopped (e.g. LIMIT queries).
-        for (auto & processor : pipeline->getProcessors())
-            if (auto * reader = dynamic_cast<MergedReadBufferWithSegmentCache *>(processor.get()))
-                reader->finalize();
-
         segment_profile = std::make_shared<PlanSegmentProfile>(query_log_element->client_info.initial_query_id, plan_segment->getPlanSegmentId());
         fillPlanSegmentProfile(
             segment_profile, pipeline, plan_segment->getProfileType(), &process_plan_segment_entry->get(), context, plan_segment);

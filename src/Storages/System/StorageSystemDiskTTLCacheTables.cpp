@@ -93,6 +93,8 @@ static void fillRowFromProto(MutableColumns & res_columns, const String & worker
         write_map["count_query"] = t.count_query();
         write_map["bytes_preload"] = t.bytes_preload();
         write_map["bytes_query"] = t.bytes_query();
+        write_map["count_restored"] = t.count_restored();
+        write_map["bytes_restored"] = t.bytes_restored();
         dumpStatsToMapColumn(write_map, res_columns[col_idx++].get());
     }
 }
@@ -134,7 +136,7 @@ void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, Con
                 auto stats = worker->getTTLCacheStats();
                 LOG_INFO(log, "Got {} TTL cache entries from {}", stats.size(), wd.host_ports.getRPCAddress());
                 for (const auto & t : stats)
-                    fillRowFromProto(res_columns, wd.host_ports.getRPCAddress(), t);
+                    fillRowFromProto(res_columns, wd.id.empty() ? wd.host_ports.getRPCAddress() : wd.id, t);
             }
             catch (...)
             {
@@ -173,6 +175,8 @@ void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, Con
         t.set_count_query(stats.cached_from_query);
         t.set_bytes_preload(stats.cached_bytes_preload);
         t.set_bytes_query(stats.cached_bytes_query);
+        t.set_count_restored(stats.cached_from_restored);
+        t.set_bytes_restored(stats.cached_bytes_restored);
 
         fillRowFromProto(res_columns, worker_id, t);
     }
