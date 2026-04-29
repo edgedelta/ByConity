@@ -435,7 +435,7 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
         // Update partition stats
         String part_name = extractPartName(seg_name);
         String partition_id = extractPartitionId(part_name);
-        updatePartitionStats(partition_id, part_ts, false, weight);
+        updatePartitionStats(partition_id, part_ts, false, weight, true);
 
         if (fdb_index)
             fdb_index->onSet(key, seg_name, weight, part_ts);
