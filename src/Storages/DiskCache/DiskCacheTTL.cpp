@@ -1044,6 +1044,10 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
     // Add to global TTL usage
     DiskCacheFactory::instance().addGlobalTTLUsage(file_size);
 
+    disk_cache.updatePartitionStats(partition_dir, part_ts, false, file_size, /*is_reconcile=*/true);
+    disk_cache.cache_stats.cached_from_restored++;
+    disk_cache.cache_stats.cached_bytes_restored += file_size;
+
     total_loaded++;
 }
 
