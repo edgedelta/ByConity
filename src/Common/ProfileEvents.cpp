@@ -444,6 +444,10 @@
     M(DiskCacheGetTotalOps, "Total count of disk cache get operations") \
     M(DiskCacheSetTotalOps, "Total count of disk cache set operations") \
     M(DiskCacheSetTotalBytes, "Total  of disk cache set operations") \
+    M(DiskCacheDataHits, "TTL cache hits for data column segments") \
+    M(DiskCacheDataMisses, "TTL cache misses for data column segments") \
+    M(DiskCacheIdxHits, "TTL cache hits for skip-index segments") \
+    M(DiskCacheIdxMisses, "TTL cache misses for skip-index segments") \
     M(DiskCacheDeviceBytesWritten, "Total bytes written of disk cache device") \
     M(DiskCacheDeviceBytesRead, "Total bytes read of disk cache device") \
     M(DiskCacheDeviceWriteIOErrors, "Total errors of disk cache device write io") \

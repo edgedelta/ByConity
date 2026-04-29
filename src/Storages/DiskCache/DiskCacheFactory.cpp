@@ -261,10 +261,13 @@ void DiskCacheFactory::addNewCache(Context & context, const std::string & cache_
                 cache_settings.lru_max_nums));
     }
 
-    // Resolve global TTL cache limit (like LRU pattern)
+    // Resolve global TTL cache limit — use TTL disk space when a separate ttl_disk_policy is configured
+    auto ttl_total_space_unlimited = !cache_settings.ttl_disk_policy.empty()
+        ? context.getStoragePolicy(cache_settings.ttl_disk_policy)->getVolumeByName("local", true)->getTotalSpace(true)
+        : total_space_unlimited;
     cache_settings.ttl_cache_max_size = (cache_settings.ttl_cache_max_size > 0)
         ? cache_settings.ttl_cache_max_size
-        : static_cast<size_t>(total_space_unlimited.bytes * (cache_settings.ttl_cache_max_percent / 100.0));
+        : static_cast<size_t>(ttl_total_space_unlimited.bytes * (cache_settings.ttl_cache_max_percent / 100.0));
 
     LOG_INFO(log, "{} cache: TTL global limit {}GB",
              cache_name, cache_settings.ttl_cache_max_size / (1024*1024*1024));

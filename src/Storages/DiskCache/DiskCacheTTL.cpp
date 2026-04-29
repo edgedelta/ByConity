@@ -53,6 +53,10 @@ namespace ProfileEvents
     extern const Event DiskCacheGetTotalOps;
     extern const Event DiskCacheSetTotalOps;
     extern const Event DiskCacheSetTotalBytes;
+    extern const Event DiskCacheDataHits;
+    extern const Event DiskCacheDataMisses;
+    extern const Event DiskCacheIdxHits;
+    extern const Event DiskCacheIdxMisses;
 }
 
 namespace DB
@@ -532,7 +536,8 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
     auto it = cache_map.find(key);
     if (it == cache_map.end() || it->second->state != DiskCacheTTLMeta::State::Cached)
     {
-        if (is_idx_seg) cache_stats.idx_misses++; else cache_stats.data_misses++;
+        if (is_idx_seg) { cache_stats.idx_misses++; ProfileEvents::increment(ProfileEvents::DiskCacheIdxMisses); }
+        else { cache_stats.data_misses++; ProfileEvents::increment(ProfileEvents::DiskCacheDataMisses); }
         updatePartitionStats(partition_id, 0, false, 0);
         return {};
     }
@@ -540,7 +545,8 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
     if (unlikely(it->second->disk == nullptr))
     {
         cache_map.erase(it);
-        if (is_idx_seg) cache_stats.idx_misses++; else cache_stats.data_misses++;
+        if (is_idx_seg) { cache_stats.idx_misses++; ProfileEvents::increment(ProfileEvents::DiskCacheIdxMisses); }
+        else { cache_stats.data_misses++; ProfileEvents::increment(ProfileEvents::DiskCacheDataMisses); }
         updatePartitionStats(partition_id, 0, false, 0);
         return {};
     }
@@ -550,12 +556,14 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
     if (!shouldCache(part_ts))
     {
         // Expired, return miss
-        if (is_idx_seg) cache_stats.idx_misses++; else cache_stats.data_misses++;
+        if (is_idx_seg) { cache_stats.idx_misses++; ProfileEvents::increment(ProfileEvents::DiskCacheIdxMisses); }
+        else { cache_stats.data_misses++; ProfileEvents::increment(ProfileEvents::DiskCacheDataMisses); }
         updatePartitionStats(partition_id, part_ts, false, 0);
         return {};
     }
 
-    if (is_idx_seg) cache_stats.idx_hits++; else cache_stats.data_hits++;
+    if (is_idx_seg) { cache_stats.idx_hits++; ProfileEvents::increment(ProfileEvents::DiskCacheIdxHits); }
+    else { cache_stats.data_hits++; ProfileEvents::increment(ProfileEvents::DiskCacheDataHits); }
     updatePartitionStats(partition_id, part_ts, true, 0);
     return {it->second->disk, getRelativePath(key, seg_name)};
 }
