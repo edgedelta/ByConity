@@ -611,7 +611,7 @@ void CnchWorkerServiceImpl::preloadDataParts(
             // Group parts by partition and register with PreloadRegistry before scheduling
             // so in-flight counts are visible immediately.
             auto & registry = PreloadRegistry::instance();
-            String table_name = cloud_merge_tree.getFullNameNotQuoted();
+            String table_name = cloud_merge_tree.getStorageID().getFullNameNotQuoted();
             String table_uuid_str = toString(cloud_merge_tree.getStorageUUID());
             std::unordered_map<String, size_t> partition_counts;
             for (const auto & part : data_parts)
