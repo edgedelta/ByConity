@@ -45,6 +45,7 @@ namespace Protos
     class CnchWorkerService_Stub;
     class TTLCacheTableStats;
     class TTLCachePartitionStats;
+    class PreloadPartitionStats;
 }
 
 namespace IngestColumnCnch
