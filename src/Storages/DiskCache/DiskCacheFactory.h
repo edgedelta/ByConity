@@ -51,7 +51,10 @@ struct QueryCacheStats
     std::atomic<size_t> cache_bytes{0};       // bytes through cache_buffer for data (local + steal)
     std::atomic<size_t> s3_bytes{0};          // bytes through source_buffer for data (S3)
     std::atomic<uint64_t> cache_read_ms{0};
+    std::atomic<uint64_t> cache_read_ms_max{0};
+    std::atomic<uint64_t> cache_read_ms_min{UINT64_MAX};
     std::atomic<uint64_t> s3_read_ms{0};
+    std::atomic<size_t> reader_count{0};
     // Skip-index segment counters (extension .idx)
     std::atomic<size_t> idx_hit_segs{0};
     std::atomic<size_t> idx_miss_segs{0};
@@ -71,7 +74,10 @@ struct QueryCacheStatsSnapshot
     size_t cache_bytes{0};
     size_t s3_bytes{0};
     uint64_t cache_read_ms{0};
+    uint64_t cache_read_ms_max{0};
+    uint64_t cache_read_ms_min{0};
     uint64_t s3_read_ms{0};
+    size_t reader_count{0};
     // Skip-index segment counters (extension .idx)
     size_t idx_hit_segs{0};
     size_t idx_miss_segs{0};

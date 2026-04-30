@@ -69,9 +69,9 @@ void IDiskCache::init(const Context & global_context)
         false /*throw_on_exception*/);
 
     local_disk_cache_preload_thread_pool = std::make_unique<ThreadPool>(
-        settings.cnch_parallel_preloading,
-        settings.cnch_parallel_preloading,
-        settings.cnch_parallel_preloading * 100,
+        settings.local_disk_cache_preload_thread_pool_size,
+        settings.local_disk_cache_preload_thread_pool_size,
+        settings.local_disk_cache_preload_thread_pool_size * 100,
         false /*throw_on_exception*/);
 }
 

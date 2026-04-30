@@ -85,6 +85,7 @@ public:
     std::vector<ManipulationInfo> getManipulationTasksStatus();
     std::vector<Protos::TTLCacheTableStats> getTTLCacheStats();
     std::vector<Protos::TTLCachePartitionStats> getTTLCachePartitionStats();
+    std::vector<Protos::PreloadPartitionStats> getPreloadStats();
 
     void submitMvRefreshTask(
         const StorageMaterializedView & storage, const ManipulationTaskParams & params, TxnTimestamp txn_id);

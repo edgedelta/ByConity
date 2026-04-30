@@ -323,6 +323,13 @@ void DiskCacheFactory::mergeQueryCacheStats(const String & query_id, const Query
     entry->s3_bytes.fetch_add(local.s3_bytes, std::memory_order_relaxed);
     entry->cache_read_ms.fetch_add(local.cache_read_ms, std::memory_order_relaxed);
     entry->s3_read_ms.fetch_add(local.s3_read_ms, std::memory_order_relaxed);
+    entry->reader_count.fetch_add(1, std::memory_order_relaxed);
+    for (auto cur = entry->cache_read_ms_max.load(std::memory_order_relaxed);
+         local.cache_read_ms > cur && !entry->cache_read_ms_max.compare_exchange_weak(cur, local.cache_read_ms, std::memory_order_relaxed);)
+        ;
+    for (auto cur = entry->cache_read_ms_min.load(std::memory_order_relaxed);
+         local.cache_read_ms < cur && !entry->cache_read_ms_min.compare_exchange_weak(cur, local.cache_read_ms, std::memory_order_relaxed);)
+        ;
     entry->idx_hit_segs.fetch_add(local.idx_hit_segs, std::memory_order_relaxed);
     entry->idx_miss_segs.fetch_add(local.idx_miss_segs, std::memory_order_relaxed);
     entry->idx_cache_bytes.fetch_add(local.idx_cache_bytes, std::memory_order_relaxed);
@@ -361,8 +368,12 @@ std::optional<QueryCacheStatsSnapshot> DiskCacheFactory::consumeQueryCacheStats(
     snap.s3_fallback_segs = e.s3_fallback_segs.load(std::memory_order_relaxed);
     snap.cache_bytes      = e.cache_bytes.load(std::memory_order_relaxed);
     snap.s3_bytes         = e.s3_bytes.load(std::memory_order_relaxed);
-    snap.cache_read_ms    = e.cache_read_ms.load(std::memory_order_relaxed);
-    snap.s3_read_ms       = e.s3_read_ms.load(std::memory_order_relaxed);
+    snap.cache_read_ms     = e.cache_read_ms.load(std::memory_order_relaxed);
+    snap.cache_read_ms_max = e.cache_read_ms_max.load(std::memory_order_relaxed);
+    auto raw_min           = e.cache_read_ms_min.load(std::memory_order_relaxed);
+    snap.cache_read_ms_min = (raw_min == UINT64_MAX) ? 0 : raw_min;
+    snap.s3_read_ms        = e.s3_read_ms.load(std::memory_order_relaxed);
+    snap.reader_count      = e.reader_count.load(std::memory_order_relaxed);
     snap.idx_hit_segs     = e.idx_hit_segs.load(std::memory_order_relaxed);
     snap.idx_miss_segs    = e.idx_miss_segs.load(std::memory_order_relaxed);
     snap.idx_cache_bytes  = e.idx_cache_bytes.load(std::memory_order_relaxed);

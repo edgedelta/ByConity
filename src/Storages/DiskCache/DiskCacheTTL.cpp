@@ -812,36 +812,36 @@ void DiskCacheTTL::load()
         auto result = fdb_index->reconcile(
             cache_map, cache_mutex, volume,
             [this](UInt128 key, const String & seg_name) { return getRelativePath(key, seg_name); },
-            [this](time_t ts) { return shouldCache(ts); });
+            [this](time_t ts) { return shouldCache(ts); },
+            // on_restore: called per-entry inside reconcile so we only count FDB-restored entries
+            [this](time_t ts, size_t bytes) {
+                updatePartitionStats(formatPartitionId(ts), ts, false, bytes, /*is_reconcile=*/true);
+                cache_stats.cached_from_restored++;
+                cache_stats.cached_bytes_restored += bytes;
+            });
 
         if (result)
         {
             auto [entries, bytes] = *result;
-            total_entries = entries;
-            total_size = bytes;
-            cache_stats.total_entries = entries;
-            cache_stats.total_bytes = bytes;
-
-            // Populate partition_stats so size-based eviction can order and find recovered entries.
-            // reconcile() inserts into cache_map but never calls updatePartitionStats.
-            for (const auto & [key, meta] : cache_map)
-            {
-                if (meta && meta->size > 0)
-                {
-                    updatePartitionStats(formatPartitionId(meta->max_timestamp), meta->max_timestamp, false, meta->size, /*is_reconcile=*/true);
-                    cache_stats.cached_from_restored++;
-                    cache_stats.cached_bytes_restored += meta->size;
-                }
-            }
+            // fetch_add: concurrent set() calls may have already bumped these countersbetween cache registration and now
+            total_entries.fetch_add(entries, std::memory_order_relaxed);
+            total_size.fetch_add(bytes, std::memory_order_relaxed);
+            cache_stats.total_entries.fetch_add(entries, std::memory_order_relaxed);
+            cache_stats.total_bytes.fetch_add(bytes, std::memory_order_relaxed);
 
             LOG_INFO(log, "TTL cache for {} recovered from FDB index: {} entries, {} bytes",
                 table_uuid, entries, bytes);
             return;
         }
-        LOG_WARNING(log, "FDB index empty or unavailable for {}, falling back to disk scan", table_uuid);
+        // reconcile() already logged the per-entry summary (restored/stale counts)
+        LOG_WARNING(log, "TTL cache for {}: FDB index had no restorable entries, falling back to disk scan", table_uuid);
+    }
+    else
+    {
+        LOG_WARNING(log, "TTL cache for {}: no FDB index available, loading from disk scan", table_uuid);
     }
 
-    LOG_INFO(log, "Loading TTL disk cache from disk...");
+    LOG_INFO(log, "Loading TTL disk cache from disk scan for {}...", table_uuid);
 
     for (const auto & disk : volume->getDisks())
     {
@@ -1034,6 +1034,14 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
         }
     }
 
+    // Skip expired or non-time-based segments; delete the stale file so it
+    // doesn't accumulate on disk across restarts.
+    if (!disk_cache.shouldCache(part_ts))
+    {
+        disk->removeFileIfExists(file_path);
+        return;
+    }
+
     std::lock_guard<std::mutex> lock(disk_cache.cache_mutex);
     disk_cache.cache_map[key] = std::make_shared<DiskCacheTTLMeta>(
         DiskCacheTTLMeta::State::Cached, disk, file_size, time(nullptr), part_ts
@@ -1160,6 +1168,14 @@ std::optional<String> DiskCacheTTL::findPeerOwner(const String & seg_name)
 void DiskCacheTTL::updatePartitionStats(const String & partition_id, time_t partition_ts, bool hit, size_t bytes, bool is_reconcile)
 {
     std::unique_lock<std::shared_mutex> lock(cache_stats.partition_stats_mutex);
+
+    // Don't create phantom partition entries from cache misses (bytes == 0, not reconcile).
+    // This prevents "19700101" ghost rows and other zero-byte artifacts from appearing in
+    // system.disk_ttl_cache_partitions when get() records a miss for an unknown partition.
+    auto it = cache_stats.partition_stats.find(partition_id);
+    if (it == cache_stats.partition_stats.end() && bytes == 0 && !is_reconcile)
+        return;
+
     auto & pstats = cache_stats.partition_stats[partition_id];
 
     if (pstats.partition_id.empty())

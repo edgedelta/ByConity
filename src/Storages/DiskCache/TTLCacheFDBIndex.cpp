@@ -212,7 +212,8 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
     std::mutex & cache_mutex,
     const VolumePtr & volume,
     std::function<std::filesystem::path(UInt128, const String &)> get_rel_path,
-    std::function<bool(time_t)> should_cache)
+    std::function<bool(time_t)> should_cache,
+    std::function<void(time_t, size_t)> on_restore)
 {
     std::vector<String> stale_keys;
     std::vector<std::pair<UInt128, std::shared_ptr<DiskCacheTTLMeta>>> to_insert;
@@ -266,6 +267,11 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
         to_insert.emplace_back(key, std::make_shared<DiskCacheTTLMeta>(
             DiskCacheTTLMeta::State::Cached, found_disk, size, time(nullptr), part_ts));
         restored_bytes += size;
+
+        // Notify caller about restored entry so it can update partition_stats
+        // without re-scanning the whole cache_map
+        if (on_restore)
+            on_restore(part_ts, size);
     }
 
     // Bulk-insert into cache_map under a single lock

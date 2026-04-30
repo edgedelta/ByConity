@@ -53,13 +53,16 @@ public:
     std::optional<String> findPeerOwner(UInt128 key, const String & partition_id);
 
     /// Scan FDB index and restore cache_map.
+    /// Calls on_restore for each successfully restored entry so the
+    /// caller can update partition_stats without re-scanning cache_map
     /// Returns {entries, bytes} restored, or nullopt if index is empty/unavailable.
     std::optional<std::pair<size_t, size_t>> reconcile(
         std::map<UInt128, std::shared_ptr<DiskCacheTTLMeta>> & cache_map,
         std::mutex & cache_mutex,
         const VolumePtr & volume,
         std::function<std::filesystem::path(UInt128, const String &)> get_rel_path,
-        std::function<bool(time_t)> should_cache);
+        std::function<bool(time_t)> should_cache,
+        std::function<void(time_t, size_t)> on_restore = nullptr);
 
 private:
     struct PendingOp

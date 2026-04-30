@@ -36,6 +36,7 @@
 #include <Storages/DiskCache/IDiskCache.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
+#include <Storages/DiskCache/PreloadRegistry.h>
 #include <Storages/MergeTree/CnchMergeTreeMutationEntry.h>
 #include <Storages/MergeTree/IMergeTreeDataPart_fwd.h>
 #include <Storages/MergeTree/MergeTreeDataPartCNCH.h>
@@ -607,10 +608,23 @@ void CnchWorkerServiceImpl::preloadDataParts(
         }
         else
         {
+            // Group parts by partition and register with PreloadRegistry before scheduling
+            // so in-flight counts are visible immediately.
+            auto & registry = PreloadRegistry::instance();
+            String table_name = cloud_merge_tree.getFullNameNotQuoted();
+            String table_uuid_str = toString(cloud_merge_tree.getStorageUUID());
+            std::unordered_map<String, size_t> partition_counts;
+            for (const auto & part : data_parts)
+                partition_counts[part->info.partition_id]++;
+            for (const auto & [pid, cnt] : partition_counts)
+                registry.registerParts(table_name, table_uuid_str, pid, cnt, preload_level);
+
             ThreadPool * preload_thread_pool = &(IDiskCache::getPreloadPool());
             for (const auto & part : data_parts)
             {
-                preload_thread_pool->scheduleOrThrowOnError([part, preload_level, submit_ts, read_injection, storage] {
+                String pid = part->info.partition_id;
+                preload_thread_pool->scheduleOrThrowOnError([part, preload_level, submit_ts, read_injection, storage, table_uuid_str, pid, &registry] {
+                    SCOPE_EXIT({ registry.partFinished(table_uuid_str, pid); });
                     part->remote_fs_read_failed_injection = read_injection;
                     part->disk_cache_mode = DiskCacheMode::SKIP_DISK_CACHE;// avoid getCheckum & getIndex re-cache
                     part->preload(preload_level, submit_ts);
@@ -1394,6 +1408,27 @@ void CnchWorkerServiceImpl::getTTLCachePartitionStats(
                 p->set_hits(ps.hits);
                 p->set_misses(ps.misses);
             }
+        }
+    });
+}
+
+void CnchWorkerServiceImpl::getPreloadStats(
+    google::protobuf::RpcController *,
+    const Protos::GetPreloadStatsReq *,
+    Protos::GetPreloadStatsResp * response,
+    google::protobuf::Closure * done)
+{
+    SUBMIT_THREADPOOL({
+        for (const auto & snap : PreloadRegistry::instance().getSnapshot())
+        {
+            auto * p = response->add_partitions();
+            p->set_table_name(snap.table_name);
+            p->set_table_uuid(snap.table_uuid);
+            p->set_partition_id(snap.partition_id);
+            p->set_parts_in_flight(snap.parts_in_flight);
+            p->set_parts_submitted(snap.parts_submitted);
+            p->set_elapsed_ms(snap.elapsed_ms);
+            p->set_preload_level(snap.preload_level);
         }
     });
 }

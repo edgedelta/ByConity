@@ -113,7 +113,7 @@ IDiskCachePtr StorageCloudMergeTree::getDiskCache() const
         if (getSettings()->disk_cache_ttl_hours.value > 0)
         {
             disk_cache_ptr = DiskCacheFactory::instance().createDiskCacheFromTableSettings(
-                getStorageID().getNameForLogs(),
+                getStorageID().getFullNameNotQuoted(),
                 getStorageUUID(),
                 *getContext(),
                 getContext()->getDiskCacheThrottler(),

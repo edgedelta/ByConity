@@ -58,10 +58,11 @@ void DiskCacheSettings::loadFromConfig(const Poco::Util::AbstractConfiguration &
 }
 
 std::string DiskCacheSettings::toString() const
-    {
+{
     return fmt::format(
         R"({{
-            "disk_policy": {},
+            "disk_policy": "{}",
+            "ttl_disk_policy": "{}",
             "lru_max_percent": {},
             "lru_max_size": {},
             "lru_max_nums": {},
@@ -81,10 +82,17 @@ std::string DiskCacheSettings::toString() const
             "stats_bucket_size": {},
             "previous_disk_cache_dir": "{}",
             "latest_disk_cache_dir": "{}",
-            "meta_cache_size_ratio": "{}",
-            "meta_cache_nums_ratio": "{}"
+            "meta_cache_size_ratio": {},
+            "meta_cache_nums_ratio": {},
+            "stealing_max_request_rate": {},
+            "stealing_connection_timeout_ms": {},
+            "stealing_read_timeout_ms": {},
+            "stealing_max_retry_times": {},
+            "stealing_retry_sleep_ms": {},
+            "stealing_max_queue_count": {}
         }})",
         disk_policy,
+        ttl_disk_policy,
         lru_max_percent,
         lru_max_size,
         lru_max_nums,
@@ -105,6 +113,12 @@ std::string DiskCacheSettings::toString() const
         previous_disk_cache_dir,
         latest_disk_cache_dir,
         meta_cache_size_ratio,
-        meta_cache_nums_ratio);
-    }
+        meta_cache_nums_ratio,
+        stealing_max_request_rate,
+        stealing_connection_timeout_ms,
+        stealing_read_timeout_ms,
+        stealing_max_retry_times,
+        stealing_retry_sleep_ms,
+        stealing_max_queue_count);
+}
 }

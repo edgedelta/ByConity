@@ -1885,8 +1885,10 @@ void ReadFromMergeTree::collectCacheStats()
     cache_map.add("s3_fallback_segs", cache_stats->s3_fallback_segs);
     cache_map.add("cache_bytes",      cache_stats->cache_bytes);
     cache_map.add("s3_bytes",         cache_stats->s3_bytes);
-    cache_map.add("cache_read_ms",    cache_stats->cache_read_ms);
-    cache_map.add("s3_read_ms",       cache_stats->s3_read_ms);
+    cache_map.add("cache_read_ms",     cache_stats->cache_read_ms);
+    cache_map.add("cache_read_ms_max", cache_stats->cache_read_ms_max);
+    cache_map.add("cache_read_ms_min", cache_stats->cache_read_ms_min);
+    cache_map.add("s3_read_ms",        cache_stats->s3_read_ms);
     cache_map.add("idx_hit_segs",     cache_stats->idx_hit_segs);
     cache_map.add("idx_miss_segs",    cache_stats->idx_miss_segs);
     cache_map.add("idx_cache_bytes",  cache_stats->idx_cache_bytes);
@@ -1899,11 +1901,15 @@ void ReadFromMergeTree::collectCacheStats()
     cache_map.format(json_fmt, fmt_ctx);
     RuntimeAttributeDescription cache_desc;
     cache_desc.description = buf.str();
+    uint64_t cache_wall_ms = cache_stats->reader_count > 0
+        ? cache_stats->cache_read_ms / cache_stats->reader_count
+        : cache_stats->cache_read_ms;
     cache_desc.name_and_detail.emplace_back("data",
-        fmt::format("data: hit={} miss={} steal={} s3={} cache={:.1f}MB/{}ms s3={:.1f}MB/{}ms",
+        fmt::format("data: hit={} miss={} steal={} s3={} cache={:.1f}MB ReadTime: {}ms[max={}ms, min={}ms] s3={:.1f}MB/{}ms",
             cache_stats->cache_hit_segs, cache_stats->cache_miss_segs,
             cache_stats->steal_segs, cache_stats->s3_fallback_segs,
-            cache_stats->cache_bytes / (1024.0 * 1024.0), cache_stats->cache_read_ms,
+            cache_stats->cache_bytes / (1024.0 * 1024.0),
+            cache_wall_ms, cache_stats->cache_read_ms_max, cache_stats->cache_read_ms_min,
             cache_stats->s3_bytes / (1024.0 * 1024.0), cache_stats->s3_read_ms));
     cache_desc.name_and_detail.emplace_back("idx",
         fmt::format("idx: hit={} miss={} cache={:.1f}MB/{}ms s3={:.1f}MB/{}ms",
