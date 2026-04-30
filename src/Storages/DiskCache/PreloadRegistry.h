@@ -4,6 +4,7 @@
 #include <chrono>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 #include <common/types.h>
 
