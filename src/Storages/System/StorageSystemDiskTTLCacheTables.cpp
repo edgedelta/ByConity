@@ -74,8 +74,8 @@ static void fillRowFromProto(MutableColumns & res_columns, const String & worker
         std::unordered_map<String, UInt64> eviction_map;
         eviction_map["expired"] = t.evicted_expired();
         eviction_map["size_limit"] = t.evicted_size_limit();
-        eviction_map["async_triggered_local"] = t.async_triggered_local();
-        eviction_map["async_skipped_rate_limit_local"] = t.async_skipped_rate_limit_local();
+        eviction_map["async_triggered_evicted"] = t.async_triggered_evicted();
+        eviction_map["async_skipped_rate_limit_evicted"] = t.async_skipped_rate_limit_evicted();
         eviction_map["async_triggered_global"] = t.async_triggered_global();
         eviction_map["async_skipped_rate_limit_global"] = t.async_skipped_rate_limit_global();
         dumpStatsToMapColumn(eviction_map, res_columns[col_idx++].get());
@@ -178,10 +178,8 @@ void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, Con
         t.set_last_eviction_run(stats.last_eviction_run);
         t.set_evicted_expired(stats.evicted_expired);
         t.set_evicted_size_limit(stats.evicted_size_limit);
-        t.set_async_triggered_local(stats.async_eviction_triggered);
-        t.set_async_skipped_rate_limit_local(stats.async_eviction_skipped_rate_limit);
-        t.set_async_triggered_global(stats.async_eviction_triggered_global);
-        t.set_async_skipped_rate_limit_global(stats.async_eviction_skipped_rate_limit_global);
+        t.set_async_triggered_evicted(stats.async_eviction_triggered);
+        t.set_async_skipped_rate_limit_evicted(stats.async_eviction_skipped_rate_limit);
         t.set_rejected_non_time_partition(stats.rejected_non_time_partition);
         t.set_rejected_too_old(stats.rejected_too_old);
         t.set_count_preload(stats.cached_from_preload);

@@ -164,29 +164,18 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
     // defaults to disk_policy if not set
     VolumePtr volume = context.getStoragePolicy(cache_settings.ttl_disk_policy)->getVolumeByName("local", true);
 
-    // Per-table size limit: explicit setting or constrained by global limit
-    size_t effective_max_size = max_size_bytes;
-    if (effective_max_size == 0)
-    {
-        LOG_DEBUG(log, "TTL cache for {} has no per-table limit, constrained only by global limit",
-                 table_name);
-    }
+    // Per-table size limit: use explicit setting, or fall back to global limit.
+    // Multiple tables should each have an explicit per-table limit; the global limit
+    // is the single-table default.
+    size_t effective_max_size = max_size_bytes > 0 ? max_size_bytes : cache_settings.ttl_cache_max_size;
 
     // Per-table cache is always TTL-based
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(cache_settings);
     auto cache = std::make_shared<DiskCacheTTL>(
         table_name, UUIDHelpers::UUIDToString(table_uuid), volume, throttler, cache_settings, strategy, ttl_minutes, effective_max_size);
 
-    if (effective_max_size > 0)
-    {
-        LOG_INFO(log, "Created per-table TTL cache for {} (UUID: {}, TTL: {} minutes, max_size: {}GB, policy: {})",
-            table_name, UUIDHelpers::UUIDToString(table_uuid), ttl_minutes, effective_max_size / (1024*1024*1024), cache_settings.ttl_disk_policy);
-    }
-    else
-    {
-        LOG_INFO(log, "Created per-table TTL cache for {} (UUID: {}, TTL: {} minutes, max_size: unlimited, policy: {})",
-            table_name, UUIDHelpers::UUIDToString(table_uuid), ttl_minutes, cache_settings.ttl_disk_policy);
-    }
+    LOG_INFO(log, "Created per-table TTL cache for {} (UUID: {}, TTL: {} minutes, max_size: {}GB, policy: {})",
+        table_name, UUIDHelpers::UUIDToString(table_uuid), ttl_minutes, effective_max_size / (1024*1024*1024), cache_settings.ttl_disk_policy);
 
     if (auto catalog = context.getCnchCatalog())
     {

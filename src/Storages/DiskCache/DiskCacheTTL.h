@@ -143,8 +143,6 @@ public:
         // Async size-based eviction stats
         size_t async_eviction_triggered{0};
         size_t async_eviction_skipped_rate_limit{0};
-        size_t async_eviction_triggered_global{0};
-        size_t async_eviction_skipped_rate_limit_global{0};
 
         // Write source breakdown (preload vs query-triggered vs restored from FDB on startup)
         size_t cached_from_preload{0};
@@ -185,8 +183,6 @@ public:
         // Async size-based eviction stats
         std::atomic<size_t> async_eviction_triggered{0};
         std::atomic<size_t> async_eviction_skipped_rate_limit{0};
-        std::atomic<size_t> async_eviction_triggered_global{0};
-        std::atomic<size_t> async_eviction_skipped_rate_limit_global{0};
 
         // Write source breakdown (preload vs query-triggered vs restored from FDB on startup)
         std::atomic<size_t> cached_from_preload{0};
@@ -233,7 +229,7 @@ private:
     /// Evict expired segments
     void evictExpired();
 
-    /// Evict oldest partitions until enough space for new segment
+    /// Evict oldest partitions until enough space is freed.
     void evictOldestPartitionsUntilSpace(size_t needed_bytes);
 
     /// Update partition-level stats

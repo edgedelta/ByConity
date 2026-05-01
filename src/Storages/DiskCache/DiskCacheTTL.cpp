@@ -358,6 +358,9 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
         return;
     }
 
+    if (weight_hint == 0)
+        return;
+
     // Use provided max_time if available, else parse from partition_id
     time_t part_ts = (max_time > 0) ? max_time : parsePartitionTimestamp(seg_name);
     if (!shouldCache(part_ts))
@@ -440,41 +443,25 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
         if (fdb_index)
             fdb_index->onSet(key, seg_name, weight, part_ts);
 
-        // Check both global and local thresholds (both at 90%).
-        // Done after updatePartitionStats so the just-added partition is visible
-        // to evictOldestPartitionsUntilSpace when it fires.
-        auto & factory = DiskCacheFactory::instance();
-        size_t global_usage = factory.getGlobalTTLUsage();
-        size_t global_limit = factory.getGlobalTTLLimit();
-
-        bool global_threshold_hit = (global_limit > 0 && global_usage > global_limit * 0.90);
-        bool local_threshold_hit = (max_size_bytes > 0 && total_size.load() > max_size_bytes * 0.90);
-
-        // Async size-based eviction: if either threshold hit, schedule background cleanup
-        if (global_threshold_hit || local_threshold_hit)
+        // Async size-based eviction once the hard cap is exceeded.
+        // max_size_bytes is always set (factory falls back to global limit when no per-table limit
+        // is configured), so one check suffices. Done after updatePartitionStats so the
+        // just-added partition is visible to evictOldestPartitionsUntilSpace.
+        if (max_size_bytes > 0 && total_size.load() > max_size_bytes)
         {
             time_t now = time(nullptr);
             time_t last_trigger = last_size_eviction_trigger.load();
 
-            // Rate limit: at most once per minute
-            if (now - last_trigger > 60)
+            // Rate limit: at most once per 10 seconds
+            if (now - last_trigger > 10)
             {
                 if (last_size_eviction_trigger.compare_exchange_strong(last_trigger, now))
                 {
-                    size_t target_free = max_size_bytes * 0.10;  // Free 10%
-
-                    if (global_threshold_hit)
-                    {
-                        cache_stats.async_eviction_triggered_global++;
-                        LOG_DEBUG(log, "Global cache at {}%, scheduling async eviction for table {}",
-                                 (global_usage * 100 / global_limit), table_uuid);
-                    }
-                    else
-                    {
-                        cache_stats.async_eviction_triggered++;
-                        LOG_DEBUG(log, "Table cache {}% full, scheduling async eviction to free {} bytes",
-                                 (total_size.load() * 100 / max_size_bytes), target_free);
-                    }
+                    size_t excess = total_size.load() - max_size_bytes;
+                    size_t target_free = excess + max_size_bytes * 0.10;
+                    cache_stats.async_eviction_triggered++;
+                    LOG_DEBUG(log, "Table cache {}% full, scheduling async eviction to free {} bytes",
+                             (total_size.load() * 100 / max_size_bytes), target_free);
 
                     auto & thread_pool = IDiskCache::getEvictPool();
                     thread_pool.scheduleOrThrow([this, target_free] {
@@ -487,10 +474,7 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
             }
             else
             {
-                if (global_threshold_hit)
-                    cache_stats.async_eviction_skipped_rate_limit_global++;
-                else
-                    cache_stats.async_eviction_skipped_rate_limit++;
+                cache_stats.async_eviction_skipped_rate_limit++;
             }
         }
     }
@@ -698,14 +682,11 @@ void DiskCacheTTL::evictExpired()
 
 void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
 {
-    // Check if eviction needed
-    if (max_size_bytes == 0 || total_size.load() + needed_bytes <= max_size_bytes)
-        return;
+    size_t cur = total_size.load();
+    size_t target_size = cur > needed_bytes ? cur - needed_bytes : 0;
 
-    size_t target_size = max_size_bytes > needed_bytes ? max_size_bytes - needed_bytes : 0;
-
-    LOG_DEBUG(log, "Size limit reached: current={}, needed={}, max={}, target={}",
-              total_size.load(), needed_bytes, max_size_bytes, target_size);
+    LOG_DEBUG(log, "Size eviction: current={}, needed={}, target={}",
+              cur, needed_bytes, target_size);
 
     // 1. Sort partitions by timestamp (oldest first) - only sort 10-100 partitions
     std::vector<std::pair<time_t, String>> sorted_partitions;
@@ -862,6 +843,21 @@ void DiskCacheTTL::load()
     }
 
     LOG_INFO(log, "TTL disk cache load complete. Total: {} segments, {} bytes", total_entries.load(), total_size.load());
+
+    // Post-scan eviction: trigger synchronously now that partition_stats are fully populated.
+    // This handles the deadlock where a disk that was overfull before restart has all subsequent
+    // set() calls fail at volume->reserve() before reaching the eviction check in the write path,
+    // leaving the cache stuck full with no way to self-recover via normal writes.
+    // max_size_bytes is always set (factory falls back to global limit), so one check suffices.
+    // Use hard cap (not 90%) — max_size_bytes already encodes the configured percent of disk.
+    if (max_size_bytes > 0 && total_size.load() > max_size_bytes)
+    {
+        size_t excess = total_size.load() - max_size_bytes;
+        size_t target_free = excess + max_size_bytes * 0.10;
+        LOG_INFO(log, "Post-scan eviction triggered: total_size={}, max={}, freeing {} bytes",
+                 total_size.load(), max_size_bytes, target_free);
+        evictOldestPartitionsUntilSpace(target_free);
+    }
 }
 
 size_t DiskCacheTTL::drop(const String & part_base_path)
@@ -979,6 +975,14 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
 
     // Skip temp files
     if (endsWith(filename, DISK_CACHE_TEMP_FILE_SUFFIX))
+    {
+        disk->removeFileIfExists(file_path);
+        return;
+    }
+
+    // Skip and clean up 0-byte files — they indicate an interrupted or empty write
+    // and would cause false cache HITs returning empty content.
+    if (file_size == 0)
     {
         disk->removeFileIfExists(file_path);
         return;
@@ -1107,8 +1111,6 @@ DiskCacheTTL::TTLCacheStats DiskCacheTTL::getStats() const
     stats.last_eviction_run = cache_stats.last_eviction_run.load();
     stats.async_eviction_triggered = cache_stats.async_eviction_triggered.load();
     stats.async_eviction_skipped_rate_limit = cache_stats.async_eviction_skipped_rate_limit.load();
-    stats.async_eviction_triggered_global = cache_stats.async_eviction_triggered_global.load();
-    stats.async_eviction_skipped_rate_limit_global = cache_stats.async_eviction_skipped_rate_limit_global.load();
     stats.cached_from_preload = cache_stats.cached_from_preload.load();
     stats.cached_from_query = cache_stats.cached_from_query.load();
     stats.cached_bytes_preload = cache_stats.cached_bytes_preload.load();

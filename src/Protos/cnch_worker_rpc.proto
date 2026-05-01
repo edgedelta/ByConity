@@ -192,10 +192,8 @@ message TTLCacheTableStats
   optional uint64 last_eviction_run = 5;
   optional uint64 evicted_expired = 6;
   optional uint64 evicted_size_limit = 7;
-  optional uint64 async_triggered_local = 8;
-  optional uint64 async_skipped_rate_limit_local = 9;
-  optional uint64 async_triggered_global = 10;
-  optional uint64 async_skipped_rate_limit_global = 11;
+  optional uint64 async_triggered_evicted = 8;
+  optional uint64 async_skipped_rate_limit_evicted = 9;
   optional uint64 rejected_non_time_partition = 12;
   optional uint64 rejected_too_old = 13;
   optional uint64 count_preload = 14;

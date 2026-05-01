@@ -630,10 +630,7 @@ void ServerPrometheusMetricsWriter::writeTTLCacheMetrics(WriteBuffer & wb)
         emit("evictions_total", COUNTER_TYPE, "Segments evicted from TTL cache",              base_exp,  s.evicted_expired);
         emit("evictions_total", COUNTER_TYPE, "",                                             base_size, s.evicted_size_limit);
 
-        auto base_local  = base; base_local.insert({"scope",  "local"});
-        auto base_global = base; base_global.insert({"scope", "global"});
-        emit("async_evictions_triggered_total", COUNTER_TYPE, "Async eviction trigger count", base_local,  s.async_eviction_triggered);
-        emit("async_evictions_triggered_total", COUNTER_TYPE, "",                             base_global, s.async_eviction_triggered_global);
+        emit("async_evictions_triggered_total", COUNTER_TYPE, "Async eviction trigger count", base, s.async_eviction_triggered);
 
         auto base_old    = base; base_old.insert({"reason",    "too_old"});
         auto base_ntime  = base; base_ntime.insert({"reason",  "non_time_partition"});
