@@ -76,8 +76,6 @@ static void fillRowFromProto(MutableColumns & res_columns, const String & worker
         eviction_map["size_limit"] = t.evicted_size_limit();
         eviction_map["async_triggered_evicted"] = t.async_triggered_evicted();
         eviction_map["async_skipped_rate_limit_evicted"] = t.async_skipped_rate_limit_evicted();
-        eviction_map["async_triggered_global"] = t.async_triggered_global();
-        eviction_map["async_skipped_rate_limit_global"] = t.async_skipped_rate_limit_global();
         dumpStatsToMapColumn(eviction_map, res_columns[col_idx++].get());
     }
 
