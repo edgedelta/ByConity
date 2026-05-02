@@ -130,16 +130,28 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
     size_t max_size_bytes)
 {
     Poco::Logger * log = &Poco::Logger::get("DiskCacheFactory");
+    DiskCacheSettings cache_settings;
+    {
+        auto it = caches.find(DiskCacheType::MergeTree);
+        if (it != caches.end() && it->second)
+            cache_settings = it->second->getSettings();
+    }
+
+    // Resolve effective limit before any comparison: 0 means "use global limit".
+    // Multiple tables should each have an explicit per-table limit; the global limit
+    // is the single-table default.
+    size_t effective_max_size = max_size_bytes > 0 ? max_size_bytes : cache_settings.ttl_cache_max_size;
 
     // Check registry first (for worker reuse).
-    // If settings changed (ttl_minutes or max_size_bytes), evict the stale entry and fall through to recreate.
+    // Compare against effective_max_size so callers passing 0 (no per-table override)
+    // don't spuriously trigger recreation of a cache that was already created with the global limit.
     {
         std::lock_guard<std::mutex> lock(ttl_cache_registry_mutex);
         auto reg_it = per_table_ttl_caches.find(table_uuid);
         if (reg_it != per_table_ttl_caches.end())
         {
             auto existing = static_pointer_cast<DiskCacheTTL>(reg_it->second);
-            if (existing->getTTLMinutes() == ttl_minutes && existing->getMaxSizeBytes() == max_size_bytes)
+            if (existing->getTTLMinutes() == ttl_minutes && existing->getMaxSizeBytes() == effective_max_size)
             {
                 LOG_TRACE(log, "Reusing existing TTL cache for {} (UUID: {})", table_name, UUIDHelpers::UUIDToString(table_uuid));
                 return reg_it->second;
@@ -147,27 +159,14 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
             LOG_INFO(log, "TTL cache settings changed for {} (UUID: {}), recreating (ttl: {}->{}min, max_size: {}->{}bytes)",
                 table_name, UUIDHelpers::UUIDToString(table_uuid),
                 existing->getTTLMinutes(), ttl_minutes,
-                existing->getMaxSizeBytes(), max_size_bytes);
+                existing->getMaxSizeBytes(), effective_max_size);
             per_table_ttl_caches.erase(reg_it);
         }
     }
 
-    // Get global cache settings as base
-    DiskCacheSettings cache_settings;
-    auto it = caches.find(DiskCacheType::MergeTree);
-    if (it != caches.end() && it->second)
-    {
-        cache_settings = it->second->getSettings();
-    }
-
-    // Get volume from ttl_disk_policy 
+    // Get volume from ttl_disk_policy
     // defaults to disk_policy if not set
     VolumePtr volume = context.getStoragePolicy(cache_settings.ttl_disk_policy)->getVolumeByName("local", true);
-
-    // Per-table size limit: use explicit setting, or fall back to global limit.
-    // Multiple tables should each have an explicit per-table limit; the global limit
-    // is the single-table default.
-    size_t effective_max_size = max_size_bytes > 0 ? max_size_bytes : cache_settings.ttl_cache_max_size;
 
     // Per-table cache is always TTL-based
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(cache_settings);
