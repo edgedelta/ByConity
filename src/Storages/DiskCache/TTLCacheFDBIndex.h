@@ -85,9 +85,9 @@ private:
     String makeRevPartPrefix(const String & partition_id, UInt64 hash_high) const;
 
     std::shared_ptr<Catalog::IMetaStore> metastore;
-    String key_prefix;      // escapeString(ns) + "_DCI_" + escapeString(worker_id) + "_" + table_uuid
-    String rev_key_prefix;  // escapeString(ns) + "_DCIREV_" + table_uuid
-    String own_endpoint;    // this worker's RPC address (host:port), used to skip self in findPeerOwner
+    String key_prefix;       // escapeString(ns) + "_DCI_" + escapeString(worker_id) + "_" + table_uuid
+    String rev_key_prefix;   // escapeString(ns) + "_DCIREV_" + table_uuid
+    String own_worker_id;    // stable worker identity (WORKER_ID env), stored in DCIREV_ values and used to skip self
 
     std::mutex mu;
     std::deque<PendingOp> queue;

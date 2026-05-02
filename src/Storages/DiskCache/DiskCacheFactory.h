@@ -166,6 +166,10 @@ public:
     /// Used to flush the last partial segment's stats from live read buffers.
     void registerFlushCallback(const String & query_id, std::function<void()> callback);
 
+    /// Resolve a stable worker_id (e.g. byconity-vw-vw-default-0) to its current RPC
+    /// host:port by querying the Resource Manager. Result cached for 30 seconds.
+    std::optional<String> resolveWorkerEndpoint(const String & worker_id);
+
 private:
     void addNewCache(Context & context, const std::string & cache_name, bool create_default);
     std::unordered_map<DiskCacheType, IDiskCachePtr> caches;
@@ -182,5 +186,12 @@ private:
     /// Per-query flush callbacks fired before consume (query_id → callbacks list)
     std::unordered_map<String, std::vector<std::function<void()>>> query_flush_callbacks_map;
     mutable std::shared_mutex query_cache_stats_mutex;
+
+    /// Worker endpoint resolution: worker_id → host:port, refreshed every 30s from RM.
+    std::function<std::unordered_map<String, String>()> worker_endpoint_resolver;
+    mutable std::mutex worker_endpoint_cache_mutex;
+    std::unordered_map<String, String> worker_endpoint_cache;
+    time_t worker_endpoint_cache_refresh_time{0};
+    static constexpr int WORKER_ENDPOINT_CACHE_TTL_SEC = 30;
 };
 }

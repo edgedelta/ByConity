@@ -20,7 +20,7 @@ TTLCacheFDBIndex::TTLCacheFDBIndex(
     : metastore(std::move(metastore_))
     , key_prefix(Catalog::escapeString(name_space) + "_DCI_" + Catalog::escapeString(worker_id) + "_" + table_uuid)
     , rev_key_prefix(Catalog::escapeString(name_space) + "_DCIREV_" + table_uuid)
-    , own_endpoint(own_endpoint_)
+    , own_worker_id(own_endpoint_)
     , log(&Poco::Logger::get("TTLCacheFDBIndex"))
 {
     bg = std::thread([this] { bgLoop(); });
@@ -98,7 +98,7 @@ void TTLCacheFDBIndex::onSet(UInt128 key, const String & seg_name, size_t size, 
     PendingOp rev;
     rev.type  = PendingOp::Type::Set;
     rev.key   = makeRevKey(key, partition_id);
-    rev.value = own_endpoint;
+    rev.value = own_worker_id;
 
     {
         std::lock_guard lk(mu);
@@ -201,10 +201,11 @@ std::optional<String> TTLCacheFDBIndex::findPeerOwner(UInt128 key, const String 
         return std::nullopt;
     }
 
-    if (endpoint.empty() || endpoint == own_endpoint)
+    // endpoint now holds the peer's worker_id; skip if it's ourselves
+    if (endpoint.empty() || endpoint == own_worker_id)
         return std::nullopt;
 
-    return endpoint;
+    return endpoint;  // caller resolves worker_id → host:port via DiskCacheFactory
 }
 
 std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(

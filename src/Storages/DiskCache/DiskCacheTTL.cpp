@@ -151,16 +151,6 @@ namespace
                / hex_high.substr(0, 3) / hex_high / hex_low;
     }
 
-    UInt64 unhex16(const char * data)
-    {
-        UInt64 res = 0;
-        for (size_t i = 0; i < sizeof(UInt64) * 2; ++i, ++data)
-        {
-            res <<= 4;
-            res += static_cast<UInt64>(unhex(*data));
-        }
-        return res;
-    }
 
     bool isHexKey(const String & hex_key)
     {
@@ -253,8 +243,8 @@ std::optional<DiskCacheTTL::KeyType> DiskCacheTTL::unhexKey(const String & hex_k
     if (!isHexKey(hex_key))
         return {};
 
-    auto low = unhex16(hex_key.data());
-    auto high = unhex16(hex_key.data() + HEX_KEY_LEN / 2);
+    auto low = unhexUInt<UInt64>(hex_key.data());
+    auto high = unhexUInt<UInt64>(hex_key.data() + HEX_KEY_LEN / 2);
 
     return UInt128{high, low};
 }
@@ -991,13 +981,13 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
     // buildEvictionPath writes the UInt128 key as two 16-char hex halves:
     //   hex_low  = hexKey(key)[0..15]  → filename
     //   hex_high = hexKey(key)[16..31] → parent directory name
-    // Parse each half with unhex16 and reconstruct the key.
+    // Parse each half as a hex UInt64 and reconstruct the key.
     if (!isHexHalf(filename))
     {
         LOG_WARNING(log, "Invalid cache file (hash_low): {}", file_path.string());
         return;
     }
-    UInt64 low = unhex16(filename.data());
+    UInt64 low = unhexUInt<UInt64>(filename.data());
 
     // New structure: data/uuid/partition/3char/hash_high/hash_low
     // Extract partition from path hierarchy
@@ -1009,7 +999,7 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
         LOG_WARNING(log, "Invalid cache directory (hash_high): {}", file_path.string());
         return;
     }
-    UInt64 high = unhex16(hash_high_dir.data());
+    UInt64 high = unhexUInt<UInt64>(hash_high_dir.data());
 
     // Build full key matching UInt128{high, low} as returned by unhexKey
     UInt128 key = {high, low};
@@ -1166,7 +1156,11 @@ std::optional<String> DiskCacheTTL::findPeerOwner(const String & seg_name)
     String part_name = extractPartName(seg_name);
     String partition_id = extractPartitionId(part_name);
 
-    return fdb_index->findPeerOwner(key, partition_id);
+    auto maybe_worker_id = fdb_index->findPeerOwner(key, partition_id);
+    if (!maybe_worker_id)
+        return std::nullopt;
+
+    return DiskCacheFactory::instance().resolveWorkerEndpoint(*maybe_worker_id);
 }
 
 void DiskCacheTTL::updatePartitionStats(const String & partition_id, time_t partition_ts, bool hit, size_t bytes, bool is_reconcile)
