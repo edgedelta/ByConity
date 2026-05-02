@@ -216,7 +216,7 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
     std::function<bool(time_t)> should_cache,
     std::function<void(time_t, size_t)> on_restore)
 {
-    std::vector<String> stale_keys;
+    std::vector<String> stale_fwd_keys;
     std::vector<std::pair<UInt128, std::shared_ptr<DiskCacheTTLMeta>>> to_insert;
     size_t restored_bytes = 0;
 
@@ -234,14 +234,14 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
 
         if (!decodeValue(it->value(), seg_name, size, part_ts))
         {
-            stale_keys.push_back(it->key());
+            stale_fwd_keys.push_back(it->key());
             continue;
         }
 
         // Re-apply TTL check — don't restore already-expired entries
         if (!should_cache(part_ts))
         {
-            stale_keys.push_back(it->key());
+            stale_fwd_keys.push_back(it->key());
             continue;
         }
 
@@ -261,7 +261,7 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
 
         if (!found_disk)
         {
-            stale_keys.push_back(it->key());
+            stale_fwd_keys.push_back(it->key());
             continue;
         }
 
@@ -284,22 +284,27 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
         DiskCacheFactory::instance().addGlobalTTLUsage(restored_bytes);
     }
 
-    // Bulk-delete stale FDB entries
-    if (!stale_keys.empty())
+    // Bulk-delete stale forward + reverse FDB entries.
+    // Rev key shares the suffix after key_prefix, so derive it by swapping the prefix.
+    if (!stale_fwd_keys.empty())
     {
         try
         {
             Catalog::BatchCommitRequest batch;
-            for (const auto & k : stale_keys)
-                batch.AddDelete(Catalog::SingleDeleteRequest(k));
+            for (const auto & fwd : stale_fwd_keys)
+            {
+                batch.AddDelete(Catalog::SingleDeleteRequest(fwd));
+                String rev = rev_key_prefix + fwd.substr(key_prefix.size());
+                batch.AddDelete(Catalog::SingleDeleteRequest(rev));
+            }
             Catalog::BatchCommitResponse resp;
             metastore->batchWrite(batch, resp);
-            LOG_DEBUG(log, "TTLCacheFDBIndex reconcile: removed {} stale entries", stale_keys.size());
+            LOG_DEBUG(log, "TTLCacheFDBIndex reconcile: removed {} stale fwd+rev pairs", stale_fwd_keys.size());
         }
         catch (...) { tryLogCurrentException(log, "TTLCacheFDBIndex: stale cleanup failed"); }
     }
 
-    LOG_INFO(log, "TTLCacheFDBIndex reconcile complete: {} entries restored, {} stale removed", to_insert.size(), stale_keys.size());
+    LOG_INFO(log, "TTLCacheFDBIndex reconcile complete: {} entries restored, {} stale removed", to_insert.size(), stale_fwd_keys.size());
 
     if (to_insert.empty())
         return std::nullopt;
