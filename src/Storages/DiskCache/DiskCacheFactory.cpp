@@ -31,6 +31,7 @@
 #include <Disks/SingleDiskVolume.h>
 #include <Storages/DiskCache/IDiskCache.h>
 #include <ResourceManagement/CommonData.h>
+#include <ResourceManagement/ResourceManagerClient.h>
 
 namespace DB
 {
