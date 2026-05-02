@@ -706,7 +706,7 @@ void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
 
     for (const auto & [partition_ts, partition_id] : sorted_partitions)
     {
-        if (total_size.load() - evicted_bytes <= target_size)
+        if (total_size.load() <= target_size)
             break;  // Early exit - freed enough space
 
         // Collect all parts in this partition, grouped by part
@@ -729,7 +729,7 @@ void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
         // Evict parts one by one from this partition until enough space
         for (auto & [part_hash_high, segments] : parts_in_partition)
         {
-            if (total_size.load() - evicted_bytes <= target_size)
+            if (total_size.load() <= target_size)
                 break;
 
             size_t part_bytes = 0;
@@ -1052,6 +1052,8 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
     );
     disk_cache.total_entries++;
     disk_cache.total_size += file_size;
+    disk_cache.cache_stats.total_entries++;
+    disk_cache.cache_stats.total_bytes += file_size;
 
     // Add to global TTL usage
     DiskCacheFactory::instance().addGlobalTTLUsage(file_size);

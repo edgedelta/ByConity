@@ -149,7 +149,9 @@ void SubstituteSelectItemToAnyFunction::visit(ASTSelectQuery * select_query)
     // process having and order by
     if (!processed_identifier_qualified_names.empty())
     {
-        SubstituteIdentifierToAnyFunction::Data expression_data{{}, processed_identifier_qualified_names, {}, context, false, false};
+        QualifiedNames empty_qualified_names;
+        NameSet empty_aliases;
+        SubstituteIdentifierToAnyFunction::Data expression_data{empty_qualified_names, processed_identifier_qualified_names, empty_aliases, context, false, false};
         SubstituteIdentifierToAnyFunction expression_visitor(expression_data);
         if (select_query->having())
             expression_visitor.visit(select_query->refHaving());

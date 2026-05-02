@@ -1909,6 +1909,9 @@ PartCacheManager::getLastModificationTimeHints(const ConstStoragePtr & storage, 
         }
 
         const auto * meta_storage = dynamic_cast<const StorageCnchMergeTree *>(storage.get());
+        if (!meta_storage)
+            throw Exception("Table is not a Meta Based MergeTree", ErrorCodes::UNKNOWN_TABLE);
+
         auto meta_partitions = table_meta->getPartitionList();
 
         // Skip if it passes TTL
@@ -1922,8 +1925,6 @@ PartCacheManager::getLastModificationTimeHints(const ConstStoragePtr & storage, 
                 continue;
 
             Protos::LastModificationTimeHint hint = Protos::LastModificationTimeHint{};
-            if (!meta_storage)
-                throw Exception("Table is not a Meta Based MergeTree", ErrorCodes::UNKNOWN_TABLE);
 
 
             String partition = partition_info->getPartitionValue(*meta_storage);

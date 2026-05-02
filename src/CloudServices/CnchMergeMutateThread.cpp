@@ -221,15 +221,21 @@ FutureManipulationTask::~FutureManipulationTask()
 /// Add source parts (include invisible parts) to merging_mutating_parts.
 FutureManipulationTask & FutureManipulationTask::tagSourceParts(ServerDataPartsVector && parts_)
 {
-    auto check_and_add = [&](const auto & part_name) {
-        if (parent.currently_merging_mutating_parts.count(part_name))
-            throw Exception("Part '" + part_name + "' was already in other Task, cancel merge.", ErrorCodes::ABORTED);
-        parent.currently_merging_mutating_parts.emplace(part_name);
-    };
-
     if (!record->try_execute)
     {
         std::lock_guard lock(parent.currently_merging_mutating_parts_mutex);
+
+        std::vector<String> added;
+        auto check_and_add = [&](const auto & part_name) {
+            if (parent.currently_merging_mutating_parts.count(part_name))
+            {
+                for (const auto & n : added)
+                    parent.currently_merging_mutating_parts.erase(n);
+                throw Exception("Part '" + part_name + "' was already in other Task, cancel merge.", ErrorCodes::ABORTED);
+            }
+            parent.currently_merging_mutating_parts.emplace(part_name);
+            added.push_back(part_name);
+        };
 
         for (const auto & p : parts_)
         {
