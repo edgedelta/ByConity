@@ -50,6 +50,8 @@ public:
         clockid_t clock_type_ = CLOCK_MONOTONIC_COARSE,
         String stream_extension_ = DATA_FILE_EXTENSION);
 
+    ~MergedReadBufferWithSegmentCache();
+
     virtual size_t readBig(char* to, size_t n) override;
     virtual bool nextImpl() override;
 
@@ -177,16 +179,11 @@ private:
 
     off_t read_until_position = 0;
 
-    // Per-stream cache stats flushed to DiskCacheFactory registry at segment boundaries and on eof.
-    // Only populated when segment_cache is a DiskCacheTTL instance
-    // True when segment_cache is DiskCacheTTL AND query requested segment profile reporting.
-    // Captured at construction (query thread); safe to read on any thread.
+    // Per-stream cache stats flushed to DiskCacheFactory registry at segment boundaries and in destructor.
+    // Only populated when segment_cache is a DiskCacheTTL instance AND query requested segment profiles.
     bool collect_cache_stats{false};
     String cached_query_id;
     QueryCacheStatsSnapshot local_cache_stats;
-    // Lifetime token: when this object is destroyed, alive_token drops to zero
-    // and any registered flush callback becomes a no-op.
-    std::shared_ptr<std::monostate> alive_token;
     uint64_t active_segment_start_ms{0};  // wall-clock ms when current segment read started
     bool active_is_cache{false};          // true = cache_buffer active, false = source_buffer
 

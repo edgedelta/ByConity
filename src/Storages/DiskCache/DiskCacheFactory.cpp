@@ -350,21 +350,6 @@ void DiskCacheFactory::mergeQueryCacheStats(const String & query_id, const Query
 
 std::optional<QueryCacheStatsSnapshot> DiskCacheFactory::consumeQueryCacheStats(const String & query_id)
 {
-    // Grab and clear callbacks outside the lock — they call mergeQueryCacheStats
-    // which also locks, so we must not hold the lock while firing them.
-    std::vector<std::function<void()>> callbacks;
-    {
-        std::unique_lock wl(query_cache_stats_mutex);
-        auto it = query_flush_callbacks_map.find(query_id);
-        if (it != query_flush_callbacks_map.end())
-        {
-            callbacks = std::move(it->second);
-            query_flush_callbacks_map.erase(it);
-        }
-    }
-    for (auto & cb : callbacks)
-        cb();
-
     std::unique_lock wl(query_cache_stats_mutex);
     auto it = query_cache_stats_map.find(query_id);
     if (it == query_cache_stats_map.end())
@@ -394,11 +379,6 @@ std::optional<QueryCacheStatsSnapshot> DiskCacheFactory::consumeQueryCacheStats(
     return snap;
 }
 
-void DiskCacheFactory::registerFlushCallback(const String & query_id, std::function<void()> callback)
-{
-    std::unique_lock wl(query_cache_stats_mutex);
-    query_flush_callbacks_map[query_id].push_back(std::move(callback));
-}
 
 std::optional<String> DiskCacheFactory::resolveWorkerEndpoint(const String & worker_id)
 {

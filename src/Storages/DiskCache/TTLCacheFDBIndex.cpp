@@ -234,6 +234,7 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
 
         if (!decodeValue(it->value(), seg_name, size, part_ts))
         {
+            LOG_WARNING(log, "TTLCacheFDBIndex reconcile: decode failed for key={} value={}", it->key(), it->value());
             stale_fwd_keys.push_back(it->key());
             continue;
         }
@@ -241,6 +242,7 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
         // Re-apply TTL check — don't restore already-expired entries
         if (!should_cache(part_ts))
         {
+            LOG_DEBUG(log, "TTLCacheFDBIndex reconcile: TTL expired for seg={} part_ts={}", seg_name, part_ts);
             stale_fwd_keys.push_back(it->key());
             continue;
         }
@@ -261,6 +263,7 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
 
         if (!found_disk)
         {
+            LOG_DEBUG(log, "TTLCacheFDBIndex reconcile: file missing on disk for seg={} expected_path={}", seg_name, rel_path.string());
             stale_fwd_keys.push_back(it->key());
             continue;
         }

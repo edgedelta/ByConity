@@ -166,18 +166,13 @@ MergedReadBufferWithSegmentCache::MergedReadBufferWithSegmentCache(
     }
     LOG_DEBUG(logger, "MergedReadBufferWithSegmentCache: part={} stream={} query_id={} is_ttl={} collect_stats={}",
         part_name_, stream_name_, cached_query_id, is_ttl_cache, collect_cache_stats);
-    if (collect_cache_stats)
-    {
-        alive_token = std::make_shared<std::monostate>();
-        std::weak_ptr<std::monostate> weak = alive_token;
-        DiskCacheFactory::instance().registerFlushCallback(
-            cached_query_id,
-            [this, weak = std::move(weak)]() {
-                if (!weak.expired())
-                    flushLocalCacheStats();
-            });
-    }
     initialize();
+}
+
+MergedReadBufferWithSegmentCache::~MergedReadBufferWithSegmentCache()
+{
+    try { flushLocalCacheStats(); }
+    catch (...) { tryLogCurrentException(logger, "flushLocalCacheStats in destructor"); }
 }
 
 void MergedReadBufferWithSegmentCache::flushLocalCacheStats()
