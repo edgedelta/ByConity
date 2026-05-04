@@ -43,15 +43,16 @@ public:
         Deleting,
     };
 
-    DiskCacheTTLMeta(State state_, const DiskPtr & disk_, size_t size_, time_t cached_at_, time_t max_ts_)
-        : state(state_), disk(disk_), size(size_), cached_at(cached_at_), max_timestamp(max_ts_)
+    DiskCacheTTLMeta(State state_, const DiskPtr & disk_, size_t size_, time_t cached_at_, time_t max_ts_, String rel_path_ = {})
+        : state(state_), disk(disk_), size(size_), cached_at(cached_at_), max_timestamp(max_ts_), rel_path(std::move(rel_path_))
     {}
 
     State state;
     DiskPtr disk;
     size_t size;
     time_t cached_at;
-    time_t max_timestamp;  // Max timestamp from part data (for fine-grained TTL)
+    time_t max_timestamp;
+    String rel_path;  // exact on-disk relative path; avoids reconstructing prefix (data/ vs meta/) at eviction time
 };
 
 struct DiskCacheTTLWeightFunction

@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <thread>
 #include <atomic>
+#include <map>
 #include <fmt/core.h>
 #include <gtest/gtest.h>
 #include <Disks/DiskLocal.h>
@@ -24,6 +25,8 @@
 #include <Storages/DiskCache/DiskCacheTTL.h>
 #include <Storages/DiskCache/DiskCacheSettings.h>
 #include <Storages/DiskCache/DiskCacheSimpleStrategy.h>
+#include <Storages/DiskCache/TTLCacheFDBIndex.h>
+#include <Catalog/IMetastore.h>
 #include <Common/tests/gtest_global_context.h>
 #include <Common/tests/gtest_utils.h>
 #include <IO/ReadBufferFromString.h>
@@ -1088,6 +1091,241 @@ TEST_F(DiskCacheTTLTest, SizeLimitPrecedence)
         auto stats = cache.getStats();
         ASSERT_EQ(stats.async_eviction_triggered, 0);
         ASSERT_EQ(stats.total_entries, 5);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+static String makeSegKey(const String & uuid, const String & part, const String & col, const String & ext)
+{
+    return fmt::format("{}/{}/{}#0{}", uuid, part, col, ext);
+}
+
+static String todayPart()
+{
+    time_t now = time(nullptr);
+    struct tm t;
+    gmtime_r(&now, &t);
+    return fmt::format("{:04d}{:02d}{:02d}_1_100_2", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+}
+
+static String expiredPart()
+{
+    time_t ts = time(nullptr) - 2 * 24 * 3600;
+    struct tm t;
+    gmtime_r(&ts, &t);
+    return fmt::format("{:04d}{:02d}{:02d}_1_100_2", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+}
+
+// ---------------------------------------------------------------------------
+// In-memory IMetaStore mock
+// ---------------------------------------------------------------------------
+
+class MockMetaStore : public Catalog::IMetaStore
+{
+public:
+    struct MockIterator : public Iterator
+    {
+        std::vector<std::pair<String, String>> entries;
+        int pos = -1;
+        bool next() override { return ++pos < static_cast<int>(entries.size()); }
+        String key()   override { return entries[pos].first; }
+        String value() override { return entries[pos].second; }
+    };
+
+    void put(const String & key, const String & value, bool = false) override { store[key] = value; }
+    std::pair<bool, String> putCAS(const String &, const String &, const String &, bool) override { return {false, {}}; }
+    uint64_t get(const String & key, String & value) override
+    {
+        auto it = store.find(key);
+        if (it == store.end()) return 0;
+        value = it->second;
+        return 1;
+    }
+    std::vector<std::pair<String, UInt64>> multiGet(const std::vector<String> &) override { return {}; }
+    bool batchWrite(const BatchCommitRequest &, BatchCommitResponse &) override { return true; }
+    void drop(const String & key, const UInt64 &) override { store.erase(key); }
+    void drop(const String & key, const String &)  override { store.erase(key); }
+    IteratorPtr getAll() override { return getByPrefix(""); }
+    IteratorPtr getByPrefix(const String & prefix, const size_t & = 0, uint32_t = 0, const String & = "") override
+    {
+        auto iter = std::make_shared<MockIterator>();
+        for (auto & [k, v] : store)
+            if (k.starts_with(prefix))
+                iter->entries.emplace_back(k, v);
+        return iter;
+    }
+    IteratorPtr getByRange(const String &, const String &, bool, bool) override { return std::make_shared<MockIterator>(); }
+    void clean(const String & prefix) override
+    {
+        for (auto it = store.begin(); it != store.end(); )
+            it = it->first.starts_with(prefix) ? store.erase(it) : std::next(it);
+    }
+    void close() override {}
+    uint32_t getMaxBatchSize() override { return 1000; }
+    uint32_t getMaxKVSize()    override { return 1024 * 1024; }
+
+    std::map<String, String> store;
+};
+
+// ---------------------------------------------------------------------------
+// Parameterized: set / get / evict for .bin, .mrk, .idx
+// ---------------------------------------------------------------------------
+
+struct SegCase { const char * ext; const char * expected_prefix; };
+
+class SegmentPrefixTest : public DiskCacheTTLTest,
+                          public ::testing::WithParamInterface<SegCase> {};
+
+INSTANTIATE_TEST_SUITE_P(AllTypes, SegmentPrefixTest, ::testing::Values(
+    SegCase{".bin", "data/"},
+    SegCase{".mrk", "meta/"},
+    SegCase{".idx", "meta/"}
+));
+
+TEST_P(SegmentPrefixTest, SetGoesToCorrectDir)
+{
+    auto p = GetParam();
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 64 * 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, 60, 0);
+
+    String seg = makeSegKey("aaaa-bbbb", todayPart(), "col", p.ext);
+    String data = "payload";
+    ReadBufferFromString buf(data);
+    cache.set(seg, buf, data.size(), false);
+
+    auto [disk, path] = cache.get(seg);
+    ASSERT_FALSE(path.empty()) << "segment not found after set: " << seg;
+    EXPECT_NE(path.find(p.expected_prefix), String::npos)
+        << p.ext << " should be under " << p.expected_prefix << " but path=" << path;
+    // Also verify the file actually exists at the returned path
+    ASSERT_TRUE(disk);
+    EXPECT_TRUE(disk->exists(path)) << "file missing on disk at: " << path;
+}
+
+TEST_P(SegmentPrefixTest, GetReturnsExistingFile)
+{
+    auto p = GetParam();
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 64 * 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, 60, 0);
+
+    String seg = makeSegKey("aaaa-bbbb", todayPart(), "col", p.ext);
+    String data = "payload";
+    ReadBufferFromString buf(data);
+    cache.set(seg, buf, data.size(), false);
+
+    // get() must return a path that actually contains the prefix and the file
+    auto [disk, path] = cache.get(seg);
+    ASSERT_TRUE(disk) << "no disk for " << seg;
+    EXPECT_TRUE(disk->exists(path)) << "file not on disk: " << path;
+    EXPECT_NE(path.find(p.expected_prefix), String::npos)
+        << p.ext << " get() returned wrong prefix: " << path;
+}
+
+TEST_P(SegmentPrefixTest, EvictRemovesFromDisk)
+{
+    auto p = GetParam();
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 64 * 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+    // 1-minute TTL — 2-day-old part is expired
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, 1, 0);
+
+    time_t old_ts = time(nullptr) - 2 * 24 * 3600;
+    String seg = makeSegKey("aaaa-bbbb", expiredPart(), "col", p.ext);
+    String data = "payload";
+    ReadBufferFromString buf(data);
+    cache.set(seg, buf, data.size(), false, 0, old_ts);
+
+    ASSERT_EQ(cache.getKeyCount(), 1);
+    auto [disk, path] = cache.get(seg);
+    ASSERT_TRUE(disk && disk->exists(path)) << "file should exist before eviction: " << path;
+
+    cache.evictExpired();
+
+    EXPECT_EQ(cache.getKeyCount(), 0);
+    EXPECT_FALSE(disk->exists(path))
+        << p.ext << " file still on disk after eviction — rel_path prefix bug? path=" << path;
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile: FDB entries for all three types restore with correct rel_path
+// ---------------------------------------------------------------------------
+
+TEST_F(DiskCacheTTLTest, ReconcileRestoresAllTypesWithCorrectRelPath)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 64 * 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, 60, 0);
+
+    const String uuid = "aaaa-bbbb-cccc-dddd";
+    const String part = todayPart();
+    const time_t now  = time(nullptr);
+
+    struct SegInfo { String ext; String expected_prefix; };
+    SegInfo cases[] = {{".bin", "data/"}, {".mrk", "meta/"}, {".idx", "meta/"}};
+
+    // Write all three types to disk so reconcile can verify file existence
+    std::map<String, String> seg_to_path;
+    for (auto & c : cases)
+    {
+        String seg = makeSegKey(uuid, part, "col", c.ext);
+        String data = "payload";
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false, 0, now);
+        auto [disk, path] = cache.get(seg);
+        ASSERT_FALSE(path.empty()) << "failed to cache: " << seg;
+        EXPECT_NE(path.find(c.expected_prefix), String::npos)
+            << "wrong write prefix for " << c.ext << ": " << path;
+        seg_to_path[seg] = path;
+    }
+
+    // Build mock FDB store — key_prefix = "{ns}_DCI_{worker}_{uuid}"
+    // Seed one entry per segment using encodeValue; the key just needs the prefix.
+    const String ns = "byconity";
+    const String worker = "test-worker";
+    const String key_prefix = fmt::format("{}_DCI_{}_{}", ns, worker, uuid);
+    auto mock_store = std::make_shared<MockMetaStore>();
+    int i = 0;
+    for (auto & [seg, path] : seg_to_path)
+    {
+        String fdb_key = fmt::format("{}_{:04d}", key_prefix, i++);
+        mock_store->store[fdb_key] = TTLCacheFDBIndex::encodeValue(seg, 7, now);
+    }
+
+    // Reconcile into a fresh cache_map
+    TTLCacheFDBIndex fdb_idx(mock_store, ns, worker, uuid, worker);
+    std::map<UInt128, std::shared_ptr<DiskCacheTTLMeta>> cache_map;
+    std::mutex cache_mutex;
+    auto get_rel_path = [&cache](UInt128 key, const String & seg_name) -> std::filesystem::path
+    {
+        return cache.getRelativePath(key, seg_name);
+    };
+
+    fdb_idx.reconcile(cache_map, cache_mutex, volume, get_rel_path, [](time_t) { return true; });
+
+    ASSERT_EQ(cache_map.size(), 3u) << "expected 3 entries restored";
+
+    for (auto & [seg, expected_path] : seg_to_path)
+    {
+        auto key = DiskCacheTTL::hash(seg);
+        auto it = cache_map.find(key);
+        ASSERT_NE(it, cache_map.end()) << "segment not restored: " << seg;
+        EXPECT_EQ(it->second->rel_path, expected_path)
+            << "rel_path mismatch for " << seg
+            << "\n  got:  " << it->second->rel_path
+            << "\n  want: " << expected_path;
     }
 }
 

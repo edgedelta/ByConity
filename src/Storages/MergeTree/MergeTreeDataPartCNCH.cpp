@@ -1237,14 +1237,9 @@ void MergeTreeDataPartCNCH::preload(UInt64 preload_level, UInt64 submit_ts) cons
             return;
         }
 
-        // Get cache from storage (TTL cache if enabled, otherwise global LRU)
         auto disk_cache = storage.getDiskCache();
         auto cache_strategy = disk_cache->getStrategy();
-        // Marks are small and well-served by in-memory MarkCache; always use global LRU
-        // for mark disk cache so TTL cache is never used for marks (its hash requires two
-        // slashes but mark keys only have one after part_name collapses)
-        auto global_lru = DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
-        IDiskCache * mark_disk_cache = global_lru ? global_lru->getMetaCache().get() : nullptr;
+        IDiskCache * mark_disk_cache = disk_cache->getMetaCache().get();
 
         MarkRanges all_mark_ranges{MarkRange(0, getMarksCount())};
         MarkCachePtr mark_cache_holder = storage.getContext()->getMarkCache();

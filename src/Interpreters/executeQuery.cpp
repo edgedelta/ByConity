@@ -815,6 +815,8 @@ static String buildRuntimeStatsJSON(const std::unordered_map<size_t, PlanSegment
     bool has_cache = false;
     UInt64 cache_hit_segs = 0, cache_miss_segs = 0, steal_segs = 0, s3_fallback_segs = 0;
     UInt64 cache_bytes = 0, s3_bytes = 0, cache_read_ms = 0, s3_read_ms = 0;
+    UInt64 idx_hit_segs = 0, idx_miss_segs = 0, idx_cache_bytes = 0, idx_s3_bytes = 0;
+    UInt64 idx_cache_read_ms = 0, idx_s3_read_ms = 0;
     std::map<UInt64, StepAgg> index_by_step;
 
     for (const auto & [seg_id, seg_profiles] : profiles_map)
@@ -839,6 +841,12 @@ static String buildRuntimeStatsJSON(const std::unordered_map<size_t, PlanSegment
                         s3_bytes          += obj->getValue<UInt64>("s3_bytes");
                         cache_read_ms     += obj->getValue<UInt64>("cache_read_ms");
                         s3_read_ms        += obj->getValue<UInt64>("s3_read_ms");
+                        idx_hit_segs      += obj->getValue<UInt64>("idx_hit_segs");
+                        idx_miss_segs     += obj->getValue<UInt64>("idx_miss_segs");
+                        idx_cache_bytes   += obj->getValue<UInt64>("idx_cache_bytes");
+                        idx_s3_bytes      += obj->getValue<UInt64>("idx_s3_bytes");
+                        idx_cache_read_ms += obj->getValue<UInt64>("idx_cache_read_ms");
+                        idx_s3_read_ms    += obj->getValue<UInt64>("idx_s3_read_ms");
                     }
                     catch (...) {}
                 }
@@ -902,6 +910,12 @@ static String buildRuntimeStatsJSON(const std::unordered_map<size_t, PlanSegment
         cache_obj->add("s3_bytes",         s3_bytes);
         cache_obj->add("cache_read_ms",    cache_read_ms);
         cache_obj->add("s3_read_ms",       s3_read_ms);
+        cache_obj->add("idx_hit_segs",     idx_hit_segs);
+        cache_obj->add("idx_miss_segs",    idx_miss_segs);
+        cache_obj->add("idx_cache_bytes",  idx_cache_bytes);
+        cache_obj->add("idx_s3_bytes",     idx_s3_bytes);
+        cache_obj->add("idx_cache_read_ms", idx_cache_read_ms);
+        cache_obj->add("idx_s3_read_ms",   idx_s3_read_ms);
         runtime_stats->add(RuntimeAttributeKeys::CacheStats, std::move(cache_obj));
     }
 

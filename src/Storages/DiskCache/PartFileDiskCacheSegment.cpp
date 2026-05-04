@@ -89,7 +89,10 @@ PartFileDiskCacheSegment::PartFileDiskCacheSegment(
           mrk_file_pos.file_size,
           merge_tree_reader_settings,
           1,
-          mark_disk_cache_)
+          mark_disk_cache_,
+          {},
+          data_part_->storage.getStorageUUID(),
+          data_part_->getUniquePartName())
 {
 }
 

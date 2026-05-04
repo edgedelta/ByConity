@@ -269,7 +269,7 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
         }
 
         to_insert.emplace_back(key, std::make_shared<DiskCacheTTLMeta>(
-            DiskCacheTTLMeta::State::Cached, found_disk, size, time(nullptr), part_ts));
+            DiskCacheTTLMeta::State::Cached, found_disk, size, time(nullptr), part_ts, rel_path.string()));
         restored_bytes += size;
 
         // Notify caller about restored entry so it can update partition_stats

@@ -133,25 +133,6 @@ namespace
 
     // Build the on-disk relative path for a cached segment given its key and metadata.
     // Structure: {cache_dir}/{prefix}/{uuid}/{partition}/{3char_high}/{high}/{low}
-    fs::path buildEvictionPath(
-        const DiskCacheTTL::KeyType & key,
-        const DiskCacheTTLMeta & meta,
-        const String & cache_dir,
-        const String & table_uuid,
-        IDiskCache::DataType type,
-        String & out_partition_id)  // also returns partition_id for FDB use
-    {
-        String hex_key = DiskCacheTTL::hexKey(key);
-        std::string_view view(hex_key);
-        std::string_view hex_low  = view.substr(0, HEX_KEY_LEN / 2);
-        std::string_view hex_high = view.substr(HEX_KEY_LEN / 2, HEX_KEY_LEN);
-        out_partition_id = formatPartitionId(meta.max_timestamp);
-        String prefix = type == IDiskCache::DataType::META ? META_DISK_CACHE_DIR_PREFIX : DATA_DISK_CACHE_DIR_PREFIX;
-        return fs::path(cache_dir) / prefix / table_uuid / out_partition_id
-               / hex_high.substr(0, 3) / hex_high / hex_low;
-    }
-
-
     bool isHexKey(const String & hex_key)
     {
         if (hex_key.size() != HEX_KEY_LEN)
@@ -166,7 +147,6 @@ namespace
         return true;
     }
 
-    // Validate a 16-char hex string (one half of a UInt128 key as written by buildEvictionPath).
     bool isHexHalf(const String & s)
     {
         if (s.size() != HEX_KEY_LEN / 2)
@@ -400,7 +380,7 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
         {
             std::lock_guard<std::mutex> lock(cache_mutex);
             cache_map[key] = std::make_shared<DiskCacheTTLMeta>(
-                DiskCacheTTLMeta::State::Cached, reserved_space->getDisk(), weight, time(nullptr), part_ts
+                DiskCacheTTLMeta::State::Cached, reserved_space->getDisk(), weight, time(nullptr), part_ts, getRelativePath(key, seg_name)
             );
             total_entries++;
             total_size += weight;
@@ -631,18 +611,15 @@ void DiskCacheTTL::evictExpired()
     {
         try
         {
-            String partition_id;
-            auto rel_path = buildEvictionPath(key, *meta, latest_disk_cache_dir, table_uuid, type, partition_id);
-
-            if (meta->disk)
+            if (meta->disk && !meta->rel_path.empty())
             {
-                meta->disk->removeFileIfExists(rel_path);
-                LOG_TRACE(log, "Evicted expired segment: {}", rel_path.string());
+                meta->disk->removeFileIfExists(meta->rel_path);
+                LOG_TRACE(log, "Evicted expired segment: {}", meta->rel_path);
             }
 
             UInt64 hash_high = key.items[0];
             if (fdb_index && fdb_evicted_parts.insert(hash_high).second)
-                fdb_index->evictPart(partition_id, hash_high);
+                fdb_index->evictPart(formatPartitionId(meta->max_timestamp), hash_high);
         }
         catch (...)
         {
@@ -751,10 +728,8 @@ void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
     {
         try
         {
-            String unused_partition_id;
-            auto rel_path = buildEvictionPath(key, *meta, latest_disk_cache_dir, table_uuid, type, unused_partition_id);
-            if (meta->disk)
-                meta->disk->removeFileIfExists(rel_path);
+            if (meta->disk && !meta->rel_path.empty())
+                meta->disk->removeFileIfExists(meta->rel_path);
         }
         catch (...)
         {
@@ -978,10 +953,9 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
         return;
     }
 
-    // buildEvictionPath writes the UInt128 key as two 16-char hex halves:
-    //   hex_low  = hexKey(key)[0..15]  → filename
-    //   hex_high = hexKey(key)[16..31] → parent directory name
-    // Parse each half as a hex UInt64 and reconstruct the key.
+    // Path structure: {cache_dir}/{data|meta}/{uuid}/{partition}/{3char}/{hash_high}/{hash_low}
+    // The filename is hash_low (low 64 bits of the key) and the parent dir is hash_high.
+    // Parse each half as a hex UInt64 to reconstruct the full UInt128 key.
     if (!isHexHalf(filename))
     {
         LOG_WARNING(log, "Invalid cache file (hash_low): {}", file_path.string());
@@ -1038,7 +1012,7 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
 
     std::lock_guard<std::mutex> lock(disk_cache.cache_mutex);
     disk_cache.cache_map[key] = std::make_shared<DiskCacheTTLMeta>(
-        DiskCacheTTLMeta::State::Cached, disk, file_size, time(nullptr), part_ts
+        DiskCacheTTLMeta::State::Cached, disk, file_size, time(nullptr), part_ts, file_path.string()
     );
     disk_cache.total_entries++;
     disk_cache.total_size += file_size;

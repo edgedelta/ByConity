@@ -171,7 +171,7 @@ MarkCache::MappedPtr MergeTreeMarksLoader::loadMarksImpl()
                     if (local_cache_disk && local_cache_disk->exists(local_cache_path) && settings.read_settings.disk_cache_mode != DiskCacheMode::FORCE_STEAL_DISK_CACHE)
                     {
                         from_disk_cache = true;
-                        LOG_TRACE(&Poco::Logger::get(__func__), "load from local disk cache {}, mrk_path {}", local_cache_disk->getPath(), local_cache_path);
+                        LOG_TRACE(&Poco::Logger::get(__func__), "marks cache hit: seg_key={} disk={} path={}", mrk_seg_key, local_cache_disk->getPath(), local_cache_path);
                         size_t cached_mark_file_size = local_cache_disk->getFileSize(local_cache_path);
                         if (expected_file_size != cached_mark_file_size)
                             throw Exception(
@@ -230,7 +230,9 @@ MarkCache::MappedPtr MergeTreeMarksLoader::loadMarksImpl()
                 }
             }
 
-            LOG_TRACE(&Poco::Logger::get(__func__), "load from remote filesystem mrk_path {}", mrk_path);
+            LOG_TRACE(&Poco::Logger::get(__func__), "marks cache miss: seg_key={} falling back to remote fs mrk_path={}",
+                IDiskCacheSegment::formatSegmentName(UUIDHelpers::UUIDToString(storage_uuid), part_name, stream_name, 0, index_granularity_info.marks_file_extension),
+                mrk_path);
             auto buf = disk->readFile(mrk_path, load_mark_read_settings);
             if (buf->seek(mark_file_offset) != mark_file_offset)
                 throw Exception("Cannot seek to mark file  " + mrk_path + " for stream " + stream_name, ErrorCodes::CANNOT_SEEK_THROUGH_FILE);

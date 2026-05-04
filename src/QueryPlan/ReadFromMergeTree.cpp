@@ -1904,13 +1904,16 @@ void ReadFromMergeTree::collectCacheStats()
     uint64_t cache_wall_ms = cache_stats->reader_count > 0
         ? cache_stats->cache_read_ms / cache_stats->reader_count
         : cache_stats->cache_read_ms;
+    uint64_t s3_wall_ms = cache_stats->reader_count > 0
+        ? cache_stats->s3_read_ms / cache_stats->reader_count
+        : cache_stats->s3_read_ms;
     cache_desc.name_and_detail.emplace_back("data",
         fmt::format("data: hit={} miss={} steal={} s3={} cache={:.1f}MB ReadTime: {}ms[max={}ms, min={}ms] s3={:.1f}MB/{}ms",
             cache_stats->cache_hit_segs, cache_stats->cache_miss_segs,
             cache_stats->steal_segs, cache_stats->s3_fallback_segs,
             cache_stats->cache_bytes / (1024.0 * 1024.0),
             cache_wall_ms, cache_stats->cache_read_ms_max, cache_stats->cache_read_ms_min,
-            cache_stats->s3_bytes / (1024.0 * 1024.0), cache_stats->s3_read_ms));
+            cache_stats->s3_bytes / (1024.0 * 1024.0), s3_wall_ms));
     cache_desc.name_and_detail.emplace_back("idx",
         fmt::format("idx: hit={} miss={} cache={:.1f}MB/{}ms s3={:.1f}MB/{}ms",
             cache_stats->idx_hit_segs, cache_stats->idx_miss_segs,
