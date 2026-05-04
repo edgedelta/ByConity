@@ -1931,9 +1931,9 @@ void ReadFromMergeTree::collectCacheStats()
 
     if (auto * tg = CurrentThread::getGroup().get())
     {
-        auto seek_us = tg->performance_counters[ProfileEvents::IndexGranuleSeekTime];
-        auto read_us = tg->performance_counters[ProfileEvents::IndexGranuleReadTime];
-        auto calc_us = tg->performance_counters[ProfileEvents::IndexGranuleCalcTime];
+        auto seek_us = tg->performance_counters[ProfileEvents::IndexGranuleSeekTime].load();
+        auto read_us = tg->performance_counters[ProfileEvents::IndexGranuleReadTime].load();
+        auto calc_us = tg->performance_counters[ProfileEvents::IndexGranuleCalcTime].load();
         if (seek_us > 0 || read_us > 0 || calc_us > 0)
             cache_desc.name_and_detail.emplace_back("idx_eval",
                 fmt::format("idx_eval: seek={}ms read={}ms calc={}ms",
