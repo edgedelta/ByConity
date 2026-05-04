@@ -97,6 +97,8 @@ public:
 
     static KeyType hash(const String & seg_name);
     static String hexKey(const KeyType & key);
+
+    void evictExpired();
     static std::optional<KeyType> unhexKey(const String & hex);
 
     /// Parse partition timestamp from part name
@@ -227,8 +229,6 @@ private:
     /// Check if segment should be cached based on TTL
     bool shouldCache(time_t part_ts) const;
 
-    /// Evict expired segments
-    void evictExpired();
 
     /// Evict oldest partitions until enough space is freed.
     void evictOldestPartitionsUntilSpace(size_t needed_bytes);

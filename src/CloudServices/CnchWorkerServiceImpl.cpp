@@ -1428,7 +1428,7 @@ void CnchWorkerServiceImpl::getPreloadStats(
             p->set_elapsed_ms(snap.elapsed_ms);
             p->set_preload_level(snap.preload_level);
         }
-    });
+    })
 }
 
 #if defined(__clang__)

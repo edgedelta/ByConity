@@ -1145,7 +1145,7 @@ public:
         return 1;
     }
     std::vector<std::pair<String, UInt64>> multiGet(const std::vector<String> &) override { return {}; }
-    bool batchWrite(const BatchCommitRequest &, BatchCommitResponse &) override { return true; }
+    bool batchWrite(const Catalog::BatchCommitRequest &, Catalog::BatchCommitResponse &) override { return true; }
     void drop(const String & key, const UInt64 &) override { store.erase(key); }
     void drop(const String & key, const String &)  override { store.erase(key); }
     IteratorPtr getAll() override { return getByPrefix(""); }
@@ -1301,7 +1301,7 @@ TEST_F(DiskCacheTTLTest, ReconcileRestoresAllTypesWithCorrectRelPath)
     for (auto & [seg, path] : seg_to_path)
     {
         String fdb_key = fmt::format("{}_{:04d}", key_prefix, i++);
-        mock_store->store[fdb_key] = TTLCacheFDBIndex::encodeValue(seg, 7, now);
+        mock_store->store[fdb_key] = fmt::format("{}:{}:{}", static_cast<int64_t>(now), 7, seg);
     }
 
     // Reconcile into a fresh cache_map

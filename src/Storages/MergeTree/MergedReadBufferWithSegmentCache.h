@@ -50,7 +50,7 @@ public:
         clockid_t clock_type_ = CLOCK_MONOTONIC_COARSE,
         String stream_extension_ = DATA_FILE_EXTENSION);
 
-    ~MergedReadBufferWithSegmentCache();
+    ~MergedReadBufferWithSegmentCache() override;
 
     virtual size_t readBig(char* to, size_t n) override;
     virtual bool nextImpl() override;
