@@ -1,4 +1,5 @@
 #include <set>
+#include <thread>
 #include <DataTypes/DataTypeString.h>
 #include <Interpreters/InterpreterExplainQuery.h>
 #include <Interpreters/SegmentScheduler.h>
@@ -50,6 +51,31 @@ void ExplainAnalyzeTransform::transform(Chunk & chunk)
         UInt64 elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - time_start).count();
         if (elapsed >= time_out)
             break;
+    }
+
+    // Wait for segment profiles to arrive. Profiles are sent before status over separate RPCs,
+    // but server-side RPC thread scheduling can process status before profile, causing a race.
+    if (context->getSettingsRef().report_segment_profiles || context->getSettingsRef().log_segment_profiles)
+    {
+        size_t expected_profiles = 0;
+        for (auto & desc : segment_descriptions)
+            if (desc->segment_id != 0)
+                expected_profiles += desc->parallel;
+
+        auto profile_wait_start = std::chrono::steady_clock::now();
+        while (expected_profiles > 0)
+        {
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - profile_wait_start).count() >= 100)
+                break;
+            auto current_map = scheduler->getSegmentsProfile(context->getCurrentQueryId());
+            size_t received = 0;
+            for (auto & [seg_id, seg_profiles] : current_map)
+                received += seg_profiles.size();
+            if (received >= expected_profiles)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
     }
 
     auto profiles_map = scheduler->getSegmentsProfile(context->getCurrentQueryId());

@@ -62,6 +62,7 @@ struct QueryCacheStats
     std::atomic<size_t> idx_s3_bytes{0};
     std::atomic<uint64_t> idx_cache_read_ms{0};
     std::atomic<uint64_t> idx_s3_read_ms{0};
+    std::atomic<size_t> idx_reader_count{0};
 };
 
 /// Plain snapshot, used for local accumulation and return values.
@@ -85,6 +86,7 @@ struct QueryCacheStatsSnapshot
     size_t idx_s3_bytes{0};
     uint64_t idx_cache_read_ms{0};
     uint64_t idx_s3_read_ms{0};
+    size_t idx_reader_count{0};
 
     bool empty() const { return cache_hit_segs == 0 && cache_miss_segs == 0 && steal_segs == 0 && s3_fallback_segs == 0
         && idx_hit_segs == 0 && idx_miss_segs == 0; }

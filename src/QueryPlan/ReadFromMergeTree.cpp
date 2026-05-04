@@ -49,6 +49,9 @@ namespace ProfileEvents
     extern const Event SelectedParts;
     extern const Event SelectedRanges;
     extern const Event SelectedMarks;
+    extern const Event IndexGranuleSeekTime;
+    extern const Event IndexGranuleReadTime;
+    extern const Event IndexGranuleCalcTime;
 }
 
 namespace DB
@@ -1914,11 +1917,29 @@ void ReadFromMergeTree::collectCacheStats()
             cache_stats->cache_bytes / (1024.0 * 1024.0),
             cache_wall_ms, cache_stats->cache_read_ms_max, cache_stats->cache_read_ms_min,
             cache_stats->s3_bytes / (1024.0 * 1024.0), s3_wall_ms));
+    uint64_t idx_s3_wall_ms = cache_stats->idx_reader_count > 0
+        ? cache_stats->idx_s3_read_ms / cache_stats->idx_reader_count
+        : cache_stats->idx_s3_read_ms;
+    uint64_t idx_cache_wall_ms = cache_stats->idx_reader_count > 0
+        ? cache_stats->idx_cache_read_ms / cache_stats->idx_reader_count
+        : cache_stats->idx_cache_read_ms;
     cache_desc.name_and_detail.emplace_back("idx",
         fmt::format("idx: hit={} miss={} cache={:.1f}MB/{}ms s3={:.1f}MB/{}ms",
             cache_stats->idx_hit_segs, cache_stats->idx_miss_segs,
-            cache_stats->idx_cache_bytes / (1024.0 * 1024.0), cache_stats->idx_cache_read_ms,
-            cache_stats->idx_s3_bytes / (1024.0 * 1024.0), cache_stats->idx_s3_read_ms));
+            cache_stats->idx_cache_bytes / (1024.0 * 1024.0), idx_cache_wall_ms,
+            cache_stats->idx_s3_bytes / (1024.0 * 1024.0), idx_s3_wall_ms));
+
+    if (auto * tg = CurrentThread::getGroup().get())
+    {
+        auto seek_us = tg->performance_counters[ProfileEvents::IndexGranuleSeekTime];
+        auto read_us = tg->performance_counters[ProfileEvents::IndexGranuleReadTime];
+        auto calc_us = tg->performance_counters[ProfileEvents::IndexGranuleCalcTime];
+        if (seek_us > 0 || read_us > 0 || calc_us > 0)
+            cache_desc.name_and_detail.emplace_back("idx_eval",
+                fmt::format("idx_eval: seek={}ms read={}ms calc={}ms",
+                    seek_us / 1000, read_us / 1000, calc_us / 1000));
+    }
+
     attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::CacheStats, std::move(cache_desc));
 }
 

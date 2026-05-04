@@ -346,6 +346,8 @@ void DiskCacheFactory::mergeQueryCacheStats(const String & query_id, const Query
     entry->idx_s3_bytes.fetch_add(local.idx_s3_bytes, std::memory_order_relaxed);
     entry->idx_cache_read_ms.fetch_add(local.idx_cache_read_ms, std::memory_order_relaxed);
     entry->idx_s3_read_ms.fetch_add(local.idx_s3_read_ms, std::memory_order_relaxed);
+    if (local.idx_hit_segs > 0 || local.idx_miss_segs > 0 || local.idx_cache_bytes > 0 || local.idx_s3_bytes > 0)
+        entry->idx_reader_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 std::optional<QueryCacheStatsSnapshot> DiskCacheFactory::consumeQueryCacheStats(const String & query_id)
@@ -375,6 +377,7 @@ std::optional<QueryCacheStatsSnapshot> DiskCacheFactory::consumeQueryCacheStats(
     snap.idx_s3_bytes     = e.idx_s3_bytes.load(std::memory_order_relaxed);
     snap.idx_cache_read_ms = e.idx_cache_read_ms.load(std::memory_order_relaxed);
     snap.idx_s3_read_ms   = e.idx_s3_read_ms.load(std::memory_order_relaxed);
+    snap.idx_reader_count  = e.idx_reader_count.load(std::memory_order_relaxed);
     query_cache_stats_map.erase(it);
     return snap;
 }
