@@ -214,7 +214,8 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
     const VolumePtr & volume,
     std::function<std::filesystem::path(UInt128, const String &)> get_rel_path,
     std::function<bool(time_t)> should_cache,
-    std::function<void(time_t, size_t)> on_restore)
+    std::function<void(time_t, size_t)> on_restore,
+    std::function<void(UInt128, std::shared_ptr<DiskCacheTTLMeta>)> on_insert)
 {
     std::vector<String> stale_fwd_keys;
     std::vector<std::pair<UInt128, std::shared_ptr<DiskCacheTTLMeta>>> to_insert;
@@ -271,20 +272,28 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
         to_insert.emplace_back(key, std::make_shared<DiskCacheTTLMeta>(
             DiskCacheTTLMeta::State::Cached, found_disk, size, time(nullptr), part_ts, rel_path.string()));
         restored_bytes += size;
-
-        // Notify caller about restored entry so it can update partition_stats
-        // without re-scanning the whole cache_map
-        if (on_restore)
-            on_restore(part_ts, size);
     }
 
-    // Bulk-insert into cache_map under a single lock
+    // Bulk-insert into cache_map under a single lock.
+    // on_insert (if provided) also updates part_index via cacheInsertLocked.
     if (!to_insert.empty())
     {
         std::lock_guard lk(cache_mutex);
         for (auto & [key, meta] : to_insert)
-            cache_map[key] = std::move(meta);
+        {
+            if (on_insert)
+                on_insert(key, meta);
+            else
+                cache_map[key] = meta;
+        }
         DiskCacheFactory::instance().addGlobalTTLUsage(restored_bytes);
+    }
+
+    // on_restore: called outside cache_mutex to avoid holding it while taking partition_stats_mutex
+    if (on_restore)
+    {
+        for (const auto & [key, meta] : to_insert)
+            on_restore(meta->max_timestamp, meta->size);
     }
 
     // Bulk-delete stale forward + reverse FDB entries.

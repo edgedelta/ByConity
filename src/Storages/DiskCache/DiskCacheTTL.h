@@ -99,6 +99,7 @@ public:
     static String hexKey(const KeyType & key);
 
     void evictExpired();
+    void evictOldestPartitionsUntilSpace(size_t needed_bytes);
     static std::optional<KeyType> unhexKey(const String & hex);
 
     /// Parse partition timestamp from part name
@@ -111,8 +112,8 @@ public:
     struct PartitionStatsInternal
     {
         String partition_id;
-        size_t entry_count{0};
-        size_t total_bytes{0};
+        std::atomic<size_t> entry_count{0};
+        std::atomic<size_t> total_bytes{0};
         time_t partition_timestamp{0};
         std::atomic<size_t> hits{0};
         std::atomic<size_t> misses{0};
@@ -224,17 +225,33 @@ public:
     std::optional<String> findPeerOwner(const String & seg_name);
 
 private:
-    size_t writeSegment(const String& seg_name, ReadBuffer& buffer, ReservationPtr& reservation);
+    struct CacheEraseResult {
+        String partition_id;
+        time_t partition_ts{0};
+        size_t count{0};
+        size_t bytes{0};
+    };
 
-    /// Check if segment should be cached based on TTL
+    struct PartIndexEntry {
+        String partition_id;
+        time_t partition_ts{0};
+        std::vector<KeyType> keys;
+        size_t total_bytes{0};
+    };
+
+    size_t writeSegment(const String& seg_name, ReadBuffer& buffer, ReservationPtr& reservation);
     bool shouldCache(time_t part_ts) const;
 
+    /// Structural helpers — caller must hold cache_mutex
+    void cacheInsertLocked(KeyType key, std::shared_ptr<DiskCacheTTLMeta> meta);
+    CacheEraseResult cacheEraseLocked(KeyType key);
+    CacheEraseResult cacheErasePartLocked(UInt64 hash_high);
 
-    /// Evict oldest partitions until enough space is freed.
-    void evictOldestPartitionsUntilSpace(size_t needed_bytes);
+    /// Stats helpers — caller must NOT hold cache_mutex
+    void recordEntry(const String & partition_id, time_t partition_ts, size_t bytes);
+    void removeEntries(const CacheEraseResult & result);
 
-    /// Update partition-level stats
-    void updatePartitionStats(const String & partition_id, time_t partition_ts, bool hit, size_t bytes, bool is_reconcile = false);
+    void updatePartitionStats(const String & partition_id, time_t partition_ts, bool hit);
 
     struct DiskIterator : private boost::noncopyable
     {
@@ -303,6 +320,7 @@ private:
     /// Simple map-based storage (not using BucketLRUCache)
     std::mutex cache_mutex;
     std::map<KeyType, std::shared_ptr<DiskCacheTTLMeta>> cache_map;
+    std::unordered_map<UInt64, PartIndexEntry> part_index;
     std::atomic<size_t> total_entries{0};
     std::atomic<size_t> total_size{0};
 

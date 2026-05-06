@@ -460,9 +460,8 @@ TEST_F(DiskCacheTTLTest, DropPart)
     size_t initial_count = cache.getKeyCount();
     ASSERT_EQ(initial_count, 6);
 
-    // Drop part1
-    size_t dropped = cache.drop(part1);
-    ASSERT_EQ(dropped, 3);
+    // Drop part1 — path must include the UUID prefix used in segment names
+    cache.drop("test_uuid/" + part1);
     ASSERT_EQ(cache.getKeyCount(), 3);
 
     // Verify part1 gone, part2 remains
@@ -1326,6 +1325,305 @@ TEST_F(DiskCacheTTLTest, ReconcileRestoresAllTypesWithCorrectRelPath)
             << "rel_path mismatch for " << seg
             << "\n  got:  " << it->second->rel_path
             << "\n  want: " << expected_path;
+    }
+}
+
+// Verify drop() decrements partition_stats correctly
+TEST_F(DiskCacheTTLTest, DropUpdatesPartitionStats)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    // ttl_minutes=0 so no entries are rejected by TTL check
+    DiskCacheTTL cache("test_drop_pstats", "test-uuid-drop", volume, nullptr, settings, strategy, 0, 0);
+
+    time_t now = time(nullptr);
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    String part1 = fmt::format("{:04d}{:02d}{:02d}_1_100_2", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+    String part2 = fmt::format("{:04d}{:02d}{:02d}_2_200_2", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+    String partition_id = fmt::format("{:04d}{:02d}{:02d}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+    const String uuid = "test-uuid-drop";
+
+    for (int i = 0; i < 3; i++)
+    {
+        String seg = fmt::format("{}/{}/col.bin/offset_{}", uuid, part1, i);
+        String data(100, 'a');
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false);
+    }
+    for (int i = 0; i < 2; i++)
+    {
+        String seg = fmt::format("{}/{}/col.bin/offset_{}", uuid, part2, i);
+        String data(100, 'b');
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false);
+    }
+    ASSERT_EQ(cache.getKeyCount(), 5);
+
+    {
+        auto pstats = cache.getPartitionStats();
+        bool found = false;
+        for (const auto & ps : pstats)
+        {
+            if (ps.partition_id == partition_id)
+            {
+                found = true;
+                ASSERT_EQ(ps.entry_count, 5u);
+                ASSERT_EQ(ps.total_bytes, 500u);
+            }
+        }
+        ASSERT_TRUE(found) << "partition not found before drop: " << partition_id;
+    }
+
+    cache.drop(uuid + "/" + part1);
+
+    ASSERT_EQ(cache.getKeyCount(), 2);
+    ASSERT_EQ(cache.getCachedSize(), 200u);
+    {
+        auto gstats = cache.getStats();
+        ASSERT_EQ(gstats.total_entries, 2u);
+        ASSERT_EQ(gstats.total_bytes,   200u);
+    }
+
+    {
+        auto pstats = cache.getPartitionStats();
+        bool found = false;
+        for (const auto & ps : pstats)
+        {
+            if (ps.partition_id == partition_id)
+            {
+                found = true;
+                ASSERT_EQ(ps.entry_count, 2u);
+                ASSERT_EQ(ps.total_bytes, 200u);
+            }
+        }
+        ASSERT_TRUE(found) << "partition not found after drop: " << partition_id;
+    }
+}
+
+// Verify evictExpired() is a no-op on fresh entries and leaves partition_stats intact
+TEST_F(DiskCacheTTLTest, EvictExpiredNoOpKeepsPartitionStats)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    UInt64 ttl_minutes = 60;
+    DiskCacheTTL cache("test_evict_noop", "test-uuid-evict", volume, nullptr, settings, strategy, ttl_minutes, 0);
+
+    time_t now = time(nullptr);
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+    String partition_id = fmt::format("{:04d}{:02d}{:02d}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+    const String uuid = "test-uuid-evict";
+
+    for (int i = 0; i < 4; i++)
+    {
+        String seg = fmt::format("{}/{}/col.bin/offset_{}", uuid, part, i);
+        String data(100, 'a');
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false);
+    }
+    ASSERT_EQ(cache.getKeyCount(), 4);
+
+    cache.evictExpired();  // nothing should be evicted — entries are within TTL
+
+    ASSERT_EQ(cache.getKeyCount(), 4);
+    {
+        auto gstats = cache.getStats();
+        ASSERT_EQ(gstats.total_entries,   4u);
+        ASSERT_EQ(gstats.total_bytes,   400u);
+        ASSERT_EQ(gstats.evicted_expired, 0u);
+    }
+
+    auto pstats = cache.getPartitionStats();
+    bool found = false;
+    for (const auto & ps : pstats)
+    {
+        if (ps.partition_id == partition_id)
+        {
+            found = true;
+            ASSERT_EQ(ps.entry_count, 4u);
+            ASSERT_EQ(ps.total_bytes, 400u);
+        }
+    }
+    ASSERT_TRUE(found) << "partition disappeared after no-op evictExpired: " << partition_id;
+}
+
+// Verify evictOldestPartitionsUntilSpace() decrements partition_stats for evicted partition
+TEST_F(DiskCacheTTLTest, SizeLimitEvictionUpdatesPartitionStats)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    // ttl_minutes=0: no TTL rejection so we can use different-day partitions freely
+    DiskCacheTTL cache("test_size_pstats", "test-uuid-size", volume, nullptr, settings, strategy, 0, 100 * 1024 * 1024);
+
+    time_t now = time(nullptr);
+    time_t yesterday = now - 25 * 3600;  // definitely the previous calendar day
+    struct tm tm_now, tm_yest;
+    gmtime_r(&now, &tm_now);
+    gmtime_r(&yesterday, &tm_yest);
+
+    String today_part = fmt::format("{:04d}{:02d}{:02d}_1_100_2", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    String yest_part  = fmt::format("{:04d}{:02d}{:02d}_1_100_2", tm_yest.tm_year + 1900, tm_yest.tm_mon + 1, tm_yest.tm_mday);
+
+    String today_pid = fmt::format("{:04d}{:02d}{:02d}", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    String yest_pid  = fmt::format("{:04d}{:02d}{:02d}", tm_yest.tm_year + 1900, tm_yest.tm_mon + 1, tm_yest.tm_mday);
+
+    if (today_pid == yest_pid)
+        GTEST_SKIP() << "test requires two distinct calendar days (running at midnight boundary)";
+
+    const String uuid = "test-uuid-size";
+    const size_t seg_size = 1024;
+
+    for (int i = 0; i < 4; i++)
+    {
+        String seg = fmt::format("{}/{}/col.bin/offset_{}", uuid, yest_part, i);
+        String data(seg_size, 'y');
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false);
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        String seg = fmt::format("{}/{}/col.bin/offset_{}", uuid, today_part, i);
+        String data(seg_size, 't');
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false);
+    }
+
+    ASSERT_EQ(cache.getKeyCount(), 7);
+
+    {
+        auto pstats = cache.getPartitionStats();
+        bool fy = false, ft = false;
+        for (const auto & ps : pstats)
+        {
+            if (ps.partition_id == yest_pid)  { fy = true; ASSERT_EQ(ps.entry_count, 4u); }
+            if (ps.partition_id == today_pid) { ft = true; ASSERT_EQ(ps.entry_count, 3u); }
+        }
+        ASSERT_TRUE(fy) << "yesterday partition missing: " << yest_pid;
+        ASSERT_TRUE(ft) << "today partition missing: "     << today_pid;
+    }
+
+    // Free exactly 4 * seg_size bytes → should evict yesterday's 4 segments
+    cache.evictOldestPartitionsUntilSpace(4 * seg_size);
+
+    ASSERT_EQ(cache.getKeyCount(), 3);
+    {
+        auto gstats = cache.getStats();
+        ASSERT_EQ(gstats.total_entries,     3u);
+        ASSERT_EQ(gstats.total_bytes,       3 * seg_size);
+        ASSERT_EQ(gstats.evicted_size_limit, 4u);
+        ASSERT_EQ(gstats.evicted_expired,    0u);  // TTL eviction was NOT used
+    }
+
+    {
+        auto pstats = cache.getPartitionStats();
+        for (const auto & ps : pstats)
+        {
+            if (ps.partition_id == yest_pid)
+            {
+                ASSERT_EQ(ps.entry_count, 0u) << "yesterday partition should be empty after eviction";
+                ASSERT_EQ(ps.total_bytes,  0u);
+            }
+            if (ps.partition_id == today_pid)
+            {
+                ASSERT_EQ(ps.entry_count, 3u) << "today partition should be untouched";
+            }
+        }
+    }
+}
+
+// Verify part_index is correctly rebuilt after drop + re-add; also tests that
+// cache_stats and partition_stats stay consistent across the full cycle.
+TEST_F(DiskCacheTTLTest, PartIndexRebuildAfterDrop)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    DiskCacheTTL cache("test_part_idx", "test-uuid-idx", volume, nullptr, settings, strategy, 0, 0);
+
+    const String uuid = "test-uuid-idx";
+    time_t now = time(nullptr);
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+    String partition_id = fmt::format("{:04d}{:02d}{:02d}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+    const size_t seg_bytes = 64;
+
+    // Phase 1: add 3 segments for 'part'
+    for (int i = 0; i < 3; i++)
+    {
+        String seg = fmt::format("{}/{}/col.bin/offset_{}", uuid, part, i);
+        String data(seg_bytes, 'a');
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false);
+    }
+    ASSERT_EQ(cache.getKeyCount(), 3u);
+    {
+        auto gstats = cache.getStats();
+        ASSERT_EQ(gstats.total_entries, 3u);
+        ASSERT_EQ(gstats.total_bytes,   3 * seg_bytes);
+    }
+
+    // Phase 2: drop clears part_index entry for 'part'
+    cache.drop(uuid + "/" + part);
+    ASSERT_EQ(cache.getKeyCount(), 0u);
+    {
+        auto gstats = cache.getStats();
+        ASSERT_EQ(gstats.total_entries, 0u);
+        ASSERT_EQ(gstats.total_bytes,   0u);
+    }
+    {
+        auto pstats = cache.getPartitionStats();
+        for (const auto & ps : pstats)
+            if (ps.partition_id == partition_id)
+            {
+                ASSERT_EQ(ps.entry_count, 0u);
+                ASSERT_EQ(ps.total_bytes, 0u);
+            }
+    }
+
+    // Phase 3: re-add 2 segments — part_index must be re-populated from scratch
+    for (int i = 0; i < 2; i++)
+    {
+        String seg = fmt::format("{}/{}/col.bin/offset_{}", uuid, part, i);
+        String data(seg_bytes, 'b');
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false);
+    }
+    ASSERT_EQ(cache.getKeyCount(), 2u);
+    {
+        auto gstats = cache.getStats();
+        ASSERT_EQ(gstats.total_entries, 2u);
+        ASSERT_EQ(gstats.total_bytes,   2 * seg_bytes);
+    }
+
+    // All 2 segments must be retrievable
+    for (int i = 0; i < 2; i++)
+    {
+        String seg = fmt::format("{}/{}/col.bin/offset_{}", uuid, part, i);
+        auto [disk, path] = cache.get(seg);
+        ASSERT_FALSE(path.empty()) << "segment " << i << " not found after re-add";
+    }
+
+    // Phase 4: second drop — part_index entry removed again, stats zeroed
+    cache.drop(uuid + "/" + part);
+    ASSERT_EQ(cache.getKeyCount(), 0u);
+    {
+        auto gstats = cache.getStats();
+        ASSERT_EQ(gstats.total_entries, 0u);
+        ASSERT_EQ(gstats.total_bytes,   0u);
     }
 }
 
