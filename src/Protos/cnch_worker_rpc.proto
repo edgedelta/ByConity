@@ -229,8 +229,6 @@ message TTLCachePartitionStats
   optional string partition = 3;
   optional uint64 entry_count = 4;
   optional uint64 bytes = 5;
-  optional uint64 hits = 6;
-  optional uint64 misses = 7;
 }
 
 message GetTTLCachePartitionStatsReq

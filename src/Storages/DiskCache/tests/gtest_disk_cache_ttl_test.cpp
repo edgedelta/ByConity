@@ -639,8 +639,6 @@ TEST_F(DiskCacheTTLTest, DetailedStats)
             found_recent = true;
             ASSERT_EQ(ps.entry_count, 5);
             ASSERT_GT(ps.total_bytes, 0);
-            ASSERT_EQ(ps.hits, 5);
-            ASSERT_EQ(ps.misses, 1); // Initial set counts as miss
             break;
         }
     }
@@ -754,18 +752,8 @@ TEST_F(DiskCacheTTLTest, PartitionHitRate)
         if (ps.partition_id == partition_id)
         {
             found = true;
-            size_t hits = ps.hits;
-            size_t misses = ps.misses;
-
-            // Hits should include successful gets
-            ASSERT_EQ(hits, 7);
-
-            // Misses include: initial set (10) + failed gets (3)
-            ASSERT_EQ(misses, 13);
-
-            double hit_rate = static_cast<double>(hits) / (hits + misses);
-            ASSERT_GT(hit_rate, 0.0);
-            ASSERT_LT(hit_rate, 1.0);
+            ASSERT_GT(ps.entry_count, 0);
+            ASSERT_GT(ps.total_bytes, 0);
             break;
         }
     }
@@ -1625,6 +1613,73 @@ TEST_F(DiskCacheTTLTest, PartIndexRebuildAfterDrop)
         ASSERT_EQ(gstats.total_entries, 0u);
         ASSERT_EQ(gstats.total_bytes,   0u);
     }
+}
+
+// ---------------------------------------------------------------------------
+// drop() must evict FDB forward + reverse entries for the dropped part
+// ---------------------------------------------------------------------------
+
+TEST_F(DiskCacheTTLTest, DropEvictsFDBEntries)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    // No underscores in these strings so Catalog::escapeString is a no-op
+    const String uuid   = "test-uuid-fdb";
+    const String ns     = "byconity";
+    const String worker = "test-worker";
+    const String key_prefix     = ns + "_DCI_" + worker + "_" + uuid;
+    const String rev_key_prefix = ns + "_DCIREV_" + uuid;
+
+    auto mock_store = std::make_shared<MockMetaStore>();
+    auto fdb_idx = std::make_shared<TTLCacheFDBIndex>(mock_store, ns, worker, uuid, worker);
+
+    DiskCacheTTL cache("test_fdb_drop", uuid, volume, nullptr, settings, strategy, 0, 0);
+    cache.setFDBIndex(fdb_idx);
+
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
+    String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    String partition_id = fmt::format("{:04d}{:02d}{:02d}", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+
+    const size_t seg_bytes = 64;
+    const int num_segs = 3;
+
+    for (int i = 0; i < num_segs; i++)
+    {
+        String seg = makeSegKey(uuid, part, fmt::format("col{}", i), ".bin");
+        String data(seg_bytes, 'a');
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false, 0, now);
+
+        // Seed FDB store manually (batchWrite in MockMetaStore is a no-op).
+        // hexKey layout: first 16 chars = hex(items[1]=low), last 16 = hex(items[0]=high).
+        auto key  = DiskCacheTTL::hash(seg);
+        auto hex  = DiskCacheTTL::hexKey(key);
+        String high_hex = hex.substr(16, 16);   // items[0] = sipHash64(part_name)
+        String low_hex  = hex.substr(0, 16);    // items[1] = sipHash64(column)
+        mock_store->store[fmt::format("{}_{}_{}_{}",  key_prefix,     partition_id, high_hex, low_hex)]
+            = fmt::format("{}:{}:{}", static_cast<int64_t>(now), seg_bytes, seg);
+        mock_store->store[fmt::format("{}_{}_{}_{}",  rev_key_prefix, partition_id, high_hex, low_hex)]
+            = worker;
+    }
+
+    ASSERT_EQ(cache.getKeyCount(), static_cast<size_t>(num_segs));
+    ASSERT_EQ(mock_store->store.size(), static_cast<size_t>(num_segs * 2));  // fwd + rev per segment
+
+    cache.drop(uuid + "/" + part);
+    ASSERT_EQ(cache.getKeyCount(), 0u);
+
+    // Flush pending evictPart ops: detach fdb_idx from cache then destroy it.
+    // The destructor sets stopped=true, drains the queue, and joins the bg thread.
+    cache.setFDBIndex(nullptr);
+    fdb_idx.reset();
+
+    EXPECT_TRUE(mock_store->store.empty())
+        << "FDB entries not cleaned after drop(); remaining=" << mock_store->store.size();
 }
 
 } // namespace DB

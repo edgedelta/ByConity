@@ -209,13 +209,11 @@ std::optional<String> TTLCacheFDBIndex::findPeerOwner(UInt128 key, const String 
 }
 
 std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
-    std::map<UInt128, std::shared_ptr<DiskCacheTTLMeta>> & cache_map,
-    std::mutex & cache_mutex,
     const VolumePtr & volume,
     std::function<std::filesystem::path(UInt128, const String &)> get_rel_path,
     std::function<bool(time_t)> should_cache,
-    std::function<void(time_t, size_t)> on_restore,
-    std::function<void(UInt128, std::shared_ptr<DiskCacheTTLMeta>)> on_insert)
+    std::function<void(UInt128, std::shared_ptr<DiskCacheTTLMeta>)> on_insert,
+    std::function<void(time_t, size_t)> on_stats_update)
 {
     std::vector<String> stale_fwd_keys;
     std::vector<std::pair<UInt128, std::shared_ptr<DiskCacheTTLMeta>>> to_insert;
@@ -274,26 +272,19 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
         restored_bytes += size;
     }
 
-    // Bulk-insert into cache_map under a single lock.
-    // on_insert (if provided) also updates part_index via cacheInsertLocked.
+    // Insert entries via on_insert callback — each call acquires the appropriate shard lock.
     if (!to_insert.empty())
     {
-        std::lock_guard lk(cache_mutex);
         for (auto & [key, meta] : to_insert)
-        {
-            if (on_insert)
-                on_insert(key, meta);
-            else
-                cache_map[key] = meta;
-        }
+            on_insert(key, meta);
         DiskCacheFactory::instance().addGlobalTTLUsage(restored_bytes);
     }
 
-    // on_restore: called outside cache_mutex to avoid holding it while taking partition_stats_mutex
-    if (on_restore)
+    // on_stats_update: called outside cache_mutex to avoid holding it while taking partition_stats_mutex
+    if (on_stats_update)
     {
         for (const auto & [key, meta] : to_insert)
-            on_restore(meta->max_timestamp, meta->size);
+            on_stats_update(meta->max_timestamp, meta->size);
     }
 
     // Bulk-delete stale forward + reverse FDB entries.

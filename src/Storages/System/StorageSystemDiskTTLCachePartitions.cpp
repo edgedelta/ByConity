@@ -23,8 +23,6 @@ NamesAndTypesList StorageSystemDiskTTLCachePartitions::getNamesAndTypes()
         {"partition", std::make_shared<DataTypeString>()},
         {"entry_count", std::make_shared<DataTypeUInt64>()},
         {"bytes", std::make_shared<DataTypeUInt64>()},
-        {"hits", std::make_shared<DataTypeUInt64>()},
-        {"misses", std::make_shared<DataTypeUInt64>()},
     };
 }
 
@@ -42,8 +40,6 @@ static void fillPartitionRow(MutableColumns & res_columns, const String & worker
     res_columns[col_idx++]->insert(p.partition());
     res_columns[col_idx++]->insert(p.entry_count());
     res_columns[col_idx++]->insert(p.bytes());
-    res_columns[col_idx++]->insert(p.hits());
-    res_columns[col_idx++]->insert(p.misses());
 }
 
 void StorageSystemDiskTTLCachePartitions::fillData(MutableColumns & res_columns, ContextPtr context, const SelectQueryInfo &) const
@@ -107,8 +103,6 @@ void StorageSystemDiskTTLCachePartitions::fillData(MutableColumns & res_columns,
             p.set_partition(ps.partition_id);
             p.set_entry_count(ps.entry_count);
             p.set_bytes(ps.total_bytes);
-            p.set_hits(ps.hits);
-            p.set_misses(ps.misses);
             fillPartitionRow(res_columns, worker_id, p);
         }
     }

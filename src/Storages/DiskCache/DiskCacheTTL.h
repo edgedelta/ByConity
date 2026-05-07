@@ -15,9 +15,9 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <filesystem>
-#include <map>
 #include <memory>
 #include <unordered_map>
 #include <shared_mutex>
@@ -115,8 +115,6 @@ public:
         std::atomic<size_t> entry_count{0};
         std::atomic<size_t> total_bytes{0};
         time_t partition_timestamp{0};
-        std::atomic<size_t> hits{0};
-        std::atomic<size_t> misses{0};
     };
 
     // Snapshot for return (plain types, copyable)
@@ -126,8 +124,6 @@ public:
         size_t entry_count{0};
         size_t total_bytes{0};
         time_t partition_timestamp{0};
-        size_t hits{0};
-        size_t misses{0};
     };
 
     // Snapshot for return (plain types, copyable)
@@ -174,8 +170,6 @@ public:
     struct TTLCacheStatsInternal
     {
         String table_uuid;
-        std::atomic<size_t> total_entries{0};
-        std::atomic<size_t> total_bytes{0};
 
         // TTL-specific counters
         std::atomic<size_t> evicted_expired{0};
@@ -228,30 +222,45 @@ private:
     struct CacheEraseResult {
         String partition_id;
         time_t partition_ts{0};
+        UInt64 hash_high{0};
         size_t count{0};
         size_t bytes{0};
+        std::vector<std::pair<DiskPtr, String>> files;
     };
 
     struct PartIndexEntry {
         String partition_id;
         time_t partition_ts{0};
-        std::vector<KeyType> keys;
+        std::unordered_set<KeyType, UInt128Hash> keys;
         size_t total_bytes{0};
     };
 
-    size_t writeSegment(const String& seg_name, ReadBuffer& buffer, ReservationPtr& reservation);
+    size_t writeSegment(ReadBuffer& buffer, ReservationPtr& reservation, const String& cache_rel_path);
     bool shouldCache(time_t part_ts) const;
 
-    /// Structural helpers — caller must hold cache_mutex
-    void cacheInsertLocked(KeyType key, std::shared_ptr<DiskCacheTTLMeta> meta);
-    CacheEraseResult cacheEraseLocked(KeyType key);
-    CacheEraseResult cacheErasePartLocked(UInt64 hash_high);
+    static constexpr size_t NUM_SHARDS = 64;
 
-    /// Stats helpers — caller must NOT hold cache_mutex
-    void recordEntry(const String & partition_id, time_t partition_ts, size_t bytes);
-    void removeEntries(const CacheEraseResult & result);
+    struct Shard {
+        mutable std::mutex mutex;
+        std::unordered_map<KeyType, std::shared_ptr<DiskCacheTTLMeta>, UInt128Hash> cache_map;
+        std::unordered_map<UInt64, PartIndexEntry> part_index;
+    };
 
-    void updatePartitionStats(const String & partition_id, time_t partition_ts, bool hit);
+    Shard & getShard(UInt64 hash_high) { return shards[hash_high & (NUM_SHARDS - 1)]; }
+
+    /// Structural helpers — caller must hold shard.mutex
+    void cacheInsertLocked(Shard & shard, KeyType key, std::shared_ptr<DiskCacheTTLMeta> meta, const String & precomputed_partition_id = {});
+    CacheEraseResult cacheEraseLocked(Shard & shard, KeyType key);
+    CacheEraseResult cacheErasePartLocked(Shard & shard, UInt64 hash_high);
+
+    /// Stats helpers — caller must NOT hold any shard mutex
+    void addToPartitionStats(const String & partition_id, time_t partition_ts, size_t bytes);
+    void subtractFromPartitionStats(const CacheEraseResult & result);
+
+    /// Apply a batch of erase results: delete files, notify FDB, update partition stats.
+    /// Caller must NOT hold any shard mutex. Increments total_evicted by result.count for each entry.
+    void applyEraseResults(std::vector<CacheEraseResult> & results, size_t & total_evicted, const char * log_tag);
+
 
     struct DiskIterator : private boost::noncopyable
     {
@@ -305,7 +314,7 @@ private:
         size_t delete_file_size {0};
     };
 
-    /// FDB-backed index for fast startup recovery 
+    /// FDB-backed index for fast startup recovery
     /// optional — null if catalog unavailable
     std::shared_ptr<TTLCacheFDBIndex> fdb_index;
 
@@ -317,10 +326,7 @@ private:
     UInt64 ttl_minutes;
     size_t max_size_bytes;  // 0 = unlimited
 
-    /// Simple map-based storage (not using BucketLRUCache)
-    std::mutex cache_mutex;
-    std::map<KeyType, std::shared_ptr<DiskCacheTTLMeta>> cache_map;
-    std::unordered_map<UInt64, PartIndexEntry> part_index;
+    std::array<Shard, NUM_SHARDS> shards;
     std::atomic<size_t> total_entries{0};
     std::atomic<size_t> total_size{0};
 
