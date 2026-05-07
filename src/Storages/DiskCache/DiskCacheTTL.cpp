@@ -484,7 +484,7 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
     // First lock: check if already exists, reserve slot
     {
         Stopwatch wait_sw;
-        std::lock_guard<std::mutex> lock(shard.mutex);
+        std::unique_lock<std::shared_mutex> lock(shard.mutex);
         if (wait_sw.elapsedMicroseconds() > 1000)
             LOG_WARNING(log, "[ttl-perf] set() first lock waited {} us", wait_sw.elapsedMicroseconds());
 
@@ -511,7 +511,7 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
 
         {
             Stopwatch wait_sw;
-            std::lock_guard<std::mutex> lock(shard.mutex);
+            std::unique_lock<std::shared_mutex> lock(shard.mutex);
             if (wait_sw.elapsedMicroseconds() > 1000)
                 LOG_WARNING(log, "[ttl-perf] set() second lock waited {} us", wait_sw.elapsedMicroseconds());
 
@@ -585,7 +585,7 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
         tryLogCurrentException(log, fmt::format("Failed to write key {} "
             "to local, disk path: {}, weight: {}, fail: {}", seg_name, local_disk_path, weight_hint, e.message()));
 
-        std::lock_guard<std::mutex> lock(shard.mutex);
+        std::unique_lock<std::shared_mutex> lock(shard.mutex);
         cacheEraseLocked(shard, key);  // also cleans up part_index reservation slot
     }
 }
@@ -620,7 +620,7 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
     auto & shard = getShard(key.items[0]);
     {
         Stopwatch wait_sw;
-        std::lock_guard<std::mutex> lock(shard.mutex);
+        std::shared_lock<std::shared_mutex> lock(shard.mutex);
         if (wait_sw.elapsedMicroseconds() > 1000)
             LOG_WARNING(log, "[ttl-perf] get() lock waited {} us, shard_size={}", wait_sw.elapsedMicroseconds(), shard.cache_map.size());
 
@@ -632,13 +632,20 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
         }
         else if (unlikely(it->second->disk == nullptr))
         {
-            LOG_ERROR(log, "Cached entry {} has null disk — corrupted meta, evicting", seg_name);
-            erase_result = cacheEraseLocked(shard, key);
-            if (erase_result.count > 0)
+            // Corrupted entry: upgrade to exclusive lock to erase
+            lock.unlock();
+            std::unique_lock<std::shared_mutex> ulock(shard.mutex);
+            auto it2 = shard.cache_map.find(key);
+            if (it2 != shard.cache_map.end() && it2->second->disk == nullptr)
             {
-                total_entries--;
-                total_size -= erase_result.bytes;
-                DiskCacheFactory::instance().releaseGlobalTTL(erase_result.bytes);
+                LOG_ERROR(log, "Cached entry {} has null disk — corrupted meta, evicting", seg_name);
+                erase_result = cacheEraseLocked(shard, key);
+                if (erase_result.count > 0)
+                {
+                    total_entries--;
+                    total_size -= erase_result.bytes;
+                    DiskCacheFactory::instance().releaseGlobalTTL(erase_result.bytes);
+                }
             }
             if (is_idx_seg) { cache_stats.idx_misses++; ProfileEvents::increment(ProfileEvents::DiskCacheIdxMisses); }
             else { cache_stats.data_misses++; ProfileEvents::increment(ProfileEvents::DiskCacheDataMisses); }
@@ -706,7 +713,7 @@ void DiskCacheTTL::evictExpired()
 
     for (auto & shard : shards)
     {
-        std::lock_guard<std::mutex> lock(shard.mutex);
+        std::unique_lock<std::shared_mutex> lock(shard.mutex);
 
         std::vector<UInt64> expired_hash_highs;
         for (const auto & [hash_high, entry] : shard.part_index)
@@ -763,7 +770,7 @@ void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
         // Snapshot part timestamps under a short lock — no allocations, just push_backs.
         std::vector<std::pair<time_t, UInt64>> by_ts; // (partition_ts, hash_high)
         {
-            std::lock_guard<std::mutex> lock(shard.mutex);
+            std::unique_lock<std::shared_mutex> lock(shard.mutex);
             by_ts.reserve(shard.part_index.size());
             for (const auto & [hash_high, entry] : shard.part_index)
                 by_ts.emplace_back(entry.partition_ts, hash_high);
@@ -776,7 +783,7 @@ void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
         // cacheErasePartLocked returns count=0 for missing entries and is skipped.
         std::vector<CacheEraseResult> erase_results;
         {
-            std::lock_guard<std::mutex> lock(shard.mutex);
+            std::unique_lock<std::shared_mutex> lock(shard.mutex);
             size_t current_size = total_size.load();
             for (auto & [ts, hash_high] : by_ts)
             {
@@ -824,7 +831,7 @@ void DiskCacheTTL::load()
                 {
                     if (by_shard[i].empty())
                         continue;
-                    std::lock_guard<std::mutex> lock(shards[i].mutex);
+                    std::unique_lock<std::shared_mutex> lock(shards[i].mutex);
                     for (auto & [key, meta] : by_shard[i])
                         cacheInsertLocked(shards[i], key, meta);
                 }
@@ -958,7 +965,7 @@ size_t DiskCacheTTL::drop(const String & part_base_path)
         size_t dropped_bytes = total_size.load();
         for (auto & shard : shards)
         {
-            std::lock_guard<std::mutex> lock(shard.mutex);
+            std::unique_lock<std::shared_mutex> lock(shard.mutex);
             shard.cache_map.clear();
             shard.part_index.clear();
         }
@@ -977,7 +984,7 @@ size_t DiskCacheTTL::drop(const String & part_base_path)
         auto & shard = getShard(hash_high);
         CacheEraseResult result;
         {
-            std::lock_guard<std::mutex> lock(shard.mutex);
+            std::unique_lock<std::shared_mutex> lock(shard.mutex);
             result = cacheErasePartLocked(shard, hash_high);
             if (result.count > 0)
             {
@@ -1128,7 +1135,7 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
     String file_path_str = file_path.string();
     {
         auto & shard = disk_cache.getShard(high);
-        std::lock_guard<std::mutex> lock(shard.mutex);
+        std::unique_lock<std::shared_mutex> lock(shard.mutex);
         auto meta = std::make_shared<DiskCacheTTLMeta>(
             DiskCacheTTLMeta::State::Cached, disk, file_size, time(nullptr), part_ts, std::move(file_path_str)
         );

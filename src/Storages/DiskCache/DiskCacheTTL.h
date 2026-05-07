@@ -247,7 +247,7 @@ private:
     static constexpr size_t NUM_SHARDS = 64;
 
     struct Shard {
-        mutable std::mutex mutex;
+        mutable std::shared_mutex mutex;
         std::unordered_map<KeyType, std::shared_ptr<DiskCacheTTLMeta>, UInt128Hash> cache_map;
         std::unordered_map<UInt64, PartIndexEntry> part_index;
     };
