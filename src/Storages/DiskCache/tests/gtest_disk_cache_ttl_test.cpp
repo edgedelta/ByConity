@@ -209,23 +209,19 @@ TEST_F(DiskCacheTTLTest, TTLBehaviorThroughOperations)
     }
 }
 
-// Test TTL disabled (ttl_minutes = 0) - all time-based partitions cached
-TEST_F(DiskCacheTTLTest, TTLDisabled)
+// ttl_minutes=0 means "cache nothing" — all writes are rejected
+TEST_F(DiskCacheTTLTest, TTLZeroRejectsAll)
 {
     auto volume = createTestVolume();
     DiskCacheSettings settings;
     settings.ttl_cache_max_size = 1024 * 1024;
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
-    UInt64 ttl_minutes = 0; // TTL disabled
-    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, 0, 0);
 
     time_t now = time(nullptr);
-
-    // Very old partition (1 year old) should be cached when TTL disabled
     struct tm tm_time;
-    time_t old_time = now - (365 * 24 * 60 * 60);
-    gmtime_r(&old_time, &tm_time);
+    gmtime_r(&now, &tm_time);
     String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
         tm_time.tm_year + 1900, tm_time.tm_mon + 1, tm_time.tm_mday);
     String seg = fmt::format("test-uuid-0000-0000-0000-000000000002/{}/col.bin/offset_0", part);
@@ -235,7 +231,8 @@ TEST_F(DiskCacheTTLTest, TTLDisabled)
     cache.set(seg, buf, data.size(), false);
 
     auto [disk, path] = cache.get(seg);
-    ASSERT_FALSE(path.empty()); // Should be cached even though very old
+    ASSERT_TRUE(path.empty()); // ttl_minutes=0 rejects all writes
+    ASSERT_EQ(cache.getStats().rejected_too_old, 1u);
 }
 
 // Test non-time partitions are rejected
@@ -1294,13 +1291,17 @@ TEST_F(DiskCacheTTLTest, ReconcileRestoresAllTypesWithCorrectRelPath)
     // Reconcile into a fresh cache_map
     TTLCacheFDBIndex fdb_idx(mock_store, ns, worker, uuid, worker);
     std::map<UInt128, std::shared_ptr<DiskCacheTTLMeta>> cache_map;
-    std::mutex cache_mutex;
     auto get_rel_path = [&cache](UInt128 key, const String & seg_name) -> std::filesystem::path
     {
         return cache.getRelativePath(key, seg_name);
     };
 
-    fdb_idx.reconcile(cache_map, cache_mutex, volume, get_rel_path, [](time_t) { return true; });
+    fdb_idx.reconcile(
+        volume,
+        get_rel_path,
+        [](time_t) { return true; },
+        [&cache_map](UInt128 key, std::shared_ptr<DiskCacheTTLMeta> meta) { cache_map[key] = meta; }
+    );
 
     ASSERT_EQ(cache_map.size(), 3u) << "expected 3 entries restored";
 
@@ -1324,8 +1325,7 @@ TEST_F(DiskCacheTTLTest, DropUpdatesPartitionStats)
     settings.ttl_cache_max_size = 1024 * 1024;
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
-    // ttl_minutes=0 so no entries are rejected by TTL check
-    DiskCacheTTL cache("test_drop_pstats", "test-uuid-drop", volume, nullptr, settings, strategy, 0, 0);
+    DiskCacheTTL cache("test_drop_pstats", "test-uuid-drop", volume, nullptr, settings, strategy, 60 * 24 * 365, 0);
 
     time_t now = time(nullptr);
     struct tm tm;
@@ -1539,7 +1539,7 @@ TEST_F(DiskCacheTTLTest, PartIndexRebuildAfterDrop)
     settings.ttl_cache_max_size = 1024 * 1024;
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
-    DiskCacheTTL cache("test_part_idx", "test-uuid-idx", volume, nullptr, settings, strategy, 0, 0);
+    DiskCacheTTL cache("test_part_idx", "test-uuid-idx", volume, nullptr, settings, strategy, 60 * 24 * 365, 0);
 
     const String uuid = "test-uuid-idx";
     time_t now = time(nullptr);
@@ -1636,7 +1636,7 @@ TEST_F(DiskCacheTTLTest, DropEvictsFDBEntries)
     auto mock_store = std::make_shared<MockMetaStore>();
     auto fdb_idx = std::make_shared<TTLCacheFDBIndex>(mock_store, ns, worker, uuid, worker);
 
-    DiskCacheTTL cache("test_fdb_drop", uuid, volume, nullptr, settings, strategy, 0, 0);
+    DiskCacheTTL cache("test_fdb_drop", uuid, volume, nullptr, settings, strategy, 60 * 24 * 365, 0);
     cache.setFDBIndex(fdb_idx);
 
     time_t now = time(nullptr);
