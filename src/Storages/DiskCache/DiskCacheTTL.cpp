@@ -20,6 +20,7 @@
 #include <Storages/MergeTree/MergeTreeSuffix.h>
 #include <fmt/core.h>
 #include <sys/stat.h>
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <memory>
@@ -751,10 +752,6 @@ void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
 
     LOG_DEBUG(log, "Size eviction: current={}, needed={}, target={}", cur, needed_bytes, target_size);
 
-    // Single-pass per shard: build local by_ts and evict within the same lock scope.
-    // Oldest-first ordering is correct per-shard since partition_ts ordering is global.
-    struct PartitionGroup { String partition_id; std::vector<UInt64> hash_highs; };
-
     size_t total_evicted = 0;
     size_t evicted_bytes = 0;
 
@@ -763,40 +760,37 @@ void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
         if (total_size.load() <= target_size)
             break;
 
-        std::vector<CacheEraseResult> erase_results;
-
+        // Snapshot part timestamps under a short lock — no allocations, just push_backs.
+        std::vector<std::pair<time_t, UInt64>> by_ts; // (partition_ts, hash_high)
         {
             std::lock_guard<std::mutex> lock(shard.mutex);
-
-            std::map<time_t, PartitionGroup> local_by_ts;
+            by_ts.reserve(shard.part_index.size());
             for (const auto & [hash_high, entry] : shard.part_index)
-            {
-                auto & g = local_by_ts[entry.partition_ts];
-                if (g.partition_id.empty())
-                    g.partition_id = entry.partition_id;
-                g.hash_highs.push_back(hash_high);
-            }
+                by_ts.emplace_back(entry.partition_ts, hash_high);
+        }
 
+        // Sort oldest-first outside the lock.
+        std::sort(by_ts.begin(), by_ts.end());
+
+        // Evict under a second lock. Parts may have been removed between the two locks;
+        // cacheErasePartLocked returns count=0 for missing entries and is skipped.
+        std::vector<CacheEraseResult> erase_results;
+        {
+            std::lock_guard<std::mutex> lock(shard.mutex);
             size_t current_size = total_size.load();
-            for (auto & [ts, group] : local_by_ts)
+            for (auto & [ts, hash_high] : by_ts)
             {
                 if (current_size <= target_size)
                     break;
 
-                for (UInt64 hash_high : group.hash_highs)
+                auto result = cacheErasePartLocked(shard, hash_high);
+                if (result.count > 0)
                 {
-                    if (current_size <= target_size)
-                        break;
-
-                    auto result = cacheErasePartLocked(shard, hash_high);
-                    if (result.count > 0)
-                    {
-                        total_entries -= result.count;
-                        total_size -= result.bytes;
-                        current_size -= result.bytes;
-                        evicted_bytes += result.bytes;
-                        erase_results.push_back(std::move(result));
-                    }
+                    total_entries -= result.count;
+                    total_size -= result.bytes;
+                    current_size -= result.bytes;
+                    evicted_bytes += result.bytes;
+                    erase_results.push_back(std::move(result));
                 }
             }
         }

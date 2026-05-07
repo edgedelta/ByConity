@@ -1377,7 +1377,7 @@ void CnchWorkerServiceImpl::getTTLCacheStats(
             t->set_idx_hits(stats.idx_hits);
             t->set_idx_misses(stats.idx_misses);
         }
-    });
+    })
 }
 
 void CnchWorkerServiceImpl::getTTLCachePartitionStats(
@@ -1405,11 +1405,9 @@ void CnchWorkerServiceImpl::getTTLCachePartitionStats(
                 p->set_partition(ps.partition_id);
                 p->set_entry_count(ps.entry_count);
                 p->set_bytes(ps.total_bytes);
-                p->set_hits(ps.hits);
-                p->set_misses(ps.misses);
             }
         }
-    });
+    })
 }
 
 void CnchWorkerServiceImpl::getPreloadStats(
