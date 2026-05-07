@@ -67,7 +67,7 @@ public:
     std::vector<std::pair<String, UInt64>> multiGet(const std::vector<String> &) override { return {}; }
     bool batchWrite(const Catalog::BatchCommitRequest & req, Catalog::BatchCommitResponse &) override
     {
-        for (auto & d : req.delete_items)
+        for (auto & d : req.deletes)
             store.erase(d.key);
         return true;
     }
