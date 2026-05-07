@@ -390,14 +390,14 @@ DiskCacheTTL::CacheEraseResult DiskCacheTTL::cacheErasePartLocked(Shard & shard,
     return result;
 }
 
-void DiskCacheTTL::addToPartitionStats(const String & partition_id, time_t partition_ts, size_t bytes)
+void DiskCacheTTL::addToPartitionStats(const String & partition_id, time_t partition_ts, size_t bytes, size_t count)
 {
     {
         std::shared_lock<std::shared_mutex> lk(cache_stats.partition_stats_mutex);
         auto it = cache_stats.partition_stats.find(partition_id);
         if (it != cache_stats.partition_stats.end())
         {
-            it->second.entry_count++;
+            it->second.entry_count += count;
             it->second.total_bytes += bytes;
             return;
         }
@@ -409,7 +409,7 @@ void DiskCacheTTL::addToPartitionStats(const String & partition_id, time_t parti
         it->second.partition_id = partition_id;
         it->second.partition_timestamp = partition_ts;
     }
-    it->second.entry_count++;
+    it->second.entry_count += count;
     it->second.total_bytes += bytes;
 }
 
@@ -597,10 +597,10 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
     SCOPE_EXIT({ProfileEvents::increment(ProfileEvents::DiskCacheGetMetaMicroSeconds,
         watch.elapsedMicroseconds());});
 
-    // Periodic eviction check (every hour)
+    // Periodic eviction check (every 5 minutes)
     time_t now = time(nullptr);
     time_t last_check = last_eviction_check.load();
-    if (now - last_check > 3600)
+    if (now - last_check > 300)
     {
         if (last_eviction_check.compare_exchange_strong(last_check, now))
         {
@@ -815,15 +815,37 @@ void DiskCacheTTL::load()
             volume,
             [this](UInt128 key, const String & seg_name) { return getRelativePath(key, seg_name); },
             [this](time_t ts) { return shouldCache(ts); },
-            [this](UInt128 key, std::shared_ptr<DiskCacheTTLMeta> meta) {
-                auto & shard = getShard(key.items[0]);
-                std::lock_guard<std::mutex> lock(shard.mutex);
-                cacheInsertLocked(shard, key, meta);
-            },
-            [this](time_t ts, size_t bytes) {
-                addToPartitionStats(formatPartitionId(ts), ts, bytes);
-                cache_stats.cached_from_restored++;
-                cache_stats.cached_bytes_restored += bytes;
+            [this](TTLCacheFDBIndex::ReconcileBatch & batch) {
+                // Group by shard: one lock per shard instead of one per entry.
+                std::array<std::vector<std::pair<UInt128, std::shared_ptr<DiskCacheTTLMeta>>>, NUM_SHARDS> by_shard;
+                for (auto & [key, meta] : batch)
+                    by_shard[key.items[0] & (NUM_SHARDS - 1)].emplace_back(key, meta);
+                for (size_t i = 0; i < NUM_SHARDS; ++i)
+                {
+                    if (by_shard[i].empty())
+                        continue;
+                    std::lock_guard<std::mutex> lock(shards[i].mutex);
+                    for (auto & [key, meta] : by_shard[i])
+                        cacheInsertLocked(shards[i], key, meta);
+                }
+
+                // Batch stats update: one lock per unique partition instead of one per entry.
+                std::unordered_map<String, std::tuple<time_t, size_t, size_t>> stats_acc; // pid -> (ts, bytes, count)
+                for (auto & [key, meta] : batch)
+                {
+                    auto pid = formatPartitionId(meta->max_timestamp);
+                    auto & [ts, bytes, count] = stats_acc[pid];
+                    ts = meta->max_timestamp;
+                    bytes += meta->size;
+                    count++;
+                }
+                for (auto & [pid, tbc] : stats_acc)
+                {
+                    auto & [ts, bytes, count] = tbc;
+                    addToPartitionStats(pid, ts, bytes, count);
+                    cache_stats.cached_from_restored += count;
+                    cache_stats.cached_bytes_restored += bytes;
+                }
             });
 
         if (result)

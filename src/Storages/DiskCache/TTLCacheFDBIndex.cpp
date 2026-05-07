@@ -2,6 +2,7 @@
 #include <Storages/DiskCache/DiskCacheTTL.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 
+#include <Catalog/MetastoreCommon.h>
 #include <Catalog/MetastoreProxy.h>
 #include <Catalog/StringHelper.h>
 #include <Common/hex.h>
@@ -212,94 +213,115 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
     const VolumePtr & volume,
     std::function<std::filesystem::path(UInt128, const String &)> get_rel_path,
     std::function<bool(time_t)> should_cache,
-    std::function<void(UInt128, std::shared_ptr<DiskCacheTTLMeta>)> on_insert,
+    std::function<void(ReconcileBatch &)> on_reconcile_batch,
     std::function<void(time_t, size_t)> on_stats_update)
 {
-    std::vector<String> stale_fwd_keys;
-    std::vector<std::pair<UInt128, std::shared_ptr<DiskCacheTTLMeta>>> to_insert;
-    size_t restored_bytes = 0;
-
-    Catalog::IMetaStore::IteratorPtr it;
-    try { it = metastore->getByPrefix(key_prefix); }
-    catch (...) { tryLogCurrentException(log, "TTLCacheFDBIndex: getByPrefix failed"); return std::nullopt; }
+    // Page through FDB in chunks to avoid hitting the 5-second transaction timeout
+    // that occurs when scanning millions of entries in a single transaction.
+    static constexpr size_t PAGE_SIZE = 100'000;
 
     const auto & disks = volume->getDisks();
-
-    while (it->next())
-    {
-        String seg_name;
-        size_t size{0};
-        time_t part_ts{0};
-
-        if (!decodeValue(it->value(), seg_name, size, part_ts))
-        {
-            LOG_WARNING(log, "TTLCacheFDBIndex reconcile: decode failed for key={} value={}", it->key(), it->value());
-            stale_fwd_keys.push_back(it->key());
-            continue;
-        }
-
-        // Re-apply TTL check — don't restore already-expired entries
-        if (!should_cache(part_ts))
-        {
-            LOG_DEBUG(log, "TTLCacheFDBIndex reconcile: TTL expired for seg={} part_ts={}", seg_name, part_ts);
-            stale_fwd_keys.push_back(it->key());
-            continue;
-        }
-
-        auto key = DiskCacheTTL::hash(seg_name);
-        auto rel_path = get_rel_path(key, seg_name);
-
-        // TODO: multi-disk JBOD support — store disk name in FDB value so reconcile can
-        // assign the correct disk without a per-file exists() scan across all disks.
-        // For now assume single-disk volume (one PVC per pod) and trust FDB as authoritative,
-        // skipping the per-file exists() syscall (too costly at millions of entries).
-        if (disks.empty())
-            continue;
-        to_insert.emplace_back(key, std::make_shared<DiskCacheTTLMeta>(
-            DiskCacheTTLMeta::State::Cached, disks[0], size, time(nullptr), part_ts, rel_path.string()));
-        restored_bytes += size;
-    }
-
-    // Insert entries via on_insert callback — each call acquires the appropriate shard lock.
-    if (!to_insert.empty())
-    {
-        for (auto & [key, meta] : to_insert)
-            on_insert(key, meta);
-        DiskCacheFactory::instance().addGlobalTTLUsage(restored_bytes);
-    }
-
-    // on_stats_update: called outside cache_mutex to avoid holding it while taking partition_stats_mutex
-    if (on_stats_update)
-    {
-        for (const auto & [key, meta] : to_insert)
-            on_stats_update(meta->max_timestamp, meta->size);
-    }
-
-    // Bulk-delete stale forward + reverse FDB entries.
-    // Rev key shares the suffix after key_prefix, so derive it by swapping the prefix.
-    if (!stale_fwd_keys.empty())
-    {
-        try
-        {
-            Catalog::BatchCommitRequest batch;
-            for (const auto & fwd : stale_fwd_keys)
-            {
-                batch.AddDelete(Catalog::SingleDeleteRequest(fwd));
-                String rev = rev_key_prefix + fwd.substr(key_prefix.size());
-                batch.AddDelete(Catalog::SingleDeleteRequest(rev));
-            }
-            Catalog::BatchCommitResponse resp;
-            metastore->batchWrite(batch, resp);
-            LOG_DEBUG(log, "TTLCacheFDBIndex reconcile: removed {} stale fwd+rev pairs", stale_fwd_keys.size());
-        }
-        catch (...) { tryLogCurrentException(log, "TTLCacheFDBIndex: stale cleanup failed"); }
-    }
-
-    LOG_INFO(log, "TTLCacheFDBIndex reconcile complete: {} entries restored, {} stale removed", to_insert.size(), stale_fwd_keys.size());
-
-    if (to_insert.empty())
+    if (disks.empty())
         return std::nullopt;
-    return std::make_pair(to_insert.size(), restored_bytes);
+
+    size_t total_restored = 0;
+    size_t total_restored_bytes = 0;
+    size_t total_stale = 0;
+    String scan_start_key;  // empty = start from key_prefix
+
+    while (true)
+    {
+        ReconcileBatch page;
+        page.reserve(PAGE_SIZE);
+        std::vector<String> stale_fwd_keys;
+        size_t page_bytes = 0;
+        size_t page_count = 0;
+        String last_key;
+
+        Catalog::IMetaStore::IteratorPtr it;
+        try { it = metastore->getByPrefix(key_prefix, PAGE_SIZE, DEFAULT_SCAN_BATCH_COUNT, scan_start_key); }
+        catch (...) { tryLogCurrentException(log, "TTLCacheFDBIndex: getByPrefix failed"); return std::nullopt; }
+
+        while (it->next())
+        {
+            last_key = it->key();
+            page_count++;
+
+            String seg_name;
+            size_t size{0};
+            time_t part_ts{0};
+
+            if (!decodeValue(it->value(), seg_name, size, part_ts))
+            {
+                LOG_WARNING(log, "TTLCacheFDBIndex reconcile: decode failed for key={} value={}", it->key(), it->value());
+                stale_fwd_keys.push_back(last_key);
+                continue;
+            }
+
+            if (!should_cache(part_ts))
+            {
+                LOG_DEBUG(log, "TTLCacheFDBIndex reconcile: TTL expired for seg={} part_ts={}", seg_name, part_ts);
+                stale_fwd_keys.push_back(last_key);
+                continue;
+            }
+
+            auto key = DiskCacheTTL::hash(seg_name);
+            auto rel_path = get_rel_path(key, seg_name);
+
+            // TODO: multi-disk JBOD support — store disk name in FDB value so reconcile can
+            // assign the correct disk without a per-file exists() scan across all disks.
+            // For now assume single-disk volume (one PVC per pod) and trust FDB as authoritative,
+            // skipping the per-file exists() syscall (too costly at millions of entries).
+            page.emplace_back(key, std::make_shared<DiskCacheTTLMeta>(
+                DiskCacheTTLMeta::State::Cached, disks[0], size, time(nullptr), part_ts, rel_path.string()));
+            page_bytes += size;
+        }
+
+        if (!page.empty())
+        {
+            on_reconcile_batch(page);
+            DiskCacheFactory::instance().addGlobalTTLUsage(page_bytes);
+            if (on_stats_update)
+            {
+                for (const auto & [key, meta] : page)
+                    on_stats_update(meta->max_timestamp, meta->size);
+            }
+        }
+
+        if (!stale_fwd_keys.empty())
+        {
+            try
+            {
+                Catalog::BatchCommitRequest batch;
+                for (const auto & fwd : stale_fwd_keys)
+                {
+                    batch.AddDelete(Catalog::SingleDeleteRequest(fwd));
+                    String rev = rev_key_prefix + fwd.substr(key_prefix.size());
+                    batch.AddDelete(Catalog::SingleDeleteRequest(rev));
+                }
+                Catalog::BatchCommitResponse resp;
+                metastore->batchWrite(batch, resp);
+                LOG_DEBUG(log, "TTLCacheFDBIndex reconcile: removed {} stale fwd+rev pairs", stale_fwd_keys.size());
+            }
+            catch (...) { tryLogCurrentException(log, "TTLCacheFDBIndex: stale cleanup failed"); }
+        }
+
+        total_restored += page.size();
+        total_restored_bytes += page_bytes;
+        total_stale += stale_fwd_keys.size();
+
+        if (page_count < PAGE_SIZE)
+            break;
+
+        // Advance past the last key seen ('\x00' suffix = next key in FDB ordering).
+        scan_start_key = last_key + '\x00';
+    }
+
+    LOG_INFO(log, "TTLCacheFDBIndex reconcile complete: {} entries restored, {} stale removed", total_restored, total_stale);
+
+    if (total_restored == 0)
+        return std::nullopt;
+    return std::make_pair(total_restored, total_restored_bytes);
 }
 
 }

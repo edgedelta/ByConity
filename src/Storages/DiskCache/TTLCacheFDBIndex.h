@@ -56,11 +56,13 @@ public:
     /// Calls on_stats_update for each successfully restored entry so the
     /// caller can update partition_stats without re-scanning cache_map
     /// Returns {entries, bytes} restored, or nullopt if index is empty/unavailable.
+    using ReconcileBatch = std::vector<std::pair<UInt128, std::shared_ptr<DiskCacheTTLMeta>>>;
+
     std::optional<std::pair<size_t, size_t>> reconcile(
         const VolumePtr & volume,
         std::function<std::filesystem::path(UInt128, const String &)> get_rel_path,
         std::function<bool(time_t)> should_cache,
-        std::function<void(UInt128, std::shared_ptr<DiskCacheTTLMeta>)> on_insert,
+        std::function<void(ReconcileBatch &)> on_reconcile_batch,
         std::function<void(time_t, size_t)> on_stats_update = nullptr);
 
 private:

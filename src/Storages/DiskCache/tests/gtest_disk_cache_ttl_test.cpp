@@ -1133,12 +1133,20 @@ public:
     void drop(const String & key, const UInt64 &) override { store.erase(key); }
     void drop(const String & key, const String &)  override { store.erase(key); }
     IteratorPtr getAll() override { return getByPrefix(""); }
-    IteratorPtr getByPrefix(const String & prefix, const size_t & = 0, uint32_t = 0, const String & = "") override
+    IteratorPtr getByPrefix(const String & prefix, const size_t & limit = 0, uint32_t = 0, const String & start_key = "") override
     {
         auto iter = std::make_shared<MockIterator>();
         for (auto & [k, v] : store)
-            if (k.starts_with(prefix))
-                iter->entries.emplace_back(k, v);
+        {
+            if (!k.starts_with(prefix))
+                continue;
+            // start_key is inclusive (FIRST_GREATER_OR_EQUAL semantics for first batch)
+            if (!start_key.empty() && k < start_key)
+                continue;
+            iter->entries.emplace_back(k, v);
+            if (limit > 0 && iter->entries.size() >= limit)
+                break;
+        }
         return iter;
     }
     IteratorPtr getByRange(const String &, const String &, bool, bool) override { return std::make_shared<MockIterator>(); }
@@ -1300,7 +1308,10 @@ TEST_F(DiskCacheTTLTest, ReconcileRestoresAllTypesWithCorrectRelPath)
         volume,
         get_rel_path,
         [](time_t) { return true; },
-        [&cache_map](UInt128 key, std::shared_ptr<DiskCacheTTLMeta> meta) { cache_map[key] = meta; }
+        [&cache_map](TTLCacheFDBIndex::ReconcileBatch & batch) {
+            for (auto & [key, meta] : batch)
+                cache_map[key] = meta;
+        }
     );
 
     ASSERT_EQ(cache_map.size(), 3u) << "expected 3 entries restored";
