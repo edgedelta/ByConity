@@ -209,9 +209,15 @@ public:
     TTLCacheStats getStats() const;
     std::vector<PartitionStats> getPartitionStats() const;
 
-    UInt64 getTTLMinutes() const { return ttl_minutes; }
-    size_t getMaxSizeBytes() const { return max_size_bytes; }
+    UInt64 getTTLMinutes() const { return ttl_minutes.load(std::memory_order_relaxed); }
+    size_t getMaxSizeBytes() const { return max_size_bytes.load(std::memory_order_relaxed); }
     void setFDBIndex(std::shared_ptr<TTLCacheFDBIndex> idx) { fdb_index = std::move(idx); }
+
+    void updateSettings(UInt64 new_ttl_minutes, size_t new_max_size_bytes)
+    {
+        ttl_minutes.store(new_ttl_minutes, std::memory_order_relaxed);
+        max_size_bytes.store(new_max_size_bytes, std::memory_order_relaxed);
+    }
 
     /// Look up whether a peer worker has this segment cached via the FDB reverse index.
     /// Returns peer RPC endpoint if found, nullopt if not found or FDB unavailable.
@@ -323,8 +329,8 @@ private:
     std::atomic<bool> is_droping{false};
 
     const String table_uuid;
-    UInt64 ttl_minutes;
-    size_t max_size_bytes;  // 0 = unlimited
+    std::atomic<UInt64> ttl_minutes;
+    std::atomic<size_t> max_size_bytes;  // 0 = unlimited
 
     std::array<Shard, NUM_SHARDS> shards;
     std::atomic<size_t> total_entries{0};

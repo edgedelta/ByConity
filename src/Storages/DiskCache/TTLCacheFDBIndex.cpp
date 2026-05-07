@@ -249,26 +249,14 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
         auto key = DiskCacheTTL::hash(seg_name);
         auto rel_path = get_rel_path(key, seg_name);
 
-        // Find which disk has the file
-        DiskPtr found_disk;
-        for (const auto & disk : disks)
-        {
-            if (disk->exists(rel_path))
-            {
-                found_disk = disk;
-                break;
-            }
-        }
-
-        if (!found_disk)
-        {
-            LOG_DEBUG(log, "TTLCacheFDBIndex reconcile: file missing on disk for seg={} expected_path={}", seg_name, rel_path.string());
-            stale_fwd_keys.push_back(it->key());
+        // TODO: multi-disk JBOD support — store disk name in FDB value so reconcile can
+        // assign the correct disk without a per-file exists() scan across all disks.
+        // For now assume single-disk volume (one PVC per pod) and trust FDB as authoritative,
+        // skipping the per-file exists() syscall (too costly at millions of entries).
+        if (disks.empty())
             continue;
-        }
-
         to_insert.emplace_back(key, std::make_shared<DiskCacheTTLMeta>(
-            DiskCacheTTLMeta::State::Cached, found_disk, size, time(nullptr), part_ts, rel_path.string()));
+            DiskCacheTTLMeta::State::Cached, disks[0], size, time(nullptr), part_ts, rel_path.string()));
         restored_bytes += size;
     }
 

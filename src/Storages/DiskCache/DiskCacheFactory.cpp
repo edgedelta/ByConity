@@ -158,11 +158,12 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
                 LOG_TRACE(log, "Reusing existing TTL cache for {} (UUID: {})", table_name, UUIDHelpers::UUIDToString(table_uuid));
                 return reg_it->second;
             }
-            LOG_INFO(log, "TTL cache settings changed for {} (UUID: {}), recreating (ttl: {}->{}min, max_size: {}->{}bytes)",
+            LOG_INFO(log, "TTL cache settings changed for {} (UUID: {}), updating in place (ttl: {}->{}min, max_size: {}->{}bytes)",
                 table_name, UUIDHelpers::UUIDToString(table_uuid),
                 existing->getTTLMinutes(), ttl_minutes,
                 existing->getMaxSizeBytes(), effective_max_size);
-            per_table_ttl_caches.erase(reg_it);
+            existing->updateSettings(ttl_minutes, effective_max_size);
+            return reg_it->second;
         }
     }
 
