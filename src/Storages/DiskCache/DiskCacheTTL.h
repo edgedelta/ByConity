@@ -260,7 +260,7 @@ private:
     CacheEraseResult cacheErasePartLocked(Shard & shard, UInt64 hash_high);
 
     /// Stats helpers — caller must NOT hold any shard mutex
-    void addToPartitionStats(const String & partition_id, time_t partition_ts, size_t bytes);
+    void addToPartitionStats(const String & partition_id, time_t partition_ts, size_t bytes, size_t count = 1);
     void subtractFromPartitionStats(const CacheEraseResult & result);
 
     /// Apply a batch of erase results: delete files, notify FDB, update partition stats.
