@@ -522,9 +522,14 @@ namespace ProfileEvents
     extern const Event IndexGranuleSeekTime;
     extern const Event IndexGranuleReadTime;
     extern const Event IndexGranuleCalcTime;
+    extern const Event NetworkReceiveElapsedMicroseconds;
     extern const Event NetworkReceiveBytes;
     extern const Event NetworkSendBytes;
     extern const Event S3ReadMicroseconds;
+    extern const Event S3ReadRequestsThrottling;
+    extern const Event ReadBufferFromS3ReadCount;
+    extern const Event PrewhereSelectedMarks;
+    extern const Event PocoHTTPS3GetCount;
     extern const Event S3ReadRequestsCount;
     extern const Event S3ReadRequestsErrors;
     extern const Event ReadBufferFromS3ReadBytes;
@@ -1214,14 +1219,19 @@ private:
         ProfileEvents::IndexGranuleReadTime,
         ProfileEvents::IndexGranuleCalcTime,
         /// About network
+        ProfileEvents::NetworkReceiveElapsedMicroseconds,
         ProfileEvents::NetworkReceiveBytes,
         ProfileEvents::NetworkSendBytes,
         /// About s3
         ProfileEvents::S3ReadMicroseconds,
         ProfileEvents::S3ReadRequestsCount,
         ProfileEvents::S3ReadRequestsErrors,
+        ProfileEvents::S3ReadRequestsThrottling,
         ProfileEvents::ReadBufferFromS3ReadBytes,
         ProfileEvents::ReadBufferFromS3ReadMicroseconds,
+        ProfileEvents::ReadBufferFromS3ReadCount,
+        ProfileEvents::PrewhereSelectedMarks,
+        ProfileEvents::PocoHTTPS3GetCount,
         /// About PFRA (active path when enable_io_pfra=true)
         ProfileEvents::PFRAWSReadBufferReadCount,
         ProfileEvents::PFRAWSReadBufferPrefetchCount,

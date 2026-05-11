@@ -28,12 +28,15 @@
 #include <IO/createReadBufferFromFileBase.h>
 #include <Common/Stopwatch.h>
 #include <Common/ProfileEvents.h>
+#include <common/logger_useful.h>
 
 namespace ProfileEvents
 {
     extern const Event DiskCacheDiskReadMicroseconds;
     extern const Event DiskCacheDecompressMicroseconds;
 }
+
+static Poco::Logger * getLog() { return &Poco::Logger::get("CompressedReadBufferFromFile"); }
 
 namespace DB
 {
@@ -55,11 +58,11 @@ bool CompressedReadBufferFromFile::nextImpl()
 
     size_t size_decompressed = 0;
     size_t size_compressed_without_checksum;
-    {
-        Stopwatch io_sw;
-        size_compressed = readCompressedData(size_decompressed, size_compressed_without_checksum, false);
-        ProfileEvents::increment(ProfileEvents::DiskCacheDiskReadMicroseconds, io_sw.elapsedMicroseconds());
-    }
+    Stopwatch io_sw;
+    size_compressed = readCompressedData(size_decompressed, size_compressed_without_checksum, false);
+    const auto io_us = io_sw.elapsedMicroseconds();
+    ProfileEvents::increment(ProfileEvents::DiskCacheDiskReadMicroseconds, io_us);
+
     if (!size_compressed)
         return false;
 
@@ -71,11 +74,13 @@ bool CompressedReadBufferFromFile::nextImpl()
     memory.resize(size_decompressed + additional_size_at_the_end_of_buffer);
     working_buffer = Buffer(memory.data(), &memory[size_decompressed]);
 
-    {
-        Stopwatch decomp_sw;
-        decompress(working_buffer, size_decompressed, size_compressed_without_checksum);
-        ProfileEvents::increment(ProfileEvents::DiskCacheDecompressMicroseconds, decomp_sw.elapsedMicroseconds());
-    }
+    Stopwatch decomp_sw;
+    decompress(working_buffer, size_decompressed, size_compressed_without_checksum);
+    const auto decomp_us = decomp_sw.elapsedMicroseconds();
+    ProfileEvents::increment(ProfileEvents::DiskCacheDecompressMicroseconds, decomp_us);
+
+    LOG_DEBUG(getLog(), "[cache-perf] path={} compressed={}B decompressed={}B disk_read={}us decompress={}us",
+        file_in.getFileName(), size_compressed, size_decompressed, io_us, decomp_us);
 
     /// nextimpl_working_buffer_offset is set in the seek function (lazy seek). So we have to
     /// check that we are not seeking beyond working buffer.
