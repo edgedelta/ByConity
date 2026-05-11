@@ -183,7 +183,11 @@ size_t CompressedReadBufferFromFile::readBig(char * to, size_t n)
         size_t size_decompressed = 0;
         size_t size_compressed_without_checksum = 0;
 
+        Stopwatch io_sw2;
         size_t new_size_compressed = readCompressedData(size_decompressed, size_compressed_without_checksum, false);
+        const auto io_us2 = io_sw2.elapsedMicroseconds();
+        ProfileEvents::increment(ProfileEvents::DiskCacheDiskReadMicroseconds, io_us2);
+
         size_compressed = 0; /// file_in no longer points to the end of the block in working_buffer.
         if (!new_size_compressed)
             return bytes_read;
@@ -194,7 +198,14 @@ size_t CompressedReadBufferFromFile::readBig(char * to, size_t n)
         /// need to skip some bytes in decompressed data (seek happened before readBig call).
         if (nextimpl_working_buffer_offset == 0 && size_decompressed + additional_size_at_the_end_of_buffer <= n - bytes_read)
         {
+            Stopwatch decomp_sw2;
             decompressTo(to + bytes_read, size_decompressed, size_compressed_without_checksum);
+            const auto decomp_us2 = decomp_sw2.elapsedMicroseconds();
+            ProfileEvents::increment(ProfileEvents::DiskCacheDecompressMicroseconds, decomp_us2);
+
+            LOG_DEBUG(getLog(), "[cache-perf] path={} compressed={}B decompressed={}B disk_read={}us decompress={}us",
+                file_in.getFileName(), new_size_compressed, size_decompressed, io_us2, decomp_us2);
+
             bytes_read += size_decompressed;
             bytes += size_decompressed;
         }
