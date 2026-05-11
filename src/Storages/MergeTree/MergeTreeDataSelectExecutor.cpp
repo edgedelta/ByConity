@@ -1978,12 +1978,12 @@ MarkRanges MergeTreeDataSelectExecutor::filterMarksUsingIndex(
                 range.begin / index_granularity,
                 (range.end + index_granularity - 1) / index_granularity);
 
+        total_granules += range.end - range.begin;
+
         index_time_watcher.watch(IndexTimeWatcher::Type::SEEK, [&](){
             if (last_index_mark != index_range.begin || !granule)
                 reader.seek(index_range.begin);
         });
-
-        total_granules += index_range.end - index_range.begin;
 
         for (size_t index_mark = index_range.begin; index_mark < index_range.end; ++index_mark)
         {
@@ -2014,7 +2014,7 @@ MarkRanges MergeTreeDataSelectExecutor::filterMarksUsingIndex(
 
             if (!maybe_true)
             {
-                ++granules_dropped;
+                granules_dropped += data_range.end - data_range.begin;
                 continue;
             }
 

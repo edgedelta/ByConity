@@ -106,6 +106,10 @@
     M(CreatedReadBufferMMapFailed, "") \
     M(DiskReadElapsedMicroseconds, "Total time spent waiting for read syscall. This include reads from page cache.") \
     M(DiskWriteElapsedMicroseconds, "Total time spent waiting for write syscall. This include writes to page cache.") \
+    M(DiskCacheDecompressMicroseconds, "Time spent decompressing blocks on disk cache hit path.") \
+    M(DiskCacheDiskReadMicroseconds, "Time spent in pread/read syscall on disk cache hit path (excludes decompression).") \
+    M(DiskCacheUncompressedHit, "UncompressedCache hit: no disk I/O or decompression needed.") \
+    M(DiskCacheUncompressedMiss, "UncompressedCache miss: disk read + decompression performed.") \
     M(NetworkReceiveElapsedMicroseconds, \
       "Total time spent waiting for data to receive or receiving data from network. Only ClickHouse-related network interaction is " \
       "included, not by 3rd party libraries.") \
