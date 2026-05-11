@@ -529,10 +529,13 @@ namespace ProfileEvents
     extern const Event S3ReadRequestsErrors;
     extern const Event ReadBufferFromS3ReadBytes;
     extern const Event ReadBufferFromS3ReadMicroseconds;
-    extern const Event S3ReadAheadReaderReadCount;
-    extern const Event S3ReadAheadReaderReadBytes;
-    extern const Event S3ReadAheadReaderIgnoreCount;
-    extern const Event S3ReadAheadReaderIgnoreBytes;
+    extern const Event PFRAWSReadBufferReadCount;
+    extern const Event PFRAWSReadBufferPrefetchCount;
+    extern const Event PFRAWSReadBufferPrefetchUtilCount;
+    extern const Event PFRAWSReadBufferPrefetchWaitMicro;
+    extern const Event PFRAWSReadBufferRemoteReadCount;
+    extern const Event PFRAWSReadBufferRemoteReadBytes;
+    extern const Event PFRAWSReadBufferReadMicro;
     extern const Event QueryMemoryLimitExceeded;
     extern const Event InsertQuery;
     extern const Event Merge;
@@ -1219,10 +1222,14 @@ private:
         ProfileEvents::S3ReadRequestsErrors,
         ProfileEvents::ReadBufferFromS3ReadBytes,
         ProfileEvents::ReadBufferFromS3ReadMicroseconds,
-        ProfileEvents::S3ReadAheadReaderReadCount,
-        ProfileEvents::S3ReadAheadReaderReadBytes,
-        ProfileEvents::S3ReadAheadReaderIgnoreCount,
-        ProfileEvents::S3ReadAheadReaderIgnoreBytes,
+        /// About PFRA (active path when enable_io_pfra=true)
+        ProfileEvents::PFRAWSReadBufferReadCount,
+        ProfileEvents::PFRAWSReadBufferPrefetchCount,
+        ProfileEvents::PFRAWSReadBufferPrefetchUtilCount,
+        ProfileEvents::PFRAWSReadBufferPrefetchWaitMicro,
+        ProfileEvents::PFRAWSReadBufferRemoteReadCount,
+        ProfileEvents::PFRAWSReadBufferRemoteReadBytes,
+        ProfileEvents::PFRAWSReadBufferReadMicro,
         ProfileEvents::QueryMemoryLimitExceeded,
         ProfileEvents::InsertQuery,
         ProfileEvents::Merge,

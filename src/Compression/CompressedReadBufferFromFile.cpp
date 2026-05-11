@@ -26,7 +26,14 @@
 #include <Compression/LZ4_decompress_faster.h>
 #include <IO/WriteHelpers.h>
 #include <IO/createReadBufferFromFileBase.h>
+#include <Common/Stopwatch.h>
+#include <Common/ProfileEvents.h>
 
+namespace ProfileEvents
+{
+    extern const Event DiskCacheDiskReadMicroseconds;
+    extern const Event DiskCacheDecompressMicroseconds;
+}
 
 namespace DB
 {
@@ -48,7 +55,11 @@ bool CompressedReadBufferFromFile::nextImpl()
 
     size_t size_decompressed = 0;
     size_t size_compressed_without_checksum;
-    size_compressed = readCompressedData(size_decompressed, size_compressed_without_checksum, false);
+    {
+        Stopwatch io_sw;
+        size_compressed = readCompressedData(size_decompressed, size_compressed_without_checksum, false);
+        ProfileEvents::increment(ProfileEvents::DiskCacheDiskReadMicroseconds, io_sw.elapsedMicroseconds());
+    }
     if (!size_compressed)
         return false;
 
@@ -60,7 +71,11 @@ bool CompressedReadBufferFromFile::nextImpl()
     memory.resize(size_decompressed + additional_size_at_the_end_of_buffer);
     working_buffer = Buffer(memory.data(), &memory[size_decompressed]);
 
-    decompress(working_buffer, size_decompressed, size_compressed_without_checksum);
+    {
+        Stopwatch decomp_sw;
+        decompress(working_buffer, size_decompressed, size_compressed_without_checksum);
+        ProfileEvents::increment(ProfileEvents::DiskCacheDecompressMicroseconds, decomp_sw.elapsedMicroseconds());
+    }
 
     /// nextimpl_working_buffer_offset is set in the seek function (lazy seek). So we have to
     /// check that we are not seeking beyond working buffer.
