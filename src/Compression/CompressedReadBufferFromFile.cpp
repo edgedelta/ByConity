@@ -80,8 +80,8 @@ bool CompressedReadBufferFromFile::nextImpl()
     ProfileEvents::increment(ProfileEvents::DiskCacheDecompressMicroseconds, decomp_us);
 
     if (log_cache_perf_)
-        LOG_DEBUG(getLog(), "[cache-perf] path={} compressed={}B decompressed={}B disk_read={}us decompress={}us",
-            file_in.getFileName(), size_compressed, size_decompressed, io_us, decomp_us);
+        LOG_DEBUG(getLog(), "[cache-perf] col={} path={} compressed={}B decompressed={}B disk_read={}us decompress={}us",
+            column_name_, file_in.getFileName(), size_compressed, size_decompressed, io_us, decomp_us);
 
     /// nextimpl_working_buffer_offset is set in the seek function (lazy seek). So we have to
     /// check that we are not seeking beyond working buffer.

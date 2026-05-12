@@ -612,7 +612,7 @@ void MergedReadBufferWithSegmentCache::initCacheBufferIfNeeded(
                 fullPath(cache_disk, cache_path),
                 [this, cache_disk, cache_path]() { return cache_disk->readFile(cache_path, settings.read_settings); },
                 uncompressed_cache);
-            cached_compressed_buffer->setLogCachePerf(log_perf);
+            cached_compressed_buffer->setLogCachePerf(log_perf, stream_name);
 
             cache_buffer.initialize(std::move(cached_compressed_buffer), nullptr);
         }
@@ -622,13 +622,13 @@ void MergedReadBufferWithSegmentCache::initCacheBufferIfNeeded(
             {
                 auto non_cached_compressed_buffer
                     = std::make_unique<CompressedReadBufferFromFile>(cache_disk->readFile(cache_path, settings.read_settings));
-                non_cached_compressed_buffer->setLogCachePerf(log_perf);
+                non_cached_compressed_buffer->setLogCachePerf(log_perf, stream_name);
                 cache_buffer.initialize(nullptr, std::move(non_cached_compressed_buffer));
             }
             else if (remote_cache)
             {
                 auto non_cached_compressed_buffer = std::make_unique<CompressedReadBufferFromFile>(std::move(remote_cache));
-                non_cached_compressed_buffer->setLogCachePerf(log_perf);
+                non_cached_compressed_buffer->setLogCachePerf(log_perf, stream_name);
                 cache_buffer.initialize(nullptr, std::move(non_cached_compressed_buffer));
             }
             else

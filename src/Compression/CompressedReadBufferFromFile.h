@@ -65,6 +65,7 @@ private:
     /* size_t nextimpl_working_buffer_offset; */
 
     bool log_cache_perf_ = false;
+    std::string column_name_;
 
     bool nextImpl() override;
 
@@ -111,7 +112,7 @@ public:
         return file_in.getFileName();
     }
 
-    void setLogCachePerf(bool v) { log_cache_perf_ = v; }
+    void setLogCachePerf(bool v, const std::string & col = "") { log_cache_perf_ = v; column_name_ = col; }
 
     size_t getSizeCompressed() const { return size_compressed; }
 
