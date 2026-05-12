@@ -303,7 +303,12 @@ bool MergeTreeConditionInverted::mayBeTrueOnGranuleInPart(
     if (!granule)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "GinFilter index condition got a granule with the wrong type.");
     
-    // filter without text search do not return filter_bitmap
+    // Populate filter_bitmap for EQUALS-only conditions (no NOT/NOT_EQUALS in RPN).
+    // NOT_EQUALS would require inverting the bitmap (~95% rows for common tokens) which
+    // is worse than granule-level filtering, so fall back to empty_bitmap in that case.
+    bool has_negation = std::any_of(rpn.begin(), rpn.end(), [](const RPNElement & e) {
+        return e.function == RPNElement::FUNCTION_NOT_EQUALS || e.function == RPNElement::FUNCTION_NOT;
+    });
     roaring::Roaring empty_bitmap;
 
     /// Check like in KeyCondition.
@@ -316,7 +321,9 @@ bool MergeTreeConditionInverted::mayBeTrueOnGranuleInPart(
         }
         else if (element.function == RPNElement::FUNCTION_EQUALS || element.function == RPNElement::FUNCTION_NOT_EQUALS)
         {
-            rpn_stack.emplace_back(granule->gin_filters[element.key_column].contains(*element.gin_filter, cache_store, empty_bitmap), true);
+            roaring::Roaring & bitmap_ref = (!has_negation && element.function == RPNElement::FUNCTION_EQUALS)
+                ? filter_bitmap : empty_bitmap;
+            rpn_stack.emplace_back(granule->gin_filters[element.key_column].contains(*element.gin_filter, cache_store, bitmap_ref), true);
 
             if (element.function == RPNElement::FUNCTION_NOT_EQUALS)
                 rpn_stack.back() = !rpn_stack.back();
