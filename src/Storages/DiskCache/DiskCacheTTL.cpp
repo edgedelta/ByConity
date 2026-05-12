@@ -818,6 +818,41 @@ void DiskCacheTTL::load()
 {
     if (fdb_index)
     {
+        auto hasData = [&](const auto & disk, const String & dir) {
+            return disk->exists(dir) && disk->iterateDirectory(dir)->isValid();
+        };
+
+        bool cache_wiped = true;
+        for (const auto & disk : volume->getDisks())
+        {
+            if (hasData(disk, latest_disk_cache_dir))
+            {
+                cache_wiped = false;
+                break;
+            }
+            for (const auto & prev : previous_disk_cache_dirs)
+            {
+                if (hasData(disk, prev))
+                {
+                    cache_wiped = false;
+                    break;
+                }
+            }
+            if (!cache_wiped)
+                break;
+        }
+
+        if (cache_wiped)
+        {
+            // TODO: proactively re-fetch this worker's assigned parts from S3 to warm the
+            // cache after restart, avoiding cold query latency. Requires querying the catalog
+            // for the current part assignment and triggering background preload per table.
+            LOG_WARNING(log, "TTL cache for {}: cache dir is empty, "
+                "clearing stale FDB forward index and skipping reconcile", table_uuid);
+            fdb_index->clearSelf();
+            return;
+        }
+
         auto result = fdb_index->reconcile(
             volume,
             [this](UInt128 key, const String & seg_name) { return getRelativePath(key, seg_name); },

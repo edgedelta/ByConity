@@ -205,6 +205,19 @@ void TTLCacheFDBIndex::flush(std::vector<PendingOp> & ops)
     }
 }
 
+void TTLCacheFDBIndex::clearSelf()
+{
+    try
+    {
+        metastore->clean(key_prefix);
+        LOG_INFO(log, "TTLCacheFDBIndex::clearSelf: cleared forward DCI entries for worker prefix={}", key_prefix);
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, "TTLCacheFDBIndex::clearSelf: failed to clear DCI entries");
+    }
+}
+
 std::optional<String> TTLCacheFDBIndex::findPeerOwner(UInt128 key, const String & partition_id)
 {
     String rev_key = makeRevKey(key, partition_id);

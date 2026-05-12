@@ -1693,4 +1693,64 @@ TEST_F(DiskCacheTTLTest, DropEvictsFDBEntries)
         << "FDB entries not cleaned after drop(); remaining=" << mock_store->store.size();
 }
 
+// ---------------------------------------------------------------------------
+// load() with empty cache dir (emptyDir wipe): clears DCI entries, skips reconcile,
+// leaves DCIREV entries untouched.
+// ---------------------------------------------------------------------------
+
+TEST_F(DiskCacheTTLTest, LoadClearsDCIOnEmptyDir)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    const String uuid   = "test-uuid-wipe";
+    const String ns     = "byconity";
+    const String worker = "test-worker";
+    const String key_prefix     = ns + "_DCI_" + worker + "_" + uuid;
+    const String rev_key_prefix = ns + "_DCIREV_" + uuid;
+
+    auto mock_store = std::make_shared<MockMetaStore>();
+
+    // Seed stale DCI (forward) + DCIREV (reverse) entries as if a previous run had cached data.
+    const int num_segs = 3;
+    time_t now = time(nullptr);
+    for (int i = 0; i < num_segs; i++)
+    {
+        String fdb_key = fmt::format("{}_20240101_deadbeef{:04x}_cafebabe{:04x}", key_prefix, i, i);
+        String rev_key = fmt::format("{}_20240101_deadbeef{:04x}_cafebabe{:04x}", rev_key_prefix, i, i);
+        mock_store->store[fdb_key] = fmt::format("{}:64:fake/seg/path_{}.bin", static_cast<int64_t>(now), i);
+        mock_store->store[rev_key] = worker;
+    }
+    ASSERT_EQ(mock_store->store.size(), static_cast<size_t>(num_segs * 2));
+
+    auto fdb_idx = std::make_shared<TTLCacheFDBIndex>(mock_store, ns, worker, uuid, worker);
+    DiskCacheTTL cache("test_wipe", uuid, volume, nullptr, settings, strategy, 60 * 24 * 365, 0);
+    cache.setFDBIndex(fdb_idx);
+
+    // Cache dir (latest_disk_cache_dir = "disk_cache_v1") does not exist on disk —
+    // simulates emptyDir wipe followed by mkdir of the mount point only.
+    cache.load();
+
+    // clearSelf() is synchronous — no need to flush the async queue.
+
+    // DCI forward entries must be gone.
+    size_t dci_remaining = 0;
+    for (const auto & [k, v] : mock_store->store)
+        if (k.starts_with(key_prefix))
+            dci_remaining++;
+    EXPECT_EQ(dci_remaining, 0u) << "stale DCI entries not cleared after emptyDir wipe";
+
+    // DCIREV reverse entries must be untouched (self-heal via overwrites as segments are re-cached).
+    size_t dcirev_remaining = 0;
+    for (const auto & [k, v] : mock_store->store)
+        if (k.starts_with(rev_key_prefix))
+            dcirev_remaining++;
+    EXPECT_EQ(dcirev_remaining, static_cast<size_t>(num_segs)) << "DCIREV entries should not be cleared";
+
+    // cache_map must be empty — no stale entries loaded.
+    EXPECT_EQ(cache.getKeyCount(), 0u) << "cache_map should be empty after emptyDir wipe";
+}
+
 } // namespace DB

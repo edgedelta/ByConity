@@ -56,6 +56,12 @@ public:
     /// Returns peer RPC endpoint (host:port) if found, nullopt otherwise.
     std::optional<String> findPeerOwner(UInt128 key, const String & partition_id);
 
+    /// Synchronously delete all forward DCI entries for this worker.
+    /// Called on startup when the cache directory is empty.
+    /// Does NOT touch DCIREV — stale reverse entries will be handled later in tandem with
+    /// s3 restore.
+    void clearSelf();
+
     /// Scan FDB index and restore cache_map.
     /// Calls on_stats_update for each successfully restored entry so the
     /// caller can update partition_stats without re-scanning cache_map
