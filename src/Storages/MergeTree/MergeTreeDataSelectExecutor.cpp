@@ -2001,8 +2001,11 @@ MarkRanges MergeTreeDataSelectExecutor::filterMarksUsingIndex(
             else
             {
                 roaring::Roaring filter_result;
-                maybe_true
-                    = cache_in_store.store ? gin_filter_condition->mayBeTrueOnGranuleInPart(granule, cache_in_store, filter_result) : true;
+                index_time_watcher.watch(IndexTimeWatcher::Type::CLAC, [&](){
+                    maybe_true = cache_in_store.store
+                        ? gin_filter_condition->mayBeTrueOnGranuleInPart(granule, cache_in_store, filter_result)
+                        : true;
+                });
                 filter_bitmap |= filter_result;
             }
 
