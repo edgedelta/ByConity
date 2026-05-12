@@ -60,6 +60,8 @@ private:
     /// A piece of data from the cache, or a piece of read data that we put into the cache.
     UncompressedCache::MappedPtr owned_cell;
 
+    bool log_cache_perf_ = false;
+
     void initInput();
 
     bool nextImpl() override;
@@ -133,6 +135,8 @@ public:
     {
         return path;
     }
+
+    void setLogCachePerf(bool v) { log_cache_perf_ = v; }
 
     UncompressedCache::MappedPtr getOwnedCell() const { return owned_cell; }
 

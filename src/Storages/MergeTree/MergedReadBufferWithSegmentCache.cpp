@@ -164,8 +164,6 @@ MergedReadBufferWithSegmentCache::MergedReadBufferWithSegmentCache(
             collect_cache_stats = ctx->getSettingsRef().report_segment_profiles
                                || ctx->getSettingsRef().log_segment_profiles;
     }
-    LOG_DEBUG(logger, "MergedReadBufferWithSegmentCache: part={} stream={} query_id={} is_ttl={} collect_stats={}",
-        part_name_, stream_name_, cached_query_id, is_ttl_cache, collect_cache_stats);
     initialize();
 }
 
@@ -606,12 +604,15 @@ void MergedReadBufferWithSegmentCache::initCacheBufferIfNeeded(
         cache_buffer.reset();
 
         // Init cache buffer
+        const bool log_perf = dynamic_cast<DiskCacheTTL *>(segment_cache) != nullptr;
+
         if (uncompressed_cache && cache_disk)
         {
             auto cached_compressed_buffer = std::make_unique<CachedCompressedReadBuffer>(
                 fullPath(cache_disk, cache_path),
                 [this, cache_disk, cache_path]() { return cache_disk->readFile(cache_path, settings.read_settings); },
                 uncompressed_cache);
+            cached_compressed_buffer->setLogCachePerf(log_perf);
 
             cache_buffer.initialize(std::move(cached_compressed_buffer), nullptr);
         }
@@ -621,11 +622,13 @@ void MergedReadBufferWithSegmentCache::initCacheBufferIfNeeded(
             {
                 auto non_cached_compressed_buffer
                     = std::make_unique<CompressedReadBufferFromFile>(cache_disk->readFile(cache_path, settings.read_settings));
+                non_cached_compressed_buffer->setLogCachePerf(log_perf);
                 cache_buffer.initialize(nullptr, std::move(non_cached_compressed_buffer));
             }
             else if (remote_cache)
             {
                 auto non_cached_compressed_buffer = std::make_unique<CompressedReadBufferFromFile>(std::move(remote_cache));
+                non_cached_compressed_buffer->setLogCachePerf(log_perf);
                 cache_buffer.initialize(nullptr, std::move(non_cached_compressed_buffer));
             }
             else

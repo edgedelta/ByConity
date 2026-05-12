@@ -111,8 +111,9 @@ bool CachedCompressedReadBuffer::nextImpl()
             const auto decompress_us = decompress_sw.elapsedMicroseconds();
             ProfileEvents::increment(ProfileEvents::DiskCacheDecompressMicroseconds, decompress_us);
 
-            LOG_DEBUG(getLog(), "[cache-perf] path={} compressed={}B decompressed={}B disk_read={}us decompress={}us",
-                path, cell->compressed_size, size_decompressed, io_us, decompress_us);
+            if (log_cache_perf_)
+                LOG_DEBUG(getLog(), "[cache-perf] path={} compressed={}B decompressed={}B disk_read={}us decompress={}us",
+                    path, cell->compressed_size, size_decompressed, io_us, decompress_us);
         }
 
         return cell;
