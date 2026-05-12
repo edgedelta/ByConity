@@ -2062,7 +2062,7 @@ enum PreloadLevelSettings : UInt64
     /** Hybrid allocation related settings */ \
     M(Bool, enable_hybrid_allocation, false, "Enalbe hybrid physical parts - virutal parts allocation", 0) \
     M(UInt64, min_rows_per_virtual_part, 0, "Minimum size of a virtual part", 0) \
-    M(UInt64, cnch_hybrid_part_allocation_algorithm, 2, "Hybrid Part allocation algorithm, 0: modulo hashing, 1: ring consistent hash, 2: bounded load consistent hashing, 3: bounded consistent hashing in one stage, 4: strict bounded consistent hashing in one stage.", 0) \
+    M(UInt64, cnch_hybrid_part_allocation_algorithm, 2, "Hybrid Part allocation algorithm, 0: modulo hashing, 1: ring consistent hash, 2: bounded load consistent hashing, 3: bounded consistent hashing in one stage, 4: strict bounded consistent hashing in one stage, 5: jump consistent hash (size-aware, cache-stable).", 0) \
     \
     /** BitEngine related settings */ \
     M(Bool, use_encoded_bitmap, true, "Whether to read the encoded bitmap column", 0) \
