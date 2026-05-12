@@ -158,7 +158,8 @@ public:
             cache = std::move(it->second);
             per_table_ttl_caches.erase(it);
         }
-        cache->drop();
+        if (auto ttl = std::dynamic_pointer_cast<DiskCacheTTL>(cache))
+            ttl->drop();
     }
 
     /// Global TTL cache usage tracking
