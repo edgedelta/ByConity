@@ -149,7 +149,7 @@ public:
     /// Called when disk_cache_ttl_hours is set to 0 so re-enabling creates a fresh object.
     void removeTableTTLCache(const UUID & table_uuid)
     {
-        std::shared_ptr<DiskCacheTTL> cache;
+        IDiskCachePtr cache;
         {
             std::lock_guard<std::mutex> lock(ttl_cache_registry_mutex);
             auto it = per_table_ttl_caches.find(table_uuid);
