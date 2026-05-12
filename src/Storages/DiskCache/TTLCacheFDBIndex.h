@@ -48,6 +48,10 @@ public:
     /// partition_id: YYYYMMDD string derived from max_timestamp (same as path structure).
     void evictPart(const String & partition_id, UInt64 hash_high);
 
+    /// Issue FDB clean() for all entries of this table (forward + reverse index).
+    /// Two range deletes regardless of how many parts/segments are cached.
+    void evictTable();
+
     /// Look up whether any peer worker has this segment cached.
     /// Returns peer RPC endpoint (host:port) if found, nullopt otherwise.
     std::optional<String> findPeerOwner(UInt128 key, const String & partition_id);

@@ -219,6 +219,10 @@ public:
         max_size_bytes.store(new_max_size_bytes, std::memory_order_relaxed);
     }
 
+    /// Release global counter and schedule async deletion of all on-disk data for this table.
+    /// Cheap to call: renames directories synchronously, deletes files in background.
+    void drop();
+
     /// Look up whether a peer worker has this segment cached via the FDB reverse index.
     /// Returns peer RPC endpoint if found, nullopt if not found or FDB unavailable.
     /// Gated on fdb_index being set; caller is responsible for checking stealing mode.

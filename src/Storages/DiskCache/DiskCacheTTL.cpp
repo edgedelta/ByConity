@@ -1005,6 +1005,63 @@ size_t DiskCacheTTL::drop(const String & part_base_path)
     return delete_file_size;
 }
 
+void DiskCacheTTL::drop()
+{
+    is_droping.store(true);
+
+    // Release global counter + clear in-memory state
+    size_t dropped_bytes = total_size.load();
+    for (auto & shard : shards)
+    {
+        std::unique_lock<std::shared_mutex> lock(shard.mutex);
+        shard.cache_map.clear();
+        shard.part_index.clear();
+    }
+    total_entries.store(0);
+    total_size.store(0);
+    DiskCacheFactory::instance().releaseGlobalTTL(dropped_bytes);
+    {
+        std::unique_lock<std::shared_mutex> lk(cache_stats.partition_stats_mutex);
+        cache_stats.partition_stats.clear();
+    }
+
+    // Atomically rename table dirs (cheap), then delete asynchronously
+    String ts = std::to_string(time(nullptr));
+    std::vector<std::pair<DiskPtr, String>> dirs_to_delete;
+    for (const auto & disk : volume->getDisks())
+    {
+        for (const char * prefix : {META_DISK_CACHE_DIR_PREFIX, DATA_DISK_CACHE_DIR_PREFIX})
+        {
+            String old_path = (fs::path(latest_disk_cache_dir) / prefix / table_uuid).string();
+            if (!disk->exists(old_path))
+                continue;
+            String drop_path = (fs::path(latest_disk_cache_dir) / prefix / (".drop_" + table_uuid + "_" + ts)).string();
+            try
+            {
+                disk->moveDirectory(old_path, drop_path);
+                dirs_to_delete.emplace_back(disk, drop_path);
+            }
+            catch (...)
+            {
+                tryLogCurrentException(log, "Failed to rename for async drop: " + old_path);
+            }
+        }
+    }
+
+    LOG_INFO(log, "TTL cache drop: released {} bytes, {} dirs queued for async deletion", dropped_bytes, dirs_to_delete.size());
+
+    auto fdb = fdb_index;
+    getEvictPool().scheduleOrThrow([dirs = std::move(dirs_to_delete), fdb] {
+        for (auto & [disk, path] : dirs)
+        {
+            try { disk->removeRecursive(path); }
+            catch (...) { tryLogCurrentException(&Poco::Logger::get("DiskCacheTTL"), "Async drop failed: " + path); }
+        }
+        if (fdb)
+            fdb->evictTable();
+    });
+}
+
 // DiskIterator implementations
 DiskCacheTTL::DiskIterator::DiskIterator(
     const String & name_, DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk_, int min_depth_parallel_, int max_depth_parallel_)

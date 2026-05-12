@@ -17,6 +17,7 @@
 
 #include <Core/UUID.h>
 #include <Storages/DiskCache/DiskCache_fwd.h>
+#include <Storages/DiskCache/DiskCacheTTL.h>
 #include <common/singleton.h>
 #include <common/types.h>
 #include <atomic>
@@ -148,8 +149,16 @@ public:
     /// Called when disk_cache_ttl_hours is set to 0 so re-enabling creates a fresh object.
     void removeTableTTLCache(const UUID & table_uuid)
     {
-        std::lock_guard<std::mutex> lock(ttl_cache_registry_mutex);
-        per_table_ttl_caches.erase(table_uuid);
+        std::shared_ptr<DiskCacheTTL> cache;
+        {
+            std::lock_guard<std::mutex> lock(ttl_cache_registry_mutex);
+            auto it = per_table_ttl_caches.find(table_uuid);
+            if (it == per_table_ttl_caches.end())
+                return;
+            cache = std::move(it->second);
+            per_table_ttl_caches.erase(it);
+        }
+        cache->drop();
     }
 
     /// Global TTL cache usage tracking

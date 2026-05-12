@@ -343,4 +343,59 @@ TEST_F(TTLCacheFDBIndexTest, EmptyFDBReturnsNullopt)
     EXPECT_FALSE(batch_called);
 }
 
+// ---------------------------------------------------------------------------
+// Test: evictTable clears all forward + reverse index entries for the table
+// ---------------------------------------------------------------------------
+
+TEST_F(TTLCacheFDBIndexTest, EvictTableClearsAllEntries)
+{
+    const String uuid       = "evict-table-uuid";
+    const String other_uuid = "other-uuid";
+    const String ns = "ns", worker = "w1";
+
+    // Forward-index prefix for target table and another table
+    const String kp       = fmt::format("{}_DCI_{}_{}", ns, worker, uuid);
+    const String other_kp = fmt::format("{}_DCI_{}_{}", ns, worker, other_uuid);
+    // Reverse-index prefix for target table
+    const String rev_kp   = fmt::format("{}_DCIREV_{}", ns, uuid);
+
+    auto mock = std::make_shared<FDBMockMetaStore>();
+    const time_t now = time(nullptr);
+
+    // Seed 5 forward-index entries for our table
+    for (int i = 0; i < 5; ++i)
+        seedFDBEntry(*mock, kp, fmt::format("_k{:04d}", i),
+            fdbMakeSegKey(uuid, fdbTodayPart(), fmt::format("col{}", i), ".bin"), 64, now);
+
+    // Seed 3 reverse-index entries for our table
+    for (int i = 0; i < 3; ++i)
+        mock->store[rev_kp + fmt::format("_rev{:04d}", i)] = "peer:1234";
+
+    // Seed 2 forward-index entries for a different table (must survive)
+    for (int i = 0; i < 2; ++i)
+        seedFDBEntry(*mock, other_kp, fmt::format("_k{:04d}", i),
+            fdbMakeSegKey(other_uuid, fdbTodayPart(), fmt::format("col{}", i), ".bin"), 64, now);
+
+    ASSERT_EQ(mock->store.size(), 10u);
+
+    {
+        TTLCacheFDBIndex idx(mock, ns, worker, uuid, worker);
+        idx.evictTable();
+        // Destructor joins bg thread, guaranteeing flush
+    }
+
+    // All entries for our table gone
+    for (auto & [k, v] : mock->store)
+    {
+        EXPECT_FALSE(k.starts_with(kp))     << "forward-index entry not cleaned: " << k;
+        EXPECT_FALSE(k.starts_with(rev_kp)) << "reverse-index entry not cleaned: " << k;
+    }
+
+    // Other table's entries intact
+    size_t other_count = 0;
+    for (auto & [k, v] : mock->store)
+        if (k.starts_with(other_kp)) ++other_count;
+    EXPECT_EQ(other_count, 2u);
+}
+
 } // namespace DB
