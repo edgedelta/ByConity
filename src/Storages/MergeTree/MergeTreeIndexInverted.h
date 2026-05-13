@@ -93,6 +93,10 @@ public:
     }
     bool mayBeTrueOnGranuleInPart(MergeTreeIndexGranulePtr idx_granule, [[maybe_unused]] PostingsCacheForStore & cache_store, [[maybe_unused]]roaring::Roaring & filter_bitmap) const;
 
+    /// Preload all posting caches from disk into cache_store so subsequent mayBeTrueOnGranuleInPart
+    /// calls only do in-memory bitmap work (no I/O inside CALC timer).
+    void prefetchPostingsCache(PostingsCacheForStore & cache_store) const;
+
     /// Returns {column, dummy_value} if safe for PREWHERE skip, or {"",""} if negation/multi-column/unknown.
     std::pair<String, String> getCoveredColumnAndDummy() const;
 

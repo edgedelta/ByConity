@@ -293,6 +293,30 @@ bool MergeTreeConditionInverted::alwaysUnknownOrTrue() const
     return rpn_stack[0];
 }
 
+void MergeTreeConditionInverted::prefetchPostingsCache(PostingsCacheForStore & cache_store) const
+{
+    if (!cache_store.store)
+        return;
+
+    GinIndexStoreDeserializer reader(cache_store.store);
+
+    auto preload = [&](const GinFilter & gin_filter) {
+        const String & key = gin_filter.getQueryString();
+        if (cache_store.cache.count(key) == 0)
+            cache_store.cache[key] = reader.createPostingsCacheFromTerms(gin_filter.getTerms());
+    };
+
+    for (const auto & element : rpn)
+    {
+        if (element.gin_filter)
+            preload(*element.gin_filter);
+
+        for (const auto & gin_filters : element.set_gin_filters)
+            for (const auto & gf : gin_filters)
+                preload(gf);
+    }
+}
+
 // TODO @caichangheng
 // filter_bitmap without text search query may case wrong with not
 // will ignore filter_bitmap select without text search;
