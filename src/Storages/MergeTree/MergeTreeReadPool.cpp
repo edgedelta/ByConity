@@ -180,7 +180,8 @@ MergeTreeReadTaskPtr MergeTreeReadPool::getTask(const size_t min_marks_to_read, 
     return std::make_unique<MergeTreeReadTask>(
         part.data_part, part.delete_bitmap, ranges_to_get_from_part, part.part_index_in_query, ordered_names,
         per_part_params[part_idx].column_name_set, per_part_params[part_idx].task_columns,
-        prewhere_info && prewhere_info->remove_prewhere_column, per_part_params[part_idx].should_reorder, std::move(curr_task_size_predictor), all_mark_ranges);
+        prewhere_info && prewhere_info->remove_prewhere_column, per_part_params[part_idx].should_reorder, std::move(curr_task_size_predictor), all_mark_ranges,
+        per_part_params[part_idx].gin_coverage);
 }
 
 Block MergeTreeReadPool::getHeader() const
@@ -252,6 +253,9 @@ std::vector<size_t> MergeTreeReadPool::fillPerPartInfo(
         const auto & required_column_names = task_columns.columns.getNames();
         params.column_name_set = NameSet{required_column_names.begin(), required_column_names.end()};
         params.should_reorder = task_columns.should_reorder;
+        // Save gin_coverage BEFORE combineFilterBitmap, which flips part.filter_bitmap in place.
+        params.gin_coverage = part.gin_coverage;
+
         parts_with_idx.push_back({ part.data_part, part.part_index_in_query, combineFilterBitmap(part, delete_bitmap_getter)});
 
         if (predict_block_size_bytes)

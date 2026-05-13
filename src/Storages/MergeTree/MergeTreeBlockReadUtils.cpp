@@ -170,10 +170,12 @@ MergeTreeReadTask::MergeTreeReadTask(
     const Names & ordered_names_, const NameSet & column_name_set_,
     const MergeTreeReadTaskColumns & task_columns_,
     bool remove_prewhere_column_, bool should_reorder_,
-    MergeTreeBlockSizePredictorPtr && size_predictor_, const MarkRanges & mark_ranges_total_read_)
+    MergeTreeBlockSizePredictorPtr && size_predictor_, const MarkRanges & mark_ranges_total_read_,
+    std::vector<GinIndexCoverage> gin_coverage_)
     : data_part{data_part_}, delete_bitmap{std::move(delete_bitmap_)}, mark_ranges_once_read{mark_ranges_once_read_}, part_index_in_query{part_index_in_query_},
     ordered_names{ordered_names_}, column_name_set{column_name_set_}, task_columns{task_columns_},
-    remove_prewhere_column{remove_prewhere_column_}, should_reorder{should_reorder_}, size_predictor{std::move(size_predictor_)}, mark_ranges_total_read(mark_ranges_total_read_)
+    remove_prewhere_column{remove_prewhere_column_}, should_reorder{should_reorder_}, size_predictor{std::move(size_predictor_)}, mark_ranges_total_read(mark_ranges_total_read_),
+    gin_coverage{std::move(gin_coverage_)}
 {
 }
 

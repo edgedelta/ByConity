@@ -1058,6 +1058,13 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
 
                 (*filter_bitmap) |= tmp_filter_bitmap;
 
+                if (const auto * gin_cond = dynamic_cast<const MergeTreeConditionInverted *>(&*index_and_condition.condition))
+                {
+                    auto [col, dummy] = gin_cond->getCoveredColumnAndDummy();
+                    if (!col.empty() && !tmp_filter_bitmap.isEmpty())
+                        ranges.gin_coverage.push_back({col, dummy});
+                }
+
                 index_and_condition.total_granules.fetch_add(total_granules, std::memory_order_relaxed);
                 index_and_condition.granules_dropped.fetch_add(granules_dropped, std::memory_order_relaxed);
 

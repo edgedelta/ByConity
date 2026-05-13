@@ -93,6 +93,9 @@ public:
     }
     bool mayBeTrueOnGranuleInPart(MergeTreeIndexGranulePtr idx_granule, [[maybe_unused]] PostingsCacheForStore & cache_store, [[maybe_unused]]roaring::Roaring & filter_bitmap) const;
 
+    /// Returns {column, dummy_value} if safe for PREWHERE skip, or {"",""} if negation/multi-column/unknown.
+    std::pair<String, String> getCoveredColumnAndDummy() const;
+
 private:
     struct KeyTuplePositionMapping
     {

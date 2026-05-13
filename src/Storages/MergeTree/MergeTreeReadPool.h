@@ -38,6 +38,7 @@ struct PerPartParams
     MergeTreeReadTaskColumns task_columns;
     bool should_reorder;
     MergeTreeBlockSizePredictorPtr size_predictor;
+    std::vector<GinIndexCoverage> gin_coverage;
 };
 
 using MergeTreeReadTaskPtr = std::unique_ptr<MergeTreeReadTask>;

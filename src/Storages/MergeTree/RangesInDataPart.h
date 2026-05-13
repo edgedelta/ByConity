@@ -1,10 +1,20 @@
 #pragma once
 
+#include <memory>
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MarkRange.h>
+#include <roaring.hh>
 
 namespace DB
 {
+
+/// GIN index coverage: when a GIN condition covers a single column with only positive atoms,
+/// the PREWHERE reader can skip reading that column and inject a dummy value instead.
+struct GinIndexCoverage
+{
+    String source_column;
+    String dummy_value;
+};
 
 struct RangesInDataPart
 {
@@ -12,6 +22,7 @@ struct RangesInDataPart
     size_t part_index_in_query;
     MarkRanges ranges;
     std::shared_ptr<roaring::Roaring> filter_bitmap;
+    std::vector<GinIndexCoverage> gin_coverage;
 
     RangesInDataPart() = default;
 

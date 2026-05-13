@@ -848,5 +848,49 @@ void ginIndexValidator(const IndexDescription & index, bool /*attach*/)
     }
 }
 
+std::pair<String, String> MergeTreeConditionInverted::getCoveredColumnAndDummy() const
+{
+    std::optional<size_t> single_key_col;
+    String dummy_value;
+
+    for (const auto & elem : rpn)
+    {
+        switch (elem.function)
+        {
+            case RPNElement::FUNCTION_AND:
+            case RPNElement::FUNCTION_OR:
+            case RPNElement::FUNCTION_NOT:
+            case RPNElement::ALWAYS_TRUE:
+            case RPNElement::ALWAYS_FALSE:
+            case RPNElement::FUNCTION_UNKNOWN:
+                continue;
+            case RPNElement::FUNCTION_NOT_EQUALS:
+            case RPNElement::FUNCTION_NOT_IN:
+                return {"", ""};
+            default:
+                break;
+        }
+
+        if (!single_key_col)
+            single_key_col = elem.key_column;
+        else if (*single_key_col != elem.key_column)
+            return {"", ""};
+
+        if (elem.gin_filter)
+        {
+            for (const String & term : elem.gin_filter->getTerms())
+            {
+                if (!dummy_value.empty())
+                    dummy_value += ' ';
+                dummy_value += term;
+            }
+        }
+    }
+
+    if (!single_key_col || dummy_value.empty())
+        return {"", ""};
+
+    return {header.getByPosition(*single_key_col).name, dummy_value};
+}
 
 }

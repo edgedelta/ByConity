@@ -106,12 +106,15 @@ struct MergeTreeReadTask
             return mark_ranges_once_read.empty() && msr_range_reader->isCurrentRangeFinished();
     }
 
+    std::vector<GinIndexCoverage> gin_coverage;
+
     MergeTreeReadTask(
         const MergeTreeMetaBase::DataPartPtr & data_part_, ImmutableDeleteBitmapPtr delete_bitmap_, const MarkRanges & mark_ranges_once_read_, const size_t part_index_in_query_,
         const Names & ordered_names_, const NameSet & column_name_set_,
         const MergeTreeReadTaskColumns & task_columns_,
         bool remove_prewhere_column_, bool should_reorder_,
-        MergeTreeBlockSizePredictorPtr && size_predictor_, const MarkRanges & mark_ranges_total_read_);
+        MergeTreeBlockSizePredictorPtr && size_predictor_, const MarkRanges & mark_ranges_total_read_,
+        std::vector<GinIndexCoverage> gin_coverage_ = {});
 
     virtual ~MergeTreeReadTask();
 };

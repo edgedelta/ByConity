@@ -590,7 +590,8 @@ MergeTreeRangeReader::MergeTreeRangeReader(
     ImmutableDeleteBitmapPtr delete_bitmap_,
     bool last_reader_in_chain_,
     const Names & non_const_virtual_column_names_,
-    size_t filtered_ratio_to_use_skip_read_)
+    size_t filtered_ratio_to_use_skip_read_,
+    std::vector<IndexCoveredExpr> covered_exprs_)
     : merge_tree_reader(merge_tree_reader_)
     , index_granularity(&(merge_tree_reader->data_part->index_granularity))
     , prev_reader(prev_reader_)
@@ -600,6 +601,7 @@ MergeTreeRangeReader::MergeTreeRangeReader(
     , is_initialized(true)
     , filtered_ratio_to_use_skip_read(filtered_ratio_to_use_skip_read_)
     , non_const_virtual_column_names(non_const_virtual_column_names_)
+    , covered_exprs(std::move(covered_exprs_))
 {
     if (prev_reader)
         sample_block = prev_reader->getSampleBlock();
@@ -635,6 +637,8 @@ MergeTreeRangeReader::MergeTreeRangeReader(
         }
 
         size_t rows = sample_block.rows();
+        injectGinDummyColumns(sample_block, rows);
+
         if (prewhere_info->prewhere_actions)
             prewhere_info->prewhere_actions->execute(sample_block, &bitmap_block, rows, true);
         if (!sample_block)
@@ -1305,6 +1309,8 @@ void MergeTreeRangeReader::executePrewhereActionsAndFilterColumns(ReadResult & r
         /// block.rows can be empty if we only select bitmap index, e.g.
         /// SELECT arraySetCheck(vid, 1) FROM t WHERE arraySetCheck(vid, 1) OR arraySetCheck(vid, 2)arraySetCheck(vid, 1)
         size_t num_rows = block.rows() ? block.rows() : result.bitmap_block.rows();
+        injectGinDummyColumns(block, num_rows);
+
         if (prewhere_info->prewhere_actions)
             prewhere_info->prewhere_actions->execute(block, &result.bitmap_block, num_rows);
 
@@ -1405,6 +1411,15 @@ void MergeTreeRangeReader::executePrewhereActionsAndFilterColumns(ReadResult & r
         result.columns[prewhere_column_pos] = castColumn(col, type);
         result.clearFilter(); // Acting as a flag to not filter in PREWHERE
     }
+}
+
+void MergeTreeRangeReader::injectGinDummyColumns(Block & block, size_t num_rows) const
+{
+    if (num_rows == 0)
+        return;
+    for (const auto & expr : covered_exprs)
+        if (!block.has(expr.source_column) && expr.source_type)
+            block.insert({expr.source_type->createColumnConst(num_rows, expr.dummy_value), expr.source_type, expr.source_column});
 }
 
 void MergeTreeRangeReader::extractBitmapIndexColumns(Columns & columns, Block & bitmap_block)
