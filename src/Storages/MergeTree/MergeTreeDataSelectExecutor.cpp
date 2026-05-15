@@ -1973,7 +1973,7 @@ MarkRanges MergeTreeDataSelectExecutor::filterMarksUsingIndex(
 
     const auto * gin_filter_condition = dynamic_cast<const MergeTreeConditionInverted *>(&*condition);
 
-    if (gin_filter_condition && cache_in_store.store)
+    if (gin_filter_condition && cache_in_store.store && !ranges.empty())
     {
         index_time_watcher.watch(IndexTimeWatcher::Type::READ, [&](){
             gin_filter_condition->prefetchPostingsCache(cache_in_store);

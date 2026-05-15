@@ -777,6 +777,15 @@ static std::pair<ServerAssignmentMap, VirtualPartAssignmentMap> assignCnchHybrid
     const auto & shard_infos = worker_group->getShardsInfo();
     auto num_workers = static_cast<int>(shard_infos.size());
 
+    {
+        std::vector<String> worker_ids;
+        worker_ids.reserve(num_workers);
+        for (const auto & s : shard_infos)
+            worker_ids.push_back(s.worker_id);
+        LOG_DEBUG(log, "assignCnchHybridPartsWithJump: num_workers={} workers=[{}] parts={} virtual_part_size={}",
+            num_workers, fmt::join(worker_ids, ","), parts.size(), virtual_part_size);
+    }
+
     std::vector<HybridPart> hybrid_parts;
     splitHybridParts(parts, virtual_part_size, hybrid_parts);
 
