@@ -114,7 +114,7 @@ std::unique_ptr<SeekableReadBuffer> GinDataCNCHPartHelper::readFile(
         throw Exception("GIN DiskCache data is not inited but mode is FORCE_DISK_CACHE", ErrorCodes::LOGICAL_ERROR);
     }
 
-    LOG_TRACE(log, "GIN index cache miss, part: {}", part_rel_path);
+    LOG_DEBUG(log, "GIN index cache miss, part: {}, s3_bytes: {}", part_rel_path, size);
     ProfileEvents::increment(ProfileEvents::GinIndexCacheMiss);
 
     std::unique_ptr<ReadBufferFromFileBase> part_reader =

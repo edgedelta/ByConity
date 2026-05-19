@@ -298,12 +298,43 @@ void MergeTreeConditionInverted::prefetchPostingsCache(PostingsCacheForStore & c
     if (!cache_store.store)
         return;
 
-    GinIndexStoreDeserializer reader(cache_store.store);
+    static auto * log = &Poco::Logger::get("GinIndex");
+
+    auto t0 = std::chrono::steady_clock::now();
+    /// Reader is constructed lazily — opening file streams is skipped entirely on full cache hits.
+    std::optional<GinIndexStoreDeserializer> reader;
+    auto t1 = t0;
 
     auto preload = [&](const GinFilter & gin_filter) {
         const String & key = gin_filter.getQueryString();
-        if (cache_store.cache.count(key) == 0)
-            cache_store.cache[key] = reader.createPostingsCacheFromTerms(gin_filter.getTerms());
+        if (cache_store.cache.contains(key))
+            return;
+
+        /// Check store-level decoded cache first (shared across queries on this part/worker).
+        if (auto cached = cache_store.store->getDecodedPostings(key))
+        {
+            LOG_DEBUG(log, "decoded postings cache HIT part={} query={}", cache_store.store->getName(), key);
+            cache_store.cache[key] = std::move(cached);
+            return;
+        }
+
+        LOG_DEBUG(log, "decoded postings cache MISS part={} query={}", cache_store.store->getName(), key);
+
+        /// Initialize file streams on first miss.
+        if (!reader)
+        {
+            reader.emplace(cache_store.store);
+            t1 = std::chrono::steady_clock::now();
+        }
+        auto decoded = reader->createPostingsCacheFromTerms(gin_filter.getTerms());
+
+        size_t weight = 0;
+        for (const auto & [term, seg_container] : *decoded)
+            for (const auto & [seg_id, bitmap] : seg_container)
+                weight += bitmap->getSizeInBytes();
+        cache_store.store->setDecodedPostings(key, decoded, weight);
+
+        cache_store.cache[key] = std::move(decoded);
     };
 
     for (const auto & element : rpn)
@@ -315,6 +346,12 @@ void MergeTreeConditionInverted::prefetchPostingsCache(PostingsCacheForStore & c
             for (const auto & gf : gin_filters)
                 preload(gf);
     }
+
+    auto t2 = std::chrono::steady_clock::now();
+    auto init_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    auto decode_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+    LOG_DEBUG(log, "prefetchPostingsCache part={} initFileStreams={}us decodePostings={}us",
+        cache_store.store->getName(), init_us, decode_us);
 }
 
 // TODO @caichangheng
