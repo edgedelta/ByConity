@@ -426,6 +426,7 @@ void AutoStatisticsManager::initialize(ContextPtr context_, const Poco::Util::Ab
 
     LOG_INFO(the_instance->logger, "Create Thread Pool with Setting (1, 0, 1)");
     the_instance->thread_pool = std::make_unique<ThreadPool>(1, 0, 1);
+    the_instance->udi_thread_pool = std::make_unique<ThreadPool>(1, 0, 1);
     AutoStatisticsManager::is_initialized = true; // ready for instance
 }
 
@@ -518,6 +519,16 @@ void AutoStatisticsManager::scheduleDistributeUdiCount()
         auto server_cli = context->getCnchServerClientPool().get(host_with_ports);
         server_cli->redirectUdiCounter(record);
     }
+}
+
+void AutoStatisticsManager::scheduleDistributeUdiCountAsync()
+{
+    if (udi_thread_pool->active() > 0)
+    {
+        LOG_INFO(logger, "udi distribution already in progress, skip");
+        return;
+    }
+    udi_thread_pool->scheduleOrThrowOnError([this]() { this->scheduleDistributeUdiCount(); });
 }
 
 void AutoStatisticsManager::scheduleCollect()

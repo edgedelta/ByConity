@@ -1129,7 +1129,7 @@ void CnchServerServiceImpl::scheduleDistributeUdiCount(
     {
         (void)request;
         if (auto auto_stats_manager = AutoStats::AutoStatisticsManager::tryGetInstance())
-            auto_stats_manager->scheduleDistributeUdiCount();
+            auto_stats_manager->scheduleDistributeUdiCountAsync();
     }
     catch (...)
     {
