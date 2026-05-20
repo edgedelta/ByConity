@@ -520,13 +520,16 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
         size_t segment_start_compressed_offset =
             marks_loader.getMark(segment_idx * cache_segment_size).offset_in_compressed_file;
 
-        // FDB reconcile restores entries without checking disk — guard against 0-byte
-        // files (seek succeeds on empty files but reads return 0 bytes causing
-        // "Cannot read all data" errors). Missing files already throw and are caught below.
-        if (cache_disk->getFileSize(cache_path) == 0)
+        // Guard against empty or truncated cache files — FDB may have a valid entry
+        // pointing to a file that was never fully written or was partially written.
+        // Seek succeeds on truncated files but reads return 0 bytes causing
+        // "Cannot read all data" errors. Check that the file covers the seek offset.
+        size_t seek_offset = mark_pos.offset_in_compressed_file - segment_start_compressed_offset;
+        size_t file_size = cache_disk->getFileSize(cache_path);
+        if (file_size <= seek_offset)
         {
-            LOG_WARNING(logger, "FDB cache hit for segment {} but file is 0-byte: {} — falling back to S3",
-                segment_key, fullPath(cache_disk, cache_path));
+            LOG_WARNING(logger, "FDB cache hit for segment {} but file is too small ({} <= seek offset {}) at {} — falling back to S3",
+                segment_key, file_size, seek_offset, fullPath(cache_disk, cache_path));
             return false;
         }
 
@@ -577,14 +580,17 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInRemoteSegmentCache(size_t seg
     auto remote_cache_file = std::make_unique<ReadBufferFromRpcStreamFile>(remote_data_client, settings.read_settings.remote_fs_buffer_size);
     if (remote_cache_file->getFileName().empty())
         return false;
-    if (remote_cache_file->getFileSize() == 0)
-    {
-        LOG_WARNING(logger, "Peer {} reported 0-byte cache file for segment {} — falling back to S3", peer, segment_key);
-        return false;
-    }
     try
     {
         size_t segment_start_compressed_offset = marks_loader.getMark(segment_idx * cache_segment_size).offset_in_compressed_file;
+        size_t seek_offset = mark_pos.offset_in_compressed_file - segment_start_compressed_offset;
+        size_t remote_file_size = remote_cache_file->getFileSize();
+        if (remote_file_size <= seek_offset)
+        {
+            LOG_WARNING(logger, "Peer {} reported truncated cache file for segment {} ({} <= seek offset {}) — falling back to S3",
+                peer, segment_key, remote_file_size, seek_offset);
+            return false;
+        }
 
         LOG_TRACE(
             logger,
