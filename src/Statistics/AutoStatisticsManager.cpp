@@ -10,6 +10,7 @@
 #include <Statistics/CollectTarget.h>
 #include <Statistics/StatisticsCollector.h>
 #include <Statistics/SubqueryHelper.h>
+#include <MergeTreeCommon/MergeTreeMetaBase.h>
 #include <Storages/StorageDistributed.h>
 #include <Storages/StorageMergeTree.h>
 #include <boost/algorithm/string.hpp>
@@ -280,6 +281,15 @@ void AutoStatisticsManager::updateUdiInfo()
             continue;
         }
         auto table = table_opt.value();
+
+        auto storage = catalog->tryGetStorageByUUID(uuid);
+        auto * mt = storage ? dynamic_cast<MergeTreeMetaBase *>(storage.get()) : nullptr;
+        if (!mt || !mt->getSettings()->enable_auto_statistics)
+        {
+            LOG_DEBUG(logger, "auto stats skipped for {}: enable_auto_statistics not set", table.getNameForLogs());
+            continue;
+        }
+
         // TODO: refactor this with batch api to reduce impact on catalog
         auto old_udi = catalog->fetchAddUdiCount(table, delta_udi);
         auto new_udi = old_udi + delta_udi;

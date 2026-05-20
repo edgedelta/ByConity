@@ -248,6 +248,29 @@ fs::path DiskCacheTTL::getPath(const DiskCacheTTL::KeyType & hash_key, const Str
            / hex_key_high.substr(0, 3) / hex_key_high / hex_key_low;
 }
 
+// Parse YYYYMM, YYYYMMDD, or YYYYMMDDHH into a unix timestamp. Returns 0 on failure.
+static time_t numericPartitionIdToTimestamp(const String & partition_id)
+{
+    if (partition_id.size() < 6 || !std::all_of(partition_id.begin(), partition_id.end(), ::isdigit))
+        return 0;
+    try
+    {
+        int year  = std::stoi(partition_id.substr(0, 4));
+        int month = std::stoi(partition_id.substr(4, 2));
+        int day   = partition_id.size() >= 8  ? std::stoi(partition_id.substr(6, 2)) : 1;
+        int hour  = partition_id.size() >= 10 ? std::stoi(partition_id.substr(8, 2)) : 0;
+
+        struct tm t = {};
+        t.tm_year = year - 1900;
+        t.tm_mon  = month - 1;
+        t.tm_mday = day;
+        t.tm_hour = hour;
+        t.tm_isdst = -1;
+        return mktime(&t);
+    }
+    catch (...) { return 0; }
+}
+
 time_t DiskCacheTTL::parsePartitionTimestamp(const String & part_name)
 {
     try
@@ -273,28 +296,7 @@ time_t DiskCacheTTL::parsePartitionTimestamp(const String & part_name)
         if (partition_id.empty())
             return 0;
 
-        // Try to parse as date/datetime
-        // Common formats: YYYYMMDD, YYYYMMDDHH, YYYYMM
-        if (partition_id.size() >= 8 && std::all_of(partition_id.begin(), partition_id.end(), ::isdigit))
-        {
-            // Parse as YYYYMMDD
-            int year = std::stoi(partition_id.substr(0, 4));
-            int month = std::stoi(partition_id.substr(4, 2));
-            int day = partition_id.size() >= 8 ? std::stoi(partition_id.substr(6, 2)) : 1;
-
-            struct tm tm_info = {};
-            tm_info.tm_year = year - 1900;
-            tm_info.tm_mon = month - 1;
-            tm_info.tm_mday = day;
-            tm_info.tm_hour = 0;
-            tm_info.tm_min = 0;
-            tm_info.tm_sec = 0;
-            tm_info.tm_isdst = -1;
-
-            return mktime(&tm_info);
-        }
-
-        return 0;
+        return numericPartitionIdToTimestamp(partition_id);
     }
     catch (...)
     {
@@ -684,6 +686,12 @@ size_t DiskCacheTTL::writeSegment(ReadBuffer& buffer, ReservationPtr& reservatio
         }
 
         disk->replaceFile(temp_cache_rel_path, cache_rel_path);
+
+        if (written_size == 0)
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "cached {} write produced 0 bytes — refusing to cache empty file",
+                cache_rel_path);
 
         if (disk->getFileSize(cache_rel_path) != written_size)
             throw Exception(
@@ -1194,27 +1202,9 @@ void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path,
 
     // Parse timestamp from partition_id (e.g., "20240315")
     time_t part_ts = 0;
-    if (partition_dir.size() >= 8 && std::all_of(partition_dir.begin(), partition_dir.end(), ::isdigit))
-    {
-        try
-        {
-            int year = std::stoi(partition_dir.substr(0, 4));
-            int month = std::stoi(partition_dir.substr(4, 2));
-            int day = std::stoi(partition_dir.substr(6, 2));
-
-            struct tm tm_info = {};
-            tm_info.tm_year = year - 1900;
-            tm_info.tm_mon = month - 1;
-            tm_info.tm_mday = day;
-            tm_info.tm_isdst = -1;
-
-            part_ts = mktime(&tm_info);
-        }
-        catch (...)
-        {
-            LOG_WARNING(log, "Failed to parse partition timestamp from: {}", partition_dir);
-        }
-    }
+    part_ts = numericPartitionIdToTimestamp(partition_dir);
+    if (part_ts == 0 && partition_dir.size() >= 6)
+        LOG_WARNING(log, "Failed to parse partition timestamp from: {}", partition_dir);
 
     // Skip expired or non-time-based segments; delete the stale file so it
     // doesn't accumulate on disk across restarts.
@@ -1332,6 +1322,13 @@ std::vector<DiskCacheTTL::PartitionStats> DiskCacheTTL::getPartitionStats() cons
 std::optional<String> DiskCacheTTL::findPeerOwner(const String & seg_name)
 {
     if (!fdb_index)
+        return std::nullopt;
+
+    // Don't query FDB if caching is disabled or the partition has expired —
+    // stale DCIREV entries would still exist and would cause unnecessary steal
+    // attempts (or reads of bad files) even after ttl_duration is set to 0.
+    time_t part_ts = parsePartitionTimestamp(seg_name);
+    if (!shouldCache(part_ts))
         return std::nullopt;
 
     auto key = hash(seg_name);

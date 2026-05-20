@@ -520,6 +520,16 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
         size_t segment_start_compressed_offset =
             marks_loader.getMark(segment_idx * cache_segment_size).offset_in_compressed_file;
 
+        // FDB reconcile restores entries without checking disk — guard against 0-byte
+        // files (seek succeeds on empty files but reads return 0 bytes causing
+        // "Cannot read all data" errors). Missing files already throw and are caught below.
+        if (cache_disk->getFileSize(cache_path) == 0)
+        {
+            LOG_WARNING(logger, "FDB cache hit for segment {} but file is 0-byte: {} — falling back to S3",
+                segment_key, fullPath(cache_disk, cache_path));
+            return false;
+        }
+
         LOG_TRACE(logger, fmt::format("Seek to diskcache {} (current buffer at {}), segment {}, offset {}:{}", cache_path, cache_buffer.initialized() ? cache_buffer.path() : "Uninitialized", segment_idx, mark_pos.offset_in_compressed_file, mark_pos.offset_in_decompressed_block));
         initCacheBufferIfNeeded(cache_disk, cache_path);
         cache_buffer.seek(mark_pos.offset_in_compressed_file - segment_start_compressed_offset,
@@ -567,6 +577,11 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInRemoteSegmentCache(size_t seg
     auto remote_cache_file = std::make_unique<ReadBufferFromRpcStreamFile>(remote_data_client, settings.read_settings.remote_fs_buffer_size);
     if (remote_cache_file->getFileName().empty())
         return false;
+    if (remote_cache_file->getFileSize() == 0)
+    {
+        LOG_WARNING(logger, "Peer {} reported 0-byte cache file for segment {} — falling back to S3", peer, segment_key);
+        return false;
+    }
     try
     {
         size_t segment_start_compressed_offset = marks_loader.getMark(segment_idx * cache_segment_size).offset_in_compressed_file;

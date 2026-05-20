@@ -138,6 +138,13 @@ struct GinSegmentDictionary
 
 using GinSegmentDictionaryPtr = std::shared_ptr<GinSegmentDictionary>;
 
+/// Container for postings lists for each segment
+using GinSegmentedPostingsListContainer = std::unordered_map<UInt32, GinIndexPostingsListPtr>;
+
+/// Postings lists and terms built from query string
+using GinPostingsCache = std::unordered_map<std::string, GinSegmentedPostingsListContainer>;
+using GinPostingsCachePtr = std::shared_ptr<GinPostingsCache>;
+
 /// Gin index store which has gin index meta data for the corresponding column data part
 class GinIndexStore
 {
@@ -263,13 +270,6 @@ private:
 };
 
 using GinIndexStorePtr = std::shared_ptr<GinIndexStore>;
-
-/// Container for postings lists for each segment
-using GinSegmentedPostingsListContainer = std::unordered_map<UInt32, GinIndexPostingsListPtr>;
-
-/// Postings lists and terms built from query string
-using GinPostingsCache = std::unordered_map<std::string, GinSegmentedPostingsListContainer>;
-using GinPostingsCachePtr = std::shared_ptr<GinPostingsCache>;
 
 class GinIndexStoreDeserializer : private boost::noncopyable
 {
