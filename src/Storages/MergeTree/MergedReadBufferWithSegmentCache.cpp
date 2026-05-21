@@ -537,6 +537,17 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
         initCacheBufferIfNeeded(cache_disk, cache_path);
         cache_buffer.seek(mark_pos.offset_in_compressed_file - segment_start_compressed_offset,
             mark_pos.offset_in_decompressed_block);
+        // Probe first read inside try-catch: seek is lazy so the first real I/O
+        // (compressed block header) would otherwise happen in nextImpl with no S3
+        // fallback. Sparse/in-flight files pass the size check above but return 0
+        // bytes here; catching that now lets us fall back cleanly.
+        if (cache_buffer.activeBuffer().eof())
+        {
+            LOG_WARNING(logger, "Local cache EOF right after seek (offset {}) for {} — falling back to S3",
+                seek_offset, fullPath(cache_disk, cache_path));
+            cache_buffer.reset();
+            return false;
+        }
         current_segment_idx = segment_idx;
         if (collect_cache_stats)
         {
@@ -604,7 +615,25 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInRemoteSegmentCache(size_t seg
                 mark_pos.offset_in_decompressed_block));
         initCacheBufferIfNeeded(nullptr, "", std::move(remote_cache_file));
         cache_buffer.seek(mark_pos.offset_in_compressed_file - segment_start_compressed_offset, mark_pos.offset_in_decompressed_block);
+        // Same probe as local path: catch sparse/in-flight stolen files that pass
+        // the size check but return 0 bytes on first read.
+        if (cache_buffer.activeBuffer().eof())
+        {
+            LOG_WARNING(logger, "Stolen cache EOF right after seek (offset {}) for {} from {} — falling back to S3",
+                seek_offset, segment_key, peer);
+            cache_buffer.reset();
+            return false;
+        }
         current_segment_idx = segment_idx;
+        if (collect_cache_stats)
+        {
+            if (is_idx) ++local_cache_stats.idx_hit_segs;
+            else ++local_cache_stats.cache_hit_segs;
+            active_segment_start_ms = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            active_is_cache = true;
+        }
     }
     catch (...)
     {

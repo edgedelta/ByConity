@@ -528,7 +528,10 @@ void AutoStatisticsManager::scheduleDistributeUdiCountAsync()
         LOG_INFO(logger, "udi distribution already in progress, skip");
         return;
     }
-    udi_thread_pool->scheduleOrThrowOnError([this]() { this->scheduleDistributeUdiCount(); });
+    udi_thread_pool->scheduleOrThrowOnError([this]() {
+        try { this->scheduleDistributeUdiCount(); }
+        catch (...) { tryLogCurrentException(logger, __PRETTY_FUNCTION__); }
+    });
 }
 
 void AutoStatisticsManager::scheduleCollect()
