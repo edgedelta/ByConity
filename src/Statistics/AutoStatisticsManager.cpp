@@ -482,12 +482,15 @@ void AutoStatisticsManager::scheduleDistributeUdiCount()
 {
     auto catalog = createCatalogAdaptor(context);
     auto servers = DaemonManager::DaemonJobAutoStatistics::getServerList(context);
+    LOG_INFO(logger, "scheduleDistributeUdiCount: querying {} servers", servers.size());
     using RecordType = std::unordered_map<UUID, UInt64>;
     RecordType all_record;
     for (auto & host_with_ports : servers)
     {
+        LOG_INFO(logger, "scheduleDistributeUdiCount: queryUdiCounter start -> {}", host_with_ports.toDebugString());
         auto server_cli = context->getCnchServerClientPool().get(host_with_ports);
         auto remote_record = server_cli->queryUdiCounter();
+        LOG_INFO(logger, "scheduleDistributeUdiCount: queryUdiCounter done -> {}, got {} entries", host_with_ports.toDebugString(), remote_record.size());
         for (const auto & [k, v] : remote_record)
         {
             all_record[k] += v;
@@ -516,9 +519,12 @@ void AutoStatisticsManager::scheduleDistributeUdiCount()
     internal_memory_record.append(local_record);
     for (const auto & [host_with_ports, record] : remote_records)
     {
+        LOG_INFO(logger, "scheduleDistributeUdiCount: redirectUdiCounter start -> {}", host_with_ports.toDebugString());
         auto server_cli = context->getCnchServerClientPool().get(host_with_ports);
         server_cli->redirectUdiCounter(record);
+        LOG_INFO(logger, "scheduleDistributeUdiCount: redirectUdiCounter done -> {}", host_with_ports.toDebugString());
     }
+    LOG_INFO(logger, "scheduleDistributeUdiCount: done, local={} remote_targets={}", local_record.size(), remote_records.size());
 }
 
 void AutoStatisticsManager::scheduleDistributeUdiCountAsync()
