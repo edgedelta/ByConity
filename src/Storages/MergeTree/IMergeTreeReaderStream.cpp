@@ -1,5 +1,6 @@
 #include "IMergeTreeReaderStream.h"
 #include <common/range.h>
+#include <common/logger_useful.h>
 
 namespace DB
 {
@@ -105,9 +106,19 @@ void IMergeTreeReaderStream::adjustRightMark(size_t right_mark) {
     else
     {
         if (last_right_offset && right_offset <= last_right_offset.value())
+        {
+            LOG_ERROR(
+                &Poco::Logger::get("IMergeTreeReaderStream"),
+                "adjustRightMark SKIP (only-grow): right_mark={} right_offset={} last_right_offset={}",
+                right_mark, right_offset, last_right_offset.value());
             return;
+        }
 
         last_right_offset = right_offset;
+        LOG_ERROR(
+            &Poco::Logger::get("IMergeTreeReaderStream"),
+            "adjustRightMark SET: right_mark={} right_offset={}",
+            right_mark, right_offset);
         data_buffer->setReadUntilPosition(right_offset);
     }
 }

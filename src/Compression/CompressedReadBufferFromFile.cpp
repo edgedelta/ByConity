@@ -51,6 +51,8 @@ bool CompressedReadBufferFromFile::nextImpl()
     /// TODO: handle hdfs case
     if (/*(storage_type == StorageType::Hdfs ||*/ is_limit /*)*/ && file_in.getPosition() >= limit_offset_in_file)
     {
+        LOG_ERROR(getLog(), "CRFF[nextImpl] limit-EOF: file={} pos={} limit={}",
+            file_in.getFileName(), file_in.getPosition(), limit_offset_in_file);
         size_compressed = 0;
 
         return false;

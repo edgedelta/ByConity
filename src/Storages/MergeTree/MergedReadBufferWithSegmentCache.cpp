@@ -292,6 +292,9 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
     {
         if (current_segment_idx + 1 >= total_segment_count)
         {
+            LOG_ERROR(logger, "MRB[nextImpl] EOF last-segment: part={} stream={} seg={}/{} compressed_offset={}",
+                part_name, stream_name, current_segment_idx, total_segment_count,
+                current_compressed_offset.value());
             return false;
         }
         size_t new_segment_idx = current_segment_idx;
@@ -310,6 +313,14 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
         cache_buffer.activeBuffer() : source_buffer.activeBuffer();
 
     bool encounter_eof = active_buffer.eof();
+    if (encounter_eof)
+    {
+        LOG_ERROR(logger, "MRB[nextImpl] EOF active-buffer: part={} stream={} seg={}/{} using_cache={} cache_pos={} source_pos={}",
+            part_name, stream_name, current_segment_idx, total_segment_count,
+            cache_buffer.initialized(),
+            cache_buffer.initialized() ? std::to_string(cache_buffer.compressedOffset()) : "N/A",
+            source_buffer.initialized() ? std::to_string(source_buffer.compressedOffset()) : "N/A");
+    }
     if (!encounter_eof)
     {
         Position buf_pos = active_buffer.position();
@@ -359,6 +370,8 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
 
 void MergedReadBufferWithSegmentCache::setReadUntilPosition(size_t position)
 {
+    LOG_ERROR(logger, "MRB[setReadUntilPosition] part={} stream={} position={} source_data_offset={} source_init={}",
+        part_name, stream_name, position, source_data_offset, source_buffer.initialized());
     read_until_position = position;
     // Only set when active buffer is source_buffer
     if (source_buffer.initialized())
@@ -390,6 +403,10 @@ void MergedReadBufferWithSegmentCache::seekToStart()
 
 void MergedReadBufferWithSegmentCache::seekToMark(size_t mark)
 {
+    LOG_ERROR(logger, "MRB[seekToMark] part={} stream={} mark={} seg={} mark_offset={}:{}",
+        part_name, stream_name, mark, mark / cache_segment_size,
+        marks_loader.getMark(mark).offset_in_compressed_file,
+        marks_loader.getMark(mark).offset_in_decompressed_block);
     LOG_TRACE(logger, "Seek {} with stream {} mark index {} by buffer size {}", part_name, stream_name, mark, settings.read_settings.remote_fs_buffer_size);
     seekToPosition(mark / cache_segment_size, marks_loader.getMark(mark));
 }
@@ -397,6 +414,12 @@ void MergedReadBufferWithSegmentCache::seekToMark(size_t mark)
 void MergedReadBufferWithSegmentCache::seekToPosition(size_t segment_idx,
     const MarkInCompressedFile& mark_pos)
 {
+    LOG_ERROR(logger, "MRB[seekToPosition] part={} stream={} seg={} offset={}:{} cache_init={} source_init={} cur_seg={} compressed_off={}",
+        part_name, stream_name, segment_idx,
+        mark_pos.offset_in_compressed_file, mark_pos.offset_in_decompressed_block,
+        cache_buffer.initialized(), source_buffer.initialized(),
+        current_segment_idx,
+        current_compressed_offset.has_value() ? std::to_string(current_compressed_offset.value()) : "none");
     // Reset current working/internal buffer first
     reset();
 
