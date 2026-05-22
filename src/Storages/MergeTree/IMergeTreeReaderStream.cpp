@@ -105,7 +105,9 @@ void IMergeTreeReaderStream::adjustRightMark(size_t right_mark) {
     }
     else
     {
-        if (last_right_offset && right_offset <= last_right_offset.value())
+        // last_right_offset==0 means setReadUntilEnd() was called (EOF = max limit), so any
+        // finite position would shrink the limit — always skip in that case.
+        if (last_right_offset.has_value() && (last_right_offset.value() == 0 || right_offset <= last_right_offset.value()))
         {
             LOG_ERROR(
                 &Poco::Logger::get("IMergeTreeReaderStream"),

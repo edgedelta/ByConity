@@ -139,7 +139,11 @@ bool ReadBufferFromS3::nextImpl()
     if (read_until_position)
     {
         if (read_until_position == offset)
+        {
+            LOG_ERROR(&Poco::Logger::get("ReadBufferFromS3"), "S3[nextImpl] EOF: read_until_position==offset={} key={}",
+                offset, key);
             return false;
+        }
 
         if (read_until_position < offset)
         {
@@ -304,6 +308,8 @@ void ReadBufferFromS3::setReadUntilPosition(size_t position)
 {
     if (position != static_cast<size_t>(read_until_position))
     {
+        LOG_ERROR(&Poco::Logger::get("ReadBufferFromS3"), "S3[setReadUntilPosition] key={} old={} new={} cur_offset={}",
+            key, read_until_position, position, offset);
         read_all_range_successfully = false;
 
         if (impl)
