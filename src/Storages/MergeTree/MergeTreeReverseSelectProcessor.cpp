@@ -73,15 +73,7 @@ try
         task_columns.should_reorder, std::move(size_predictor), all_mark_ranges);
 
     if (!reader)
-    {
-        /// Initialize reader with all mark ranges (remaining + current task) so the read
-        /// buffer is sized for the full range span, matching MergeTreeSelectProcessor behavior.
-        /// Without this, the 1-mark first task causes a tiny buffer for all subsequent reads,
-        /// resulting in ~10x more small cache I/O operations vs forward (ASC) reading.
-        MarkRanges all_ranges_for_reader = all_mark_ranges;
-        all_ranges_for_reader.emplace_back(mark_ranges_for_task.front());
-        initializeReaders(all_ranges_for_reader);
-    }
+        initializeReaders(mark_ranges_for_task);
 
     return true;
 }
