@@ -194,6 +194,9 @@ bool ReadBufferFromS3::nextImpl()
         {
             if (!impl)
             {
+                LOG_ERROR(&Poco::Logger::get("ReadBufferFromS3"),
+                    "S3[nextImpl] new-HTTP-GET: key={} offset={} read_until_position={}",
+                    key, offset, read_until_position);
                 impl = initialize();
 
                 if (use_external_buffer)
@@ -231,6 +234,9 @@ bool ReadBufferFromS3::nextImpl()
     }
 
     if (!next_result) {
+        LOG_ERROR(&Poco::Logger::get("ReadBufferFromS3"),
+            "S3[nextImpl] HTTP-body-EOF: key={} offset={} read_until_position={}",
+            key, offset, read_until_position);
         read_all_range_successfully = true;
         return false;
     }

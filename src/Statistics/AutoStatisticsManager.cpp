@@ -347,7 +347,7 @@ bool AutoStatisticsManager::executeOneTask(const std::shared_ptr<TaskInfo> & cho
 
         auto task_context = Context::createCopy(context);
         task_context->makeQueryContext();
-        auto [interserver_user, interserver_password] = task_context->getCnchInterserverCredentials();
+        auto [interserver_user, interserver_password] = const_cast<const Context &>(*task_context).getCnchInterserverCredentials();
         task_context->setUser(interserver_user, interserver_password, Poco::Net::SocketAddress{});
         auto txn = task_context->getCnchTransactionCoordinator().createTransaction(
             CreateTransactionOption().setContext(task_context).setReadOnly(true));
