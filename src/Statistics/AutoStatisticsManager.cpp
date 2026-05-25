@@ -1,6 +1,7 @@
 #include <DaemonManager/DaemonJobAutoStatistics.h>
 #include <Databases/IDatabase.h>
 #include <Interpreters/Context.h>
+#include <Transaction/TransactionCoordinatorRcCnch.h>
 #include <CloudServices/CnchServerClientPool.h>
 #include <Statistics/AutoStatisticsHelper.h>
 #include <Statistics/AutoStatisticsManager.h>
@@ -344,8 +345,15 @@ bool AutoStatisticsManager::executeOneTask(const std::shared_ptr<TaskInfo> & cho
             settings.fromJsonStr(chosen_task->getSettingsJson());
         }
 
-        CollectTarget target(context, table, settings, columns_name);
-        auto row_count_opt = collectStatsOnTarget(context, target);
+        auto task_context = Context::createCopy(context);
+        task_context->makeQueryContext();
+        auto txn = task_context->getCnchTransactionCoordinator().createTransaction(
+            CreateTransactionOption().setContext(task_context).setReadOnly(true));
+        task_context->setCurrentTransaction(txn);
+        SCOPE_EXIT({ task_context->getCnchTransactionCoordinator().finishTransaction(txn); });
+
+        CollectTarget target(task_context, table, settings, columns_name);
+        auto row_count_opt = collectStatsOnTarget(task_context, target);
 
         if (row_count_opt.has_value())
         {

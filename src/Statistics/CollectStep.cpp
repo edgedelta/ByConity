@@ -56,14 +56,16 @@ void CollectStep::writeResult(TableStats & core_table_stats, ColumnStatsMap & co
 }
 void CollectStep::collectTable()
 {
+    auto & log = Poco::Logger::get("CollectStep");
     if (context->getSettingsRef().statistics_query_cnch_parts_for_row_count)
     {
-        // try get count by fast trivial count
         if (auto count_opt = catalog->queryRowCount(table_info))
         {
+            LOG_INFO(&log, "row count for {} via fast metadata path: {}", table_info.getNameForLogs(), count_opt.value());
             handler_context.full_count = count_opt.value();
             return;
         }
+        LOG_INFO(&log, "fast metadata path unavailable for {}, falling back to SQL count", table_info.getNameForLogs());
     }
 
     TableHandler table_handler(table_info);
@@ -75,6 +77,7 @@ void CollectStep::collectTable()
     table_handler.parse(block);
     handler_context.full_count = handler_context.query_row_count.value();
     handler_context.query_row_count = std::nullopt;
+    LOG_INFO(&log, "row count for {} via SQL path: {}", table_info.getNameForLogs(), handler_context.full_count);
 }
 
 
