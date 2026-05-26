@@ -139,11 +139,7 @@ bool ReadBufferFromS3::nextImpl()
     if (read_until_position)
     {
         if (read_until_position == offset)
-        {
-            LOG_ERROR(&Poco::Logger::get("ReadBufferFromS3"), "S3[nextImpl] EOF: read_until_position==offset={} key={}",
-                offset, key);
             return false;
-        }
 
         if (read_until_position < offset)
         {
@@ -194,9 +190,6 @@ bool ReadBufferFromS3::nextImpl()
         {
             if (!impl)
             {
-                LOG_ERROR(&Poco::Logger::get("ReadBufferFromS3"),
-                    "S3[nextImpl] new-HTTP-GET: key={} offset={} read_until_position={}",
-                    key, offset, read_until_position);
                 impl = initialize();
 
                 if (use_external_buffer)
@@ -234,9 +227,6 @@ bool ReadBufferFromS3::nextImpl()
     }
 
     if (!next_result) {
-        LOG_ERROR(&Poco::Logger::get("ReadBufferFromS3"),
-            "S3[nextImpl] HTTP-body-EOF: key={} offset={} read_until_position={}",
-            key, offset, read_until_position);
         read_all_range_successfully = true;
         return false;
     }
@@ -314,8 +304,6 @@ void ReadBufferFromS3::setReadUntilPosition(size_t position)
 {
     if (position != static_cast<size_t>(read_until_position))
     {
-        LOG_ERROR(&Poco::Logger::get("ReadBufferFromS3"), "S3[setReadUntilPosition] key={} old={} new={} cur_offset={}",
-            key, read_until_position, position, offset);
         read_all_range_successfully = false;
 
         if (impl)
