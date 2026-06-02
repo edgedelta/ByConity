@@ -570,9 +570,9 @@ TEST_F(DiskCacheTTLTest, DetailedStats)
         cache.set(seg, buf, data.size(), false, recent_time);
     }
 
-    // Try to add old entries (should be rejected)
+    // Try to add old entries. Pass an explicit old max_time, exactly as production does
     struct tm tm_old;
-    time_t old_time = now - (2 * 60 * 60);
+    time_t old_time = now - (48 * 60 * 60);
     gmtime_r(&old_time, &tm_old);
     String old_part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
         tm_old.tm_year + 1900, tm_old.tm_mon + 1, tm_old.tm_mday);
@@ -582,7 +582,7 @@ TEST_F(DiskCacheTTLTest, DetailedStats)
         String seg = fmt::format("test-uuid-0000-0000-0000-00000000000b/{}/col.bin/offset_{}", old_part, i);
         String data = String(100, 'a');
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false);
+        cache.set(seg, buf, data.size(), false, old_time);
     }
 
     // Try to add non-time partition (should be rejected)
@@ -783,7 +783,7 @@ TEST_F(DiskCacheTTLTest, AsyncSizeBasedEviction)
     ASSERT_GT(stats_before.total_bytes, settings.ttl_cache_max_size * 0.90);
     ASSERT_EQ(stats_before.async_eviction_triggered, 0);
 
-    // Add one more segment - should trigger async eviction
+    // Add one more segment - pushes over the cap and triggers async eviction.
     {
         String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
             tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
@@ -798,14 +798,10 @@ TEST_F(DiskCacheTTLTest, AsyncSizeBasedEviction)
     auto stats_after = cache.getStats();
     ASSERT_EQ(stats_after.async_eviction_triggered, 1);
 
-    // Wait for async eviction to complete
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-    // Verify some space was freed
-    auto stats_final = cache.getStats();
-    ASSERT_GT(stats_final.evicted_size_limit, 0);
-
-    // Try adding another segment immediately - should be rate limited
+    // Add another segment IMMEDIATELY, before the async eviction has freed
+    // space. total_size is still over the cap, but we're within the 10s rate-limit window of the
+    // previous trigger, so this must be counted as skipped, not a second trigger. Done before the
+    // sleep below because once eviction frees space the cap is no longer exceeded.
     {
         String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
             tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
@@ -820,6 +816,11 @@ TEST_F(DiskCacheTTLTest, AsyncSizeBasedEviction)
     auto stats_rate_limit = cache.getStats();
     ASSERT_EQ(stats_rate_limit.async_eviction_triggered, 1);
     ASSERT_GT(stats_rate_limit.async_eviction_skipped_rate_limit, 0);
+
+    // Wait for async eviction to complete, then verify some space was freed.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    auto stats_final = cache.getStats();
+    ASSERT_GT(stats_final.evicted_size_limit, 0);
 }
 
 // Test explicit min/max time parameters override partition_id parsing
@@ -998,9 +999,10 @@ TEST_F(DiskCacheTTLTest, SizeLimitPrecedence)
         String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
             tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
 
-        // Fill to 95% of 1MB (should trigger at 90%)
+        // Fill past the 1MB per-table cap (12 * 100KB = 1200KB > 1MB). Size eviction triggers
+        // when total_size exceeds max_size_bytes, so we must exceed the cap, not just approach it.
         size_t segment_size = 100 * 1024;  // 100KB per segment
-        for (int i = 0; i < 10; i++)
+        for (int i = 0; i < 12; i++)
         {
             String seg = fmt::format("test-uuid-0000-0000-0000-000000000013/{}/col.bin/offset_{}", part, i);
             String data = String(segment_size, 'a');
@@ -1024,9 +1026,9 @@ TEST_F(DiskCacheTTLTest, SizeLimitPrecedence)
         String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
             tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
 
-        // Fill to 95% of 10MB
+        // Fill past the 10MB worker-level cap (11 * 1MB = 11MB > 10MB) to trigger size eviction.
         size_t segment_size = 1024 * 1024;  // 1MB per segment
-        for (int i = 0; i < 10; i++)
+        for (int i = 0; i < 11; i++)
         {
             String seg = fmt::format("test-uuid-0000-0000-0000-000000000014/{}/col.bin/offset_{}", part, i);
             String data = String(segment_size, 'b');

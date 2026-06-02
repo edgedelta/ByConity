@@ -51,6 +51,8 @@ void ExplainAnalyzeTransform::transform(Chunk & chunk)
         UInt64 elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - time_start).count();
         if (elapsed >= time_out)
             break;
+        // Don't busy-spin a core while waiting for remote segment status to arrive.
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
     // Wait for segment profiles to arrive. Profiles are sent before status over separate RPCs,

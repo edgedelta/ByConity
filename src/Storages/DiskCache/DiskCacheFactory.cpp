@@ -163,7 +163,7 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
             LOG_TRACE(log, "Reusing existing TTL cache for {} (UUID: {})", table_name, UUIDHelpers::UUIDToString(table_uuid));
             return existing_cache;
         }
-        
+
         LOG_INFO(log, "TTL cache settings changed for {} (UUID: {}), updating in place (ttl: {}->{}min, max_size: {}->{}bytes)",
             table_name, UUIDHelpers::UUIDToString(table_uuid),
             existing->getTTLMinutes(), ttl_minutes,
@@ -172,9 +172,19 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
         return existing_cache;
     }
 
-    // Get volume from ttl_disk_policy
-    // defaults to disk_policy if not set
-    VolumePtr volume = context.getStoragePolicy(cache_settings.ttl_disk_policy)->getVolumeByName("local", true);
+    // Get volume from ttl_disk_policy, degrade gracefully to the shared global MergeTree cache instead of failing every query on this table.
+    VolumePtr volume;
+    try
+    {
+        volume = context.getStoragePolicy(cache_settings.ttl_disk_policy)->getVolumeByName("local", true);
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, fmt::format(
+            "Failed to resolve ttl_disk_policy '{}' for {}; falling back to the global MergeTree disk cache",
+            cache_settings.ttl_disk_policy, table_name));
+        return get(DiskCacheType::MergeTree);
+    }
 
     // Per-table cache is always TTL-based
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(cache_settings);
@@ -278,10 +288,19 @@ void DiskCacheFactory::addNewCache(Context & context, const std::string & cache_
                 cache_settings.lru_max_nums));
     }
 
-    // Resolve global TTL cache limit — use TTL disk space when a separate ttl_disk_policy is configured
-    auto ttl_total_space_unlimited = !cache_settings.ttl_disk_policy.empty()
-        ? context.getStoragePolicy(cache_settings.ttl_disk_policy)->getVolumeByName("local", true)->getTotalSpace(true)
-        : total_space_unlimited;
+    // Resolve global TTL cache limit from the ttl_disk_policy's local volume.
+    // fall back to the global disk space rather than aborting server startup.
+    auto ttl_total_space_unlimited = total_space_unlimited;
+    try
+    {
+        ttl_total_space_unlimited = context.getStoragePolicy(cache_settings.ttl_disk_policy)->getVolumeByName("local", true)->getTotalSpace(true);
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, fmt::format(
+            "Failed to resolve ttl_disk_policy '{}' for global TTL limit; using global disk space",
+            cache_settings.ttl_disk_policy));
+    }
     cache_settings.ttl_cache_max_size = (cache_settings.ttl_cache_max_size > 0)
         ? cache_settings.ttl_cache_max_size
         : static_cast<size_t>(ttl_total_space_unlimited.bytes * (cache_settings.ttl_cache_max_percent / 100.0));

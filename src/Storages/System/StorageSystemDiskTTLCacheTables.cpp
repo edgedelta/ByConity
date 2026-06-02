@@ -5,7 +5,9 @@
 #include <DataTypes/DataTypeMap.h>
 #include <Columns/ColumnMap.h>
 #include <Interpreters/Context.h>
+#include <Common/CurrentThread.h>
 #include <Common/HostWithPorts.h>
+#include <Common/ThreadPool.h>
 #include <CloudServices/CnchWorkerClient.h>
 #include <CloudServices/CnchWorkerClientPools.h>
 #include <ResourceManagement/ResourceManagerClient.h>
@@ -136,24 +138,45 @@ void StorageSystemDiskTTLCacheTables::fillData(MutableColumns & res_columns, Con
 
         LOG_INFO(log, "Querying TTL cache stats from {} worker(s)", all_workers.size());
         auto & pools = context->getCnchWorkerClientPools();
-        for (const auto & wd : all_workers)
+
+        // Fan the per-worker RPCs out in parallel: each call is capped at a 5s timeout, so a
+        // serial loop costs O(num_workers * 5s) when workers are slow/dead. Column filling stays
+        // single-threaded afterwards (MutableColumns are not thread-safe).
+        std::vector<std::pair<String, std::vector<Protos::TTLCacheTableStats>>> per_worker(all_workers.size());
+        ThreadPool rpc_pool(std::min<size_t>(16, std::max<size_t>(all_workers.size(), 1)));
+        try
         {
-            if (wd.vw_name == ResourceManagement::toSystemVWName(ResourceManagement::VirtualWarehouseType::Write))
-                continue;
-            LOG_INFO(log, "Sending getTTLCacheStats RPC to {}", wd.host_ports.getRPCAddress());
-            try
+            for (size_t i = 0; i < all_workers.size(); ++i)
             {
-                auto worker = pools.getWorker(wd.host_ports);
-                auto stats = worker->getTTLCacheStats();
-                LOG_INFO(log, "Got {} TTL cache entries from {}", stats.size(), wd.host_ports.getRPCAddress());
-                for (const auto & t : stats)
-                    fillRowFromProto(res_columns, wd.id.empty() ? wd.host_ports.getRPCAddress() : wd.id, t);
-            }
-            catch (...)
-            {
-                tryLogCurrentException(__PRETTY_FUNCTION__);
+                if (all_workers[i].vw_name == ResourceManagement::toSystemVWName(ResourceManagement::VirtualWarehouseType::Write))
+                    continue;
+                rpc_pool.scheduleOrThrowOnError([&, i, thread_group = CurrentThread::getGroup()] {
+                    DB::ThreadStatus thread_status;
+                    if (thread_group)
+                        CurrentThread::attachTo(thread_group);
+                    const auto & wd = all_workers[i];
+                    try
+                    {
+                        auto worker = pools.getWorker(wd.host_ports);
+                        per_worker[i] = {wd.id.empty() ? wd.host_ports.getRPCAddress() : wd.id, worker->getTTLCacheStats()};
+                    }
+                    catch (...)
+                    {
+                        tryLogCurrentException(__PRETTY_FUNCTION__);
+                    }
+                });
             }
         }
+        catch (...)
+        {
+            rpc_pool.wait();
+            throw;
+        }
+        rpc_pool.wait();
+
+        for (const auto & [wid, stats] : per_worker)
+            for (const auto & t : stats)
+                fillRowFromProto(res_columns, wid, t);
         return;
     }
 

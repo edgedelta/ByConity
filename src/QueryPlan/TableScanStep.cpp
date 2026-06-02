@@ -1342,9 +1342,14 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
             QueryPlanOptimizationSettings::fromContext(build_context.context),
             BuildQueryPipelineSettings::fromContext(build_context.context));
 
+        // Only retain read_step when segment profiling is on, it's consumed solely by
+        // collectPostExecutionAttributes(), which runs under the same flags. Retaining it
+        // otherwise would pin ReadFromMergeTree for the whole query.
+        const bool keep_read_step = build_context.context->getSettingsRef().report_segment_profiles
+            || build_context.context->getSettingsRef().log_segment_profiles;
         for (auto & node : storage_plan.getNodes())
         {
-            if (!read_step && dynamic_cast<ReadFromMergeTree *>(node.step.get()))
+            if (keep_read_step && !read_step && dynamic_cast<ReadFromMergeTree *>(node.step.get()))
                 read_step = node.step;
             auto & att_descs = node.step->getAttributeDescriptions();
             if (att_descs.empty())

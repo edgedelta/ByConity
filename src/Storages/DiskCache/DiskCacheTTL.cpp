@@ -85,6 +85,16 @@ namespace
 {
     constexpr size_t HEX_KEY_LEN = sizeof(DiskCacheTTL::KeyType) * 2;
 
+    // Atomic subtract that never wraps below zero. Defense-in-depth for total_size/total_entries:
+    // a future accounting bug that subtracts more than was added would otherwise underflow size_t
+    // and permanently poison size-based eviction.
+    void atomicSubClamped(std::atomic<size_t> & counter, size_t v)
+    {
+        size_t cur = counter.load(std::memory_order_relaxed);
+        while (!counter.compare_exchange_weak(cur, cur > v ? cur - v : 0, std::memory_order_relaxed))
+            ;
+    }
+
     // Extract UUID from segment/part name (format: uuid/part_name/...)
     String extractUUID(const String & seg_name)
     {
@@ -541,7 +551,11 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
             {
                 if (last_size_eviction_trigger.compare_exchange_strong(last_trigger, now))
                 {
-                    size_t excess = total_size.load() - max_size_bytes;
+                    // Re-load once and floor: a concurrent eviction may have dropped total_size
+                    // below the cap since the guard above, and (cur - max) would underflow size_t
+                    // to a huge value, causing us to evict the entire cache.
+                    size_t cur = total_size.load();
+                    size_t excess = cur > max_size_bytes ? cur - max_size_bytes : 0;
                     size_t target_free = excess + max_size_bytes * SIZE_EVICTION_HEADROOM_FRACTION;
                     cache_stats.async_eviction_triggered++;
                     LOG_DEBUG(log, "Table cache {}% full, scheduling async eviction to free {} bytes",
@@ -623,8 +637,8 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
                 erase_result = cacheEraseLocked(shard, key);
                 if (erase_result.count > 0)
                 {
-                    total_entries--;
-                    total_size -= erase_result.bytes;
+                    atomicSubClamped(total_entries, erase_result.count);
+                    atomicSubClamped(total_size, erase_result.bytes);
                     DiskCacheFactory::instance().releaseGlobalTTL(erase_result.bytes);
                 }
             }
@@ -723,8 +737,8 @@ void DiskCacheTTL::evictExpired()
             auto result = cacheErasePartLocked(shard, hash_high);
             if (result.count > 0)
             {
-                total_entries -= result.count;
-                total_size -= result.bytes;
+                atomicSubClamped(total_entries, result.count);
+                atomicSubClamped(total_size, result.bytes);
                 evicted_bytes += result.bytes;
                 erase_results.push_back(std::move(result));
             }
@@ -782,8 +796,8 @@ void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
         auto r = cacheErasePartLocked(shards[p.shard], p.hash_high);
         if (r.count > 0)
         {
-            total_entries -= r.count;
-            total_size -= r.bytes;
+            atomicSubClamped(total_entries, r.count);
+            atomicSubClamped(total_size, r.bytes);
             freed += r.bytes;
             erased.push_back(std::move(r));
         }
@@ -931,8 +945,8 @@ size_t DiskCacheTTL::drop(const String & part_base_path)
             result = cacheErasePartLocked(shard, hash_high);
             if (result.count > 0)
             {
-                total_entries -= result.count;
-                total_size -= result.bytes;
+                atomicSubClamped(total_entries, result.count);
+                atomicSubClamped(total_size, result.bytes);
                 DiskCacheFactory::instance().releaseGlobalTTL(result.bytes);
             }
         }
