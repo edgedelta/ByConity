@@ -183,23 +183,29 @@ std::optional<String> TTLCacheFDBIndex::findPeerOwner(UInt128 key, const String 
     if (worker.empty() || worker == own_worker_id)
         return std::nullopt;
 
-    auto peer = DiskCacheFactory::instance().resolvePeer(worker);
-    if (!peer)
-        return std::nullopt;  // can't resolve (RM transient / unknown worker) — skip
-
-    if (peer->register_time != epoch)
+    // epoch == 0 means the writer couldn't resolve its own register_time when it stamped the
+    // entry. Treat it as "unknown": don't use it to judge staleness and don't delete the entry.
+    // Attempt the steal regardless; the contacted peer answers authoritatively.
+    if (epoch != 0)
     {
-        // Definitely stale: `worker` re-registered since this entry was written. 
-        // Lazily delete it
-        PendingOp del;
-        del.type = PendingOp::Type::Evict;
-        del.key  = rev_key;
+        auto peer = DiskCacheFactory::instance().resolvePeer(worker);
+        if (!peer)
+            return std::nullopt;  // can't resolve, skip
+
+        if (peer->register_time != epoch)
         {
-            std::lock_guard lk(mu);
-            queue.push_back(std::move(del));
+            // Definitely stale: `worker` re-registered since this entry was written. 
+            // was written. Lazily delete it and skip.
+            PendingOp del;
+            del.type = PendingOp::Type::Evict;
+            del.key  = rev_key;
+            {
+                std::lock_guard lk(mu);
+                queue.push_back(std::move(del));
+            }
+            cv.notify_one();
+            return std::nullopt;
         }
-        cv.notify_one();
-        return std::nullopt;
     }
 
     return worker;  // caller resolves worker_id → endpoint via DiskCacheFactory

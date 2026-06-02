@@ -364,8 +364,11 @@ void PlanSegmentExecutor::doExecute()
 
     // Reap this segment's per-query disk-cache stats on every exit path. The normal consume
     // happens below in collectPostExecutionAttributes(), but it is skipped when the query is
-    // cancelled/fails or when profiling is off. Without this, the
-    // readers' mergeQueryCacheStats() entry would leak forever.
+    // cancelled/fails or when profiling is off. Without this, the readers' mergeQueryCacheStats()
+    // entry would leak forever.
+    //
+    // INVARIANT: this SCOPE_EXIT must be declared BEFORE `pipeline` below. Scope-exit guards run
+    // in reverse declaration order; meaning a reader that flushes its remaining stats from its destructor is still reaped here.
     String cache_stats_query_id = CurrentThread::getQueryId().toString();
     SCOPE_EXIT({
         if (!cache_stats_query_id.empty())

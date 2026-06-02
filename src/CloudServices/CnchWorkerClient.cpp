@@ -181,6 +181,8 @@ std::vector<Protos::TTLCacheTableStats> CnchWorkerClient::getTTLCacheStats()
     Protos::GetTTLCacheStatsReq request;
     Protos::GetTTLCacheStatsResp response;
 
+    // Cap the per-worker wait so a slow/dead worker can't stall the whole fan-out.
+    cntl.set_timeout_ms(5000);
     stub->getTTLCacheStats(&cntl, &request, &response, nullptr);
 
     assertController(cntl);

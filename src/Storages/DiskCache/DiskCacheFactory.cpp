@@ -144,27 +144,32 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
     // is the single-table default.
     size_t effective_max_size = max_size_bytes > 0 ? max_size_bytes : cache_settings.ttl_cache_max_size;
 
-    // Check registry first (for worker reuse).
-    // Compare against effective_max_size so callers passing 0 (no per-table override)
-    // don't spuriously trigger recreation of a cache that was already created with the global limit.
+    // Compare against effective_max_size so callers passing 0
+    // don't trigger recreation of a cache that was already created with the global limit.
+    // updateSettings may schedule eviction on the evict pool, and doing that while holding
+    // ttl_cache_registry_mutex would serialize all per-table cache creation/lookup behind a pool enqueue.
+    IDiskCachePtr existing_cache;
     {
         std::lock_guard<std::mutex> lock(ttl_cache_registry_mutex);
         auto reg_it = per_table_ttl_caches.find(table_uuid);
         if (reg_it != per_table_ttl_caches.end())
+            existing_cache = reg_it->second;
+    }
+    if (existing_cache)
+    {
+        auto existing = static_pointer_cast<DiskCacheTTL>(existing_cache);
+        if (existing->getTTLMinutes() == ttl_minutes && existing->getMaxSizeBytes() == effective_max_size)
         {
-            auto existing = static_pointer_cast<DiskCacheTTL>(reg_it->second);
-            if (existing->getTTLMinutes() == ttl_minutes && existing->getMaxSizeBytes() == effective_max_size)
-            {
-                LOG_TRACE(log, "Reusing existing TTL cache for {} (UUID: {})", table_name, UUIDHelpers::UUIDToString(table_uuid));
-                return reg_it->second;
-            }
-            LOG_INFO(log, "TTL cache settings changed for {} (UUID: {}), updating in place (ttl: {}->{}min, max_size: {}->{}bytes)",
-                table_name, UUIDHelpers::UUIDToString(table_uuid),
-                existing->getTTLMinutes(), ttl_minutes,
-                existing->getMaxSizeBytes(), effective_max_size);
-            existing->updateSettings(ttl_minutes, effective_max_size);
-            return reg_it->second;
+            LOG_TRACE(log, "Reusing existing TTL cache for {} (UUID: {})", table_name, UUIDHelpers::UUIDToString(table_uuid));
+            return existing_cache;
         }
+        
+        LOG_INFO(log, "TTL cache settings changed for {} (UUID: {}), updating in place (ttl: {}->{}min, max_size: {}->{}bytes)",
+            table_name, UUIDHelpers::UUIDToString(table_uuid),
+            existing->getTTLMinutes(), ttl_minutes,
+            existing->getMaxSizeBytes(), effective_max_size);
+        existing->updateSettings(ttl_minutes, effective_max_size);
+        return existing_cache;
     }
 
     // Get volume from ttl_disk_policy

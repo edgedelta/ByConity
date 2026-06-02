@@ -609,7 +609,8 @@ void ServerPrometheusMetricsWriter::writeTTLCacheMetrics(WriteBuffer & wb)
 
         auto s = ttl->getStats();
         const String table_name = cache_ptr->getName();
-        MetricLabels base{{"table_name", table_name}, {"worker_id", worker_id}};
+        // Include table_uuid: caches are keyed by UUID, so table_name alone can't collide.
+        MetricLabels base{{"table_name", table_name}, {"table_uuid", s.table_uuid}, {"worker_id", worker_id}};
 
         // gauges — current state, can go up or down
         emit("entries",        GAUGE_TYPE, "Segments currently cached on disk",               base, s.total_entries);

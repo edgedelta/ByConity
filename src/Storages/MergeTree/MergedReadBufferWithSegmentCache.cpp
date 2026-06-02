@@ -518,34 +518,10 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
         size_t segment_start_compressed_offset =
             marks_loader.getMark(segment_idx * cache_segment_size).offset_in_compressed_file;
 
-        // Guard against empty or truncated cache files — FDB may have a valid entry
-        // pointing to a file that was never fully written or was partially written.
-        // Seek succeeds on truncated files but reads return 0 bytes causing
-        // "Cannot read all data" errors. Check that the file covers the seek offset.
-        size_t seek_offset = mark_pos.offset_in_compressed_file - segment_start_compressed_offset;
-        size_t file_size = cache_disk->getFileSize(cache_path);
-        if (file_size <= seek_offset)
-        {
-            LOG_WARNING(logger, "FDB cache hit for segment {} but file is too small ({} <= seek offset {}) at {} — falling back to S3",
-                segment_key, file_size, seek_offset, fullPath(cache_disk, cache_path));
-            return false;
-        }
-
         LOG_TRACE(logger, fmt::format("Seek to diskcache {} (current buffer at {}), segment {}, offset {}:{}", cache_path, cache_buffer.initialized() ? cache_buffer.path() : "Uninitialized", segment_idx, mark_pos.offset_in_compressed_file, mark_pos.offset_in_decompressed_block));
         initCacheBufferIfNeeded(cache_disk, cache_path);
         cache_buffer.seek(mark_pos.offset_in_compressed_file - segment_start_compressed_offset,
             mark_pos.offset_in_decompressed_block);
-        // Probe first read inside try-catch: seek is lazy so the first real I/O
-        // (compressed block header) would otherwise happen in nextImpl with no S3
-        // fallback. Sparse/in-flight files pass the size check above but return 0
-        // bytes here; catching that now lets us fall back cleanly.
-        if (cache_buffer.activeBuffer().eof())
-        {
-            LOG_WARNING(logger, "Local cache EOF right after seek (offset {}) for {} — falling back to S3",
-                seek_offset, fullPath(cache_disk, cache_path));
-            cache_buffer.reset();
-            return false;
-        }
         current_segment_idx = segment_idx;
         if (collect_cache_stats)
         {
