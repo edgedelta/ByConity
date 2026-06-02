@@ -624,7 +624,7 @@ void CnchWorkerServiceImpl::preloadDataParts(
                     part->remote_fs_read_failed_injection = read_injection;
                     part->disk_cache_mode = DiskCacheMode::SKIP_DISK_CACHE;// avoid getCheckum & getIndex re-cache
                     part->preload(preload_level, submit_ts);
-                }).detach();
+                });
             }
         }
     })
