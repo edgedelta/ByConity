@@ -151,15 +151,6 @@ namespace
         return true;
     }
 
-    bool isHexHalf(const String & s)
-    {
-        if (s.size() != HEX_KEY_LEN / 2)
-            return false;
-        for (char c : s)
-            if (!(isNumericASCII(c) || (c >= 'a' && c <= 'f')))
-                return false;
-        return true;
-    }
 }
 
 DiskCacheTTL::DiskCacheTTL(
@@ -397,29 +388,6 @@ DiskCacheTTL::CacheEraseResult DiskCacheTTL::cacheErasePartLocked(Shard & shard,
     return result;
 }
 
-void DiskCacheTTL::addToPartitionStats(const String & partition_id, time_t partition_ts, size_t bytes, size_t count)
-{
-    {
-        std::shared_lock<std::shared_mutex> lk(cache_stats.partition_stats_mutex);
-        auto it = cache_stats.partition_stats.find(partition_id);
-        if (it != cache_stats.partition_stats.end())
-        {
-            it->second.entry_count += count;
-            it->second.total_bytes += bytes;
-            return;
-        }
-    }
-    std::unique_lock<std::shared_mutex> lk(cache_stats.partition_stats_mutex);
-    auto [it, inserted] = cache_stats.partition_stats.try_emplace(partition_id);
-    if (inserted)
-    {
-        it->second.partition_id = partition_id;
-        it->second.partition_timestamp = partition_ts;
-    }
-    it->second.entry_count += count;
-    it->second.total_bytes += bytes;
-}
-
 void DiskCacheTTL::applyEraseResults(std::vector<CacheEraseResult> & results, size_t & total_evicted, const char * log_tag)
 {
     for (auto & result : results)
@@ -431,39 +399,8 @@ void DiskCacheTTL::applyEraseResults(std::vector<CacheEraseResult> & results, si
         }
         if (fdb_index)
             fdb_index->evictPart(result.partition_id, result.hash_high);
-        subtractFromPartitionStats(result);
         total_evicted += result.count;
     }
-}
-
-void DiskCacheTTL::subtractFromPartitionStats(const CacheEraseResult & result)
-{
-    if (result.count == 0)
-        return;
-
-    // Single chokepoint for every eviction/drop path, consistent everywhere.
-    bool emptied = false;
-    {
-        // Fast path stays on shared_lock so eviction decrements never block set()'s concurrent
-        // addToPartitionStats increments.
-        std::shared_lock<std::shared_mutex> lk(cache_stats.partition_stats_mutex);
-        auto it = cache_stats.partition_stats.find(result.partition_id);
-        if (it == cache_stats.partition_stats.end())
-            return;
-        size_t prev_count = it->second.entry_count.fetch_sub(result.count);
-        it->second.total_bytes.fetch_sub(result.bytes);
-        emptied = (prev_count == result.count);  // reached exactly 0
-    }
-
-    if (!emptied)
-        return;
-
-    // Rare: the partition's last entry was evicted. Take the exclusive lock only now to erase,
-    // re-checking under the lock so a concurrent set() that re-populated it is preserved.
-    std::unique_lock<std::shared_mutex> lk(cache_stats.partition_stats_mutex);
-    auto it = cache_stats.partition_stats.find(result.partition_id);
-    if (it != cache_stats.partition_stats.end() && it->second.entry_count.load() == 0)
-        cache_stats.partition_stats.erase(it);
 }
 
 void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload, time_t max_time)
@@ -506,11 +443,7 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
 
     // First lock: check if already exists, reserve slot
     {
-        Stopwatch wait_sw;
         std::unique_lock<std::shared_mutex> lock(shard.mutex);
-        if (wait_sw.elapsedMicroseconds() > 1000)
-            LOG_WARNING(log, "[ttl-perf] set() first lock waited {} us", wait_sw.elapsedMicroseconds());
-
         if (shard.cache_map.find(key) != shard.cache_map.end())
             return;
 
@@ -533,11 +466,7 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
         ProfileEvents::increment(ProfileEvents::DiskCacheSetTotalBytes, weight, Metrics::MetricType::Rate, {{"type", (is_preload ? "preload": "query")}});
 
         {
-            Stopwatch wait_sw;
             std::unique_lock<std::shared_mutex> lock(shard.mutex);
-            if (wait_sw.elapsedMicroseconds() > 1000)
-                LOG_WARNING(log, "[ttl-perf] set() second lock waited {} us", wait_sw.elapsedMicroseconds());
-
             auto meta = std::make_shared<DiskCacheTTLMeta>(
                 DiskCacheTTLMeta::State::Cached, reserved_space->getDisk(), weight, cached_at, part_ts, cache_rel_path
             );
@@ -561,11 +490,8 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
             DiskCacheFactory::instance().addGlobalTTLUsage(weight);
         }
 
-        // Update partition stats outside shard mutex to avoid lock ordering with partition_stats_mutex
-        addToPartitionStats(partition_id, part_ts, weight);
-
         if (fdb_index)
-            fdb_index->onSet(key, seg_name, weight, part_ts, partition_id);
+            fdb_index->onSet(key, partition_id);
 
         // Async size-based eviction once the hard cap is exceeded.
         // max_size_bytes is always set (factory falls back to global limit when no per-table limit
@@ -602,11 +528,15 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
             }
         }
     }
-    catch(const Exception & e)
+    catch (...)
     {
+        // Catch everything, not just DB::Exception: writeSegment can throw std::bad_alloc,
+        // std::filesystem_error, etc. If any of those escaped, the State::Caching placeholder
+        // inserted under the first lock would never be erased, permanently poisoning this key
+        // (get() always misses on it, set() early-returns on the "already present" guard).
         String local_disk_path = reserved_space == nullptr ? "" : reserved_space->getDisk()->getPath();
         tryLogCurrentException(log, fmt::format("Failed to write key {} "
-            "to local, disk path: {}, weight: {}, fail: {}", seg_name, local_disk_path, weight_hint, e.message()));
+            "to local, disk path: {}, weight: {}", seg_name, local_disk_path, weight_hint));
 
         std::unique_lock<std::shared_mutex> lock(shard.mutex);
         cacheEraseLocked(shard, key);  // also cleans up part_index reservation slot
@@ -642,11 +572,7 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
 
     auto & shard = getShard(key.items[0]);
     {
-        Stopwatch wait_sw;
         std::shared_lock<std::shared_mutex> lock(shard.mutex);
-        if (wait_sw.elapsedMicroseconds() > 1000)
-            LOG_WARNING(log, "[ttl-perf] get() lock waited {} us, shard_size={}", wait_sw.elapsedMicroseconds(), shard.cache_map.size());
-
         auto it = shard.cache_map.find(key);
         if (it == shard.cache_map.end() || it->second->state != DiskCacheTTLMeta::State::Cached)
         {
@@ -681,9 +607,6 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
             rel_path = it->second->rel_path;
         }
     }
-
-    if (erase_result.count > 0)
-        subtractFromPartitionStats(erase_result);
 
     return {disk, rel_path};
 }
@@ -734,27 +657,37 @@ size_t DiskCacheTTL::writeSegment(ReadBuffer& buffer, ReservationPtr& reservatio
 
 void DiskCacheTTL::evictExpired()
 {
-    // Single lock: scan + erase in one critical section — no disk I/O happens inside.
-    // Collect expired hash_highs first, then erase in a second pass
-    // to avoid iterator invalidation from cacheErasePartLocked.
+    // a shared-lock scan that doesn't block concurrent get()/set().
+    // We only upgrade to the exclusive lock for shards that actually have expired parts, and re-validate there.
     std::vector<CacheEraseResult> erase_results;
     size_t evicted_bytes = 0;
 
+    auto is_expired = [this](const Shard & shard, const PartIndexEntry & entry) {
+        if (entry.keys.empty()) return false;
+        auto sample = shard.cache_map.find(*entry.keys.begin());
+        return sample != shard.cache_map.end() && !shouldCache(sample->second->max_timestamp);
+    };
+
     for (auto & shard : shards)
     {
-        std::unique_lock<std::shared_mutex> lock(shard.mutex);
-
+        // read-locked scan.
         std::vector<UInt64> expired_hash_highs;
-        for (const auto & [hash_high, entry] : shard.part_index)
         {
-            if (entry.keys.empty()) continue;
-            auto sample = shard.cache_map.find(*entry.keys.begin());
-            if (sample != shard.cache_map.end() && !shouldCache(sample->second->max_timestamp))
-                expired_hash_highs.push_back(hash_high);
+            std::shared_lock<std::shared_mutex> lock(shard.mutex);
+            for (const auto & [hash_high, entry] : shard.part_index)
+                if (is_expired(shard, entry))
+                    expired_hash_highs.push_back(hash_high);
         }
+        if (expired_hash_highs.empty())
+            continue;
 
+        // write-locked erase, only for shards with work. Re-check under the lock.
+        std::unique_lock<std::shared_mutex> lock(shard.mutex);
         for (UInt64 hash_high : expired_hash_highs)
         {
+            auto pit = shard.part_index.find(hash_high);
+            if (pit == shard.part_index.end() || !is_expired(shard, pit->second))
+                continue;  // gone or refreshed since the read scan
             auto result = cacheErasePartLocked(shard, hash_high);
             if (result.count > 0)
             {
@@ -838,138 +771,62 @@ void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
     LOG_INFO(log, "Size eviction: freed {} bytes ({} segments across {} parts)", freed, total_evicted, erased.size());
 }
 
+void DiskCacheTTL::updateSettings(UInt64 new_ttl_minutes, size_t new_max_size_bytes)
+{
+    UInt64 old_ttl = ttl_minutes.exchange(new_ttl_minutes, std::memory_order_relaxed);
+    size_t old_max = max_size_bytes.exchange(new_max_size_bytes, std::memory_order_relaxed);
+
+    // ttl_minutes==0 means "disabled", treated as a tighten
+    // from any nonzero ttl; max_size==0 means "no per-table cap", never a size tighten.
+    bool ttl_tightened  = new_ttl_minutes != 0 && (old_ttl == 0 || new_ttl_minutes < old_ttl);
+    bool size_tightened = new_max_size_bytes != 0 && new_max_size_bytes < old_max;
+    if (!ttl_tightened && !size_tightened)
+        return;
+
+    try
+    {
+        IDiskCache::getEvictPool().scheduleOrThrow([this, ttl_tightened, size_tightened] {
+            if (ttl_tightened)
+                evictExpired();
+            if (size_tightened)
+            {
+                size_t cap = max_size_bytes.load();
+                size_t cur = total_size.load();
+                if (cap > 0 && cur > cap)
+                    evictOldestPartitionsUntilSpace((cur - cap) + cap * SIZE_EVICTION_HEADROOM_FRACTION);
+            }
+        });
+    }
+    catch (...)
+    {
+        // Evict pool saturated; the shrink will still be applied lazily by set()/the periodic
+        // tick. Don't let a settings update fail because of a transient scheduling error.
+        tryLogCurrentException(log, "updateSettings: failed to schedule eager eviction from ttl cache settings change");
+    }
+}
+
 void DiskCacheTTL::load()
 {
-    if (fdb_index)
-    {
-        auto hasData = [&](const auto & disk, const String & dir) {
-            return disk->exists(dir) && disk->iterateDirectory(dir)->isValid();
-        };
-
-        bool cache_wiped = true;
-        for (const auto & disk : volume->getDisks())
-        {
-            if (hasData(disk, latest_disk_cache_dir))
-            {
-                cache_wiped = false;
-                break;
-            }
-            for (const auto & prev : previous_disk_cache_dirs)
-            {
-                if (hasData(disk, prev))
-                {
-                    cache_wiped = false;
-                    break;
-                }
-            }
-            if (!cache_wiped)
-                break;
-        }
-
-        if (cache_wiped)
-        {
-            // TODO: proactively re-fetch this worker's assigned parts from S3 to warm the
-            // cache after restart, avoiding cold query latency. Requires querying the catalog
-            // for the current part assignment and triggering background preload per table.
-            LOG_WARNING(log, "TTL cache for {}: cache dir is empty, "
-                "clearing stale FDB forward index and skipping reconcile", table_uuid);
-            fdb_index->clearSelf();
-            return;
-        }
-
-        auto result = fdb_index->reconcile(
-            volume,
-            [this](UInt128 key, const String & seg_name) { return getRelativePath(key, seg_name); },
-            [this](time_t ts) { return shouldCache(ts); },
-            [this](TTLCacheFDBIndex::ReconcileBatch & batch) {
-                // Group by shard: one lock per shard instead of one per entry.
-                // partition_id comes from the FDB key (same value onSet wrote / eviction uses),
-                // not re-derived from max_timestamp, so it round-trips across restarts.
-                std::array<std::vector<std::tuple<UInt128, std::shared_ptr<DiskCacheTTLMeta>, String>>, NUM_SHARDS> by_shard;
-                for (auto & [key, meta, pid] : batch)
-                    by_shard[key.items[0] & (NUM_SHARDS - 1)].emplace_back(key, meta, pid);
-                for (size_t i = 0; i < NUM_SHARDS; ++i)
-                {
-                    if (by_shard[i].empty())
-                        continue;
-                    std::unique_lock<std::shared_mutex> lock(shards[i].mutex);
-                    for (auto & [key, meta, pid] : by_shard[i])
-                        cacheInsertLocked(shards[i], key, meta, pid);
-                }
-
-                // Batch stats update: one lock per unique partition instead of one per entry.
-                std::unordered_map<String, std::tuple<time_t, size_t, size_t>> stats_acc; // pid -> (ts, bytes, count)
-                for (auto & [key, meta, pid] : batch)
-                {
-                    auto & [ts, bytes, count] = stats_acc[pid];
-                    ts = meta->max_timestamp;
-                    bytes += meta->size;
-                    count++;
-                }
-                for (auto & [pid, tbc] : stats_acc)
-                {
-                    auto & [ts, bytes, count] = tbc;
-                    addToPartitionStats(pid, ts, bytes, count);
-                    cache_stats.cached_from_restored += count;
-                    cache_stats.cached_bytes_restored += bytes;
-                }
-            });
-
-        if (result)
-        {
-            auto [entries, bytes] = *result;
-            // fetch_add: concurrent set() calls may have already bumped these counters between cache registration and now
-            total_entries.fetch_add(entries, std::memory_order_relaxed);
-            total_size.fetch_add(bytes, std::memory_order_relaxed);
-
-            LOG_INFO(log, "TTL cache for {} recovered from FDB index: {} entries, {} bytes",
-                table_uuid, entries, bytes);
-            return;
-        }
-        // reconcile() already logged the per-entry summary (restored/stale counts)
-        LOG_WARNING(log, "TTL cache for {}: FDB index had no restorable entries, falling back to disk scan", table_uuid);
-    }
-    else
-    {
-        LOG_WARNING(log, "TTL cache for {}: no FDB index available, loading from disk scan", table_uuid);
-    }
-
-    LOG_INFO(log, "Loading TTL disk cache from disk scan for {}...", table_uuid);
-
+    // Instance-disk deployment: the local NVMe cache directory does not survive a restart, so
+    // there is nothing to restore — no FDB reconcile, no disk scan. We always start cold.
+    // Defensively wipe any directory that did survive (non-instance disk), because an in-memory
+    // index that starts empty would never learn about those files, i.e. leaked disk forever.
     for (const auto & disk : volume->getDisks())
     {
-        DiskCacheLoader loader(*this, disk, settings.cache_loader_per_disk,
-            settings.cache_load_dispatcher_drill_down_level,
-            settings.cache_load_dispatcher_drill_down_level);
-
-        for (const auto & dir_path : previous_disk_cache_dirs)
+        try
         {
-            if (disk->exists(dir_path))
-                loader.exec(dir_path);
+            if (disk->exists(latest_disk_cache_dir))
+                disk->removeRecursive(latest_disk_cache_dir);
+            for (const auto & prev : previous_disk_cache_dirs)
+                if (disk->exists(prev))
+                    disk->removeRecursive(prev);
         }
-
-        if (disk->exists(latest_disk_cache_dir))
-            loader.exec(latest_disk_cache_dir);
-
-        LOG_INFO(log, "Loaded {} segments from disk {}", loader.total_loaded, disk->getName());
+        catch (...)
+        {
+            tryLogCurrentException(log, fmt::format("TTL cache for {}: failed to clear stale cache dir on load", table_uuid));
+        }
     }
-
-    LOG_INFO(log, "TTL disk cache load complete. Total: {} segments, {} bytes", total_entries.load(), total_size.load());
-
-    // Post-scan eviction: trigger synchronously now that partition_stats are fully populated.
-    // This handles the deadlock where a disk that was overfull before restart has all subsequent
-    // set() calls fail at volume->reserve() before reaching the eviction check in the write path,
-    // leaving the cache stuck full with no way to self-recover via normal writes.
-    // max_size_bytes is always set (factory falls back to global limit), so one check suffices.
-    // Use hard cap (not 90%) — max_size_bytes already encodes the configured percent of disk.
-    if (max_size_bytes > 0 && total_size.load() > max_size_bytes)
-    {
-        size_t excess = total_size.load() - max_size_bytes;
-        size_t target_free = excess + max_size_bytes * 0.10;
-        LOG_INFO(log, "Post-scan eviction triggered: total_size={}, max={}, freeing {} bytes",
-                 total_size.load(), max_size_bytes, target_free);
-        evictOldestPartitionsUntilSpace(target_free);
-    }
+    LOG_INFO(log, "TTL disk cache for {} started cold (instance disk: nothing to restore)", table_uuid);
 }
 
 size_t DiskCacheTTL::drop(const String & part_base_path)
@@ -1001,22 +858,19 @@ size_t DiskCacheTTL::drop(const String & part_base_path)
     LOG_TRACE(log, "Dropping cache for part {} (meta: {}, data: {})", part_base_path, meta_path.string(), data_path.string());
 
     const Disks & disks = volume->getDisks();
-    size_t delete_file_size = 0;
 
     for (const auto & disk : disks)
     {
-        if (!meta_path.empty() && disk->exists(meta_path))
+        try
         {
-            DiskCacheDeleter deleter(*this, disk, 1, -1, -1);
-            deleter.exec(meta_path);
-            delete_file_size += deleter.delete_file_size;
+            if (!meta_path.empty() && disk->exists(meta_path))
+                disk->removeRecursive(meta_path);
+            if (!data_path.empty() && disk->exists(data_path))
+                disk->removeRecursive(data_path);
         }
-
-        if (!data_path.empty() && disk->exists(data_path))
+        catch (...)
         {
-            DiskCacheDeleter deleter(*this, disk, 1, -1, -1);
-            deleter.exec(data_path);
-            delete_file_size += deleter.delete_file_size;
+            tryLogCurrentException(log, "Failed to remove cache dir on drop: " + part_base_path);
         }
     }
 
@@ -1032,9 +886,6 @@ size_t DiskCacheTTL::drop(const String & part_base_path)
         total_entries.store(0);
         total_size.store(0);
         DiskCacheFactory::instance().releaseGlobalTTL(dropped_bytes);
-
-        std::unique_lock<std::shared_mutex> lk(cache_stats.partition_stats_mutex);
-        cache_stats.partition_stats.clear();
     }
     else
     {
@@ -1055,14 +906,13 @@ size_t DiskCacheTTL::drop(const String & part_base_path)
         }
         if (result.count > 0)
         {
-            subtractFromPartitionStats(result);
             if (fdb_index)
                 fdb_index->evictPart(result.partition_id, result.hash_high);
         }
     }
 
-    LOG_TRACE(log, "Dropped {} bytes of cache for part {}", delete_file_size, part_base_path);
-    return delete_file_size;
+    LOG_TRACE(log, "Dropped cache for part {}", part_base_path);
+    return 0;
 }
 
 void DiskCacheTTL::drop()
@@ -1080,10 +930,6 @@ void DiskCacheTTL::drop()
     total_entries.store(0);
     total_size.store(0);
     DiskCacheFactory::instance().releaseGlobalTTL(dropped_bytes);
-    {
-        std::unique_lock<std::shared_mutex> lk(cache_stats.partition_stats_mutex);
-        cache_stats.partition_stats.clear();
-    }
 
     // Atomically rename table dirs (cheap), then delete asynchronously
     String ts = std::to_string(time(nullptr));
@@ -1122,171 +968,6 @@ void DiskCacheTTL::drop()
     });
 }
 
-// DiskIterator implementations
-DiskCacheTTL::DiskIterator::DiskIterator(
-    const String & name_, DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk_, int min_depth_parallel_, int max_depth_parallel_)
-    : name(name_), disk_cache(cache_), disk(disk_), worker_per_disk(worker_per_disk_),
-      min_depth_parallel(min_depth_parallel_), max_depth_parallel(max_depth_parallel_)
-{
-    log = &Poco::Logger::get(name);
-
-    if (worker_per_disk > 1)
-        pool = std::make_unique<ThreadPool>(worker_per_disk);
-}
-
-void DiskCacheTTL::DiskIterator::exec(std::filesystem::path entry_path)
-{
-    iterateDirectory(entry_path, 0);
-
-    if (pool)
-        pool->wait();
-}
-
-void DiskCacheTTL::DiskIterator::iterateDirectory(std::filesystem::path rel_path, size_t depth)
-{
-    if (!disk->exists(rel_path))
-        return;
-
-    for (auto it = disk->iterateDirectory(rel_path); it->isValid(); it->next())
-    {
-        auto entry_path = rel_path / it->name();
-
-        if (disk->isDirectory(entry_path))
-        {
-            iterateDirectory(entry_path, depth + 1);
-        }
-        else if (disk->isFile(entry_path))
-        {
-            iterateFile(entry_path, disk->getFileSize(entry_path));
-        }
-    }
-}
-
-// DiskCacheLoader
-DiskCacheTTL::DiskCacheLoader::DiskCacheLoader(
-    DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk_, int min_depth_parallel_, int max_depth_parallel_)
-    : DiskIterator("DiskCacheTTLLoader", cache_, disk_, worker_per_disk_, min_depth_parallel_, max_depth_parallel_)
-{
-}
-
-DiskCacheTTL::DiskCacheLoader::~DiskCacheLoader()
-{
-}
-
-void DiskCacheTTL::DiskCacheLoader::iterateFile(std::filesystem::path file_path, size_t file_size)
-{
-    String filename = file_path.filename();
-
-    // Skip temp files
-    if (endsWith(filename, DISK_CACHE_TEMP_FILE_SUFFIX))
-    {
-        disk->removeFileIfExists(file_path);
-        return;
-    }
-
-    // Skip and clean up 0-byte files — they indicate an interrupted or empty write
-    // and would cause false cache HITs returning empty content.
-    if (file_size == 0)
-    {
-        disk->removeFileIfExists(file_path);
-        return;
-    }
-
-    // Path structure: {cache_dir}/{data|meta}/{uuid}/{partition}/{3char}/{hash_high}/{hash_low}
-    // The filename is hash_low (low 64 bits of the key) and the parent dir is hash_high.
-    // Parse each half as a hex UInt64 to reconstruct the full UInt128 key.
-    if (!isHexHalf(filename))
-    {
-        LOG_WARNING(log, "Invalid cache file (hash_low): {}", file_path.string());
-        return;
-    }
-    UInt64 low = unhexUInt<UInt64>(filename.data());
-
-    // New structure: data/uuid/partition/3char/hash_high/hash_low
-    // Extract partition from path hierarchy
-    auto hash_high_dir = file_path.parent_path().filename().string();  // hash_high
-    auto partition_dir = file_path.parent_path().parent_path().parent_path().filename().string();  // partition_id
-
-    if (!isHexHalf(hash_high_dir))
-    {
-        LOG_WARNING(log, "Invalid cache directory (hash_high): {}", file_path.string());
-        return;
-    }
-    UInt64 high = unhexUInt<UInt64>(hash_high_dir.data());
-
-    // Build full key matching UInt128{high, low} as returned by unhexKey
-    UInt128 key = {high, low};
-
-    // Parse timestamp from partition_id (e.g., "20240315")
-    time_t part_ts = 0;
-    part_ts = numericPartitionIdToTimestamp(partition_dir);
-    if (part_ts == 0 && partition_dir.size() >= 6)
-        LOG_WARNING(log, "Failed to parse partition timestamp from: {}", partition_dir);
-
-    // Skip expired or non-time-based segments; delete the stale file so it
-    // doesn't accumulate on disk across restarts.
-    if (!disk_cache.shouldCache(part_ts))
-    {
-        disk->removeFileIfExists(file_path);
-        return;
-    }
-
-    String file_path_str = file_path.string();
-    {
-        auto & shard = disk_cache.getShard(high);
-        std::unique_lock<std::shared_mutex> lock(shard.mutex);
-        auto meta = std::make_shared<DiskCacheTTLMeta>(
-            DiskCacheTTLMeta::State::Cached, disk, file_size, time(nullptr), part_ts, std::move(file_path_str)
-        );
-        disk_cache.cacheInsertLocked(shard, key, meta, partition_dir);
-        disk_cache.total_entries++;
-        disk_cache.total_size += file_size;
-        DiskCacheFactory::instance().addGlobalTTLUsage(file_size);
-    }
-
-    // Update partition stats outside shard mutex to avoid lock ordering with partition_stats_mutex
-    disk_cache.addToPartitionStats(partition_dir, part_ts, file_size);
-    disk_cache.cache_stats.cached_from_restored++;
-    disk_cache.cache_stats.cached_bytes_restored += file_size;
-
-    total_loaded++;
-}
-
-// DiskCacheMigrator (stub)
-DiskCacheTTL::DiskCacheMigrator::DiskCacheMigrator(
-    DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk_, int min_depth_parallel_, int max_depth_parallel_)
-    : DiskIterator("DiskCacheTTLMigrator", cache_, disk_, worker_per_disk_, min_depth_parallel_, max_depth_parallel_)
-{
-}
-
-DiskCacheTTL::DiskCacheMigrator::~DiskCacheMigrator()
-{
-}
-
-void DiskCacheTTL::DiskCacheMigrator::iterateFile(std::filesystem::path, size_t)
-{
-}
-
-// DiskCacheDeleter (stub)
-DiskCacheTTL::DiskCacheDeleter::DiskCacheDeleter(
-    DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk_, int min_depth_parallel_, int max_depth_parallel_)
-    : DiskIterator("DiskCacheTTLDeleter", cache_, disk_, worker_per_disk_, min_depth_parallel_, max_depth_parallel_)
-{
-}
-
-DiskCacheTTL::DiskCacheDeleter::~DiskCacheDeleter()
-{
-}
-
-void DiskCacheTTL::DiskCacheDeleter::exec(std::filesystem::path entry_path)
-{
-    disk->removeRecursive(entry_path);
-}
-
-void DiskCacheTTL::DiskCacheDeleter::iterateFile(std::filesystem::path, size_t)
-{
-}
-
 DiskCacheTTL::TTLCacheStats DiskCacheTTL::getStats() const
 {
     TTLCacheStats stats;
@@ -1321,31 +1002,33 @@ DiskCacheTTL::TTLCacheStats DiskCacheTTL::getStats() const
 
 std::vector<DiskCacheTTL::PartitionStats> DiskCacheTTL::getPartitionStats() const
 {
-    std::vector<PartitionStats> result;
-    std::shared_lock<std::shared_mutex> lock(cache_stats.partition_stats_mutex);
-    result.reserve(cache_stats.partition_stats.size());
-    for (const auto & [partition_id, internal_stats] : cache_stats.partition_stats)
+    // Derived on demand from part_index rather than maintained incrementally: O(parts) read-locked scan.
+    std::unordered_map<String, PartitionStats> agg;
+    for (const auto & shard : shards)
     {
-        PartitionStats snapshot;
-        snapshot.partition_id = internal_stats.partition_id;
-        snapshot.entry_count = internal_stats.entry_count.load();
-        snapshot.total_bytes = internal_stats.total_bytes.load();
-        snapshot.partition_timestamp = internal_stats.partition_timestamp;
-        result.push_back(snapshot);
+        std::shared_lock<std::shared_mutex> lock(shard.mutex);
+        for (const auto & [hash_high, entry] : shard.part_index)
+        {
+            auto & p = agg[entry.partition_id];
+            p.partition_id = entry.partition_id;
+            p.entry_count += entry.keys.size();
+            p.total_bytes += entry.total_bytes;
+            // Representative timestamp = oldest part in the partition.
+            if (p.partition_timestamp == 0 || (entry.partition_ts > 0 && entry.partition_ts < p.partition_timestamp))
+                p.partition_timestamp = entry.partition_ts;
+        }
     }
+
+    std::vector<PartitionStats> result;
+    result.reserve(agg.size());
+    for (auto & [pid, snapshot] : agg)
+        result.push_back(std::move(snapshot));
     return result;
 }
 
 std::optional<String> DiskCacheTTL::findPeerOwner(const String & seg_name)
 {
     if (!fdb_index)
-        return std::nullopt;
-
-    // Don't query FDB if caching is disabled or the partition has expired —
-    // stale DCIREV entries would still exist and would cause unnecessary steal
-    // attempts (or reads of bad files) even after ttl_duration is set to 0.
-    time_t part_ts = parsePartitionTimestamp(seg_name);
-    if (!shouldCache(part_ts))
         return std::nullopt;
 
     auto key = hash(seg_name);

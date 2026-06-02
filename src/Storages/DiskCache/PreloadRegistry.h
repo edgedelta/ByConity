@@ -47,19 +47,43 @@ struct PreloadPartitionSnapshot
     UInt64 preload_level;
 };
 
+class PreloadRegistry;
+
+/// RAII handle for a single in-flight preload part. PreloadRegistry::registerPart increments the
+/// partition's in-flight count and returns one of these; the destructor decrements it. 
+///  Move-only; wrap in a shared_ptr to capture in a task lambda.
+class PreloadHandle
+{
+public:
+    PreloadHandle() = default;
+    PreloadHandle(PreloadRegistry * registry_, String table_uuid_, String partition_id_)
+        : registry(registry_), table_uuid(std::move(table_uuid_)), partition_id(std::move(partition_id_)) {}
+    PreloadHandle(PreloadHandle && other) noexcept;
+    PreloadHandle & operator=(PreloadHandle && other) noexcept;
+    PreloadHandle(const PreloadHandle &) = delete;
+    PreloadHandle & operator=(const PreloadHandle &) = delete;
+    ~PreloadHandle();
+
+private:
+    void release();
+    PreloadRegistry * registry = nullptr;
+    String table_uuid;
+    String partition_id;
+};
+
 /// Global registry tracking in-flight async preload tasks, grouped by (table_uuid, partition_id).
 class PreloadRegistry
 {
 public:
     static PreloadRegistry & instance();
 
-    /// Register parts_count tasks for a partition. Returns a handle whose destructor
-    /// decrements the counter (call once per part from within the task lambda).
-    /// The entry is removed automatically when parts_in_flight drops to zero.
-    void registerParts(const String & table_name, const String & table_uuid,
-                       const String & partition_id, size_t parts_count, UInt64 preload_level);
+    /// Count one in-flight part and return a RAII handle; the part is decremented when the handle is destroyed. 
+    /// Call once per part and tie the handle to the task so the count balances on completion, exception, or failure to schedule.
+    PreloadHandle registerPart(const String & table_name, const String & table_uuid,
+                               const String & partition_id, UInt64 preload_level);
 
-    /// Decrement in-flight count for a partition. Removes entry when it reaches zero.
+    /// Decrement in-flight count for a partition.
+    /// Called by PreloadHandle's destructor.
     void partFinished(const String & table_uuid, const String & partition_id);
 
     std::vector<PreloadPartitionSnapshot> getSnapshot() const;

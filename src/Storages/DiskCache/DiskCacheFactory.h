@@ -93,6 +93,14 @@ struct QueryCacheStatsSnapshot
         && idx_hit_segs == 0 && idx_miss_segs == 0; }
 };
 
+/// Resolved worker identity for peer-steal: current RPC endpoint + RM register_time.
+/// a DCIREV entry stamped with an older register_time than the peer's current one was written by a previous incarnation and is treated as stale.
+struct WorkerPeerInfo
+{
+    String endpoint;
+    UInt32 register_time{0};
+};
+
 enum class DiskCacheType {
     File, // for generic file disk cache
     MergeTree,
@@ -173,10 +181,23 @@ public:
     /// unique_lock only for first insertion, then atomic fetch_add on the fields.
     void mergeQueryCacheStats(const String & query_id, const QueryCacheStatsSnapshot & local);
     std::optional<QueryCacheStatsSnapshot> consumeQueryCacheStats(const String & query_id);
+    /// Drop a query's entry without reading it, no-op if already consumed.
+    /// Called on query teardown so entries aren't leaked when consume is skipped.
+    void discardQueryCacheStats(const String & query_id);
 
     /// Resolve a stable worker_id (e.g. byconity-vw-vw-default-0) to its current RPC
-    /// host:port by querying the Resource Manager. Result cached for 30 seconds.
+    /// host:port + register_time by querying the Resource Manager. Result cached for 30 seconds.
+    std::optional<WorkerPeerInfo> resolvePeer(const String & worker_id);
     std::optional<String> resolveWorkerEndpoint(const String & worker_id);
+
+    /// Test-only: inject the worker resolver
+    void setWorkerResolverForTest(std::function<std::unordered_map<String, WorkerPeerInfo>()> r)
+    {
+        std::lock_guard lk(worker_endpoint_cache_mutex);
+        worker_endpoint_resolver = std::move(r);
+        worker_endpoint_cache.clear();
+        worker_endpoint_cache_refresh_time = 0;
+    }
 
 private:
     void addNewCache(Context & context, const std::string & cache_name, bool create_default);
@@ -193,10 +214,10 @@ private:
     std::unordered_map<String, std::shared_ptr<QueryCacheStats>> query_cache_stats_map;
     mutable std::shared_mutex query_cache_stats_mutex;
 
-    /// Worker endpoint resolution: worker_id → host:port, refreshed every 30s from RM.
-    std::function<std::unordered_map<String, String>()> worker_endpoint_resolver;
+    /// Worker resolution: worker_id → {endpoint, register_time}, refreshed every 30s from RM.
+    std::function<std::unordered_map<String, WorkerPeerInfo>()> worker_endpoint_resolver;
     mutable std::mutex worker_endpoint_cache_mutex;
-    std::unordered_map<String, String> worker_endpoint_cache;
+    std::unordered_map<String, WorkerPeerInfo> worker_endpoint_cache;
     time_t worker_endpoint_cache_refresh_time{0};
     static constexpr int WORKER_ENDPOINT_CACHE_TTL_SEC = 30;
 };

@@ -9,29 +9,61 @@ PreloadRegistry & PreloadRegistry::instance()
     return inst;
 }
 
-void PreloadRegistry::registerParts(
+PreloadHandle PreloadRegistry::registerPart(
     const String & table_name,
     const String & table_uuid,
     const String & partition_id,
-    size_t parts_count,
     UInt64 preload_level)
 {
-    if (parts_count == 0)
-        return;
-
     Key key{table_uuid, partition_id};
-    std::lock_guard lock(mu);
-    auto it = entries.find(key);
-    if (it == entries.end())
     {
-        auto entry = std::make_shared<PreloadEntry>(table_name, table_uuid, partition_id, parts_count, preload_level);
-        entry->parts_in_flight.store(parts_count, std::memory_order_relaxed);
-        entries.emplace(key, std::move(entry));
+        std::lock_guard lock(mu);
+        auto it = entries.find(key);
+        if (it == entries.end())
+        {
+            auto entry = std::make_shared<PreloadEntry>(table_name, table_uuid, partition_id, 1, preload_level);
+            entry->parts_in_flight.store(1, std::memory_order_relaxed);
+            entries.emplace(key, std::move(entry));
+        }
+        else
+        {
+            it->second->parts_submitted += 1;
+            it->second->parts_in_flight.fetch_add(1, std::memory_order_relaxed);
+        }
     }
-    else
+    return PreloadHandle(this, table_uuid, partition_id);
+}
+
+PreloadHandle::PreloadHandle(PreloadHandle && other) noexcept
+    : registry(other.registry), table_uuid(std::move(other.table_uuid)), partition_id(std::move(other.partition_id))
+{
+    other.registry = nullptr;
+}
+
+PreloadHandle & PreloadHandle::operator=(PreloadHandle && other) noexcept
+{
+    if (this != &other)
     {
-        it->second->parts_submitted += parts_count;
-        it->second->parts_in_flight.fetch_add(parts_count, std::memory_order_relaxed);
+        release();
+        registry = other.registry;
+        table_uuid = std::move(other.table_uuid);
+        partition_id = std::move(other.partition_id);
+        other.registry = nullptr;
+    }
+    return *this;
+}
+
+PreloadHandle::~PreloadHandle()
+{
+    release();
+}
+
+void PreloadHandle::release()
+{
+    if (registry)
+    {
+        registry->partFinished(table_uuid, partition_id);
+        registry = nullptr;
     }
 }
 

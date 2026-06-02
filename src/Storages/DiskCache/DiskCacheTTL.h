@@ -109,16 +109,7 @@ public:
 
     // Stats structures for observability
 
-    // Internal stats with atomics (not copyable)
-    struct PartitionStatsInternal
-    {
-        String partition_id;
-        std::atomic<size_t> entry_count{0};
-        std::atomic<size_t> total_bytes{0};
-        time_t partition_timestamp{0};
-    };
-
-    // Snapshot for return (plain types, copyable)
+    // Per-partition snapshot, derived on demand from part_index in getPartitionStats().
     struct PartitionStats
     {
         String partition_id;
@@ -201,10 +192,6 @@ public:
         std::atomic<size_t> data_misses{0};
         std::atomic<size_t> idx_hits{0};
         std::atomic<size_t> idx_misses{0};
-
-        // Per-partition breakdown
-        mutable std::shared_mutex partition_stats_mutex;
-        std::unordered_map<String, PartitionStatsInternal> partition_stats;
     };
 
     TTLCacheStats getStats() const;
@@ -214,11 +201,8 @@ public:
     size_t getMaxSizeBytes() const { return max_size_bytes.load(std::memory_order_relaxed); }
     void setFDBIndex(std::shared_ptr<TTLCacheFDBIndex> idx) { fdb_index = std::move(idx); }
 
-    void updateSettings(UInt64 new_ttl_minutes, size_t new_max_size_bytes)
-    {
-        ttl_minutes.store(new_ttl_minutes, std::memory_order_relaxed);
-        max_size_bytes.store(new_max_size_bytes, std::memory_order_relaxed);
-    }
+    /// Update TTL / size limits at runtime. If a limit tightened, eagerly schedules eviction
+    void updateSettings(UInt64 new_ttl_minutes, size_t new_max_size_bytes);
 
     /// Release global counter and schedule async deletion of all on-disk data for this table.
     /// Cheap to call: renames directories synchronously, deletes files in background.
@@ -264,66 +248,15 @@ private:
     CacheEraseResult cacheEraseLocked(Shard & shard, KeyType key);
     CacheEraseResult cacheErasePartLocked(Shard & shard, UInt64 hash_high);
 
-    /// Stats helpers — caller must NOT hold any shard mutex
-    void addToPartitionStats(const String & partition_id, time_t partition_ts, size_t bytes, size_t count = 1);
-    void subtractFromPartitionStats(const CacheEraseResult & result);
-
-    /// Apply a batch of erase results: delete files, notify FDB, update partition stats.
+    /// Apply a batch of erase results: delete files, notify FDB.
     /// Caller must NOT hold any shard mutex. Increments total_evicted by result.count for each entry.
     void applyEraseResults(std::vector<CacheEraseResult> & results, size_t & total_evicted, const char * log_tag);
 
-
-    struct DiskIterator : private boost::noncopyable
-    {
-        explicit DiskIterator(
-            const String & name_, DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk_, int min_depth_parallel_, int max_depth_parallel_);
-        virtual ~DiskIterator() = default;
-
-        virtual void exec(std::filesystem::path entry_path);
-        virtual void iterateDirectory(std::filesystem::path rel_path, size_t depth);
-        virtual void iterateFile(std::filesystem::path file_path, size_t file_size) = 0;
-
-        String name;
-        DiskCacheTTL & disk_cache;
-        DiskPtr disk;
-        size_t worker_per_disk{1};
-        int min_depth_parallel{-1};
-        int max_depth_parallel{-1};
-        std::unique_ptr<ThreadPool> pool;
-        ExceptionHandler handler;
-        Poco::Logger * log;
-    };
-
-    struct DiskCacheLoader : DiskIterator
-    {
-        explicit DiskCacheLoader(
-            DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk, int min_depth_parallel, int max_depth_parallel);
-        ~DiskCacheLoader() override;
-        void iterateFile(std::filesystem::path file_path, size_t file_size) override;
-
-        std::atomic_size_t total_loaded = 0;
-    };
-
-    struct DiskCacheMigrator : DiskIterator
-    {
-        explicit DiskCacheMigrator(
-            DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk, int min_depth_parallel, int max_depth_parallel);
-        ~DiskCacheMigrator() override;
-        void iterateFile(std::filesystem::path file_path, size_t file_size) override;
-
-        std::atomic_size_t total_migrated = 0;
-    };
-
-    struct DiskCacheDeleter : DiskIterator
-    {
-        explicit DiskCacheDeleter(
-            DiskCacheTTL & cache_, DiskPtr disk_, size_t worker_per_disk, int min_depth_parallel, int max_depth_parallel);
-        ~DiskCacheDeleter() override;
-        void exec(std::filesystem::path entry_path) override;
-        void iterateFile(std::filesystem::path file_path, size_t file_size) override;
-
-        size_t delete_file_size {0};
-    };
+    // NOTE: the parallel disk-walk machinery (DiskIterator + DiskCacheLoader/Migrator/Deleter)
+    // was removed. Its only real purpose was rebuilding the in-memory index by scanning the
+    // on-disk tree on startup — pointless on instance/NVMe disk, which does not survive a
+    // restart. If a persistent-disk deployment is ever introduced, re-add a startup scan
+    // to recover the warm cache; see DiskCacheLRU for the parallel-iterator pattern to copy.
 
     /// FDB-backed index for fast startup recovery
     /// optional — null if catalog unavailable

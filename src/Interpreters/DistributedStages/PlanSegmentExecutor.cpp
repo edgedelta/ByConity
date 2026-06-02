@@ -69,6 +69,7 @@
 #include <fmt/core.h>
 #include <incubator-brpc/src/brpc/controller.h>
 #include <Poco/Logger.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Common/Brpc/BrpcChannelPoolOptions.h>
 #include <Common/CurrentThread.h>
 #include <Common/Exception.h>
@@ -360,6 +361,16 @@ void PlanSegmentExecutor::doExecute()
         throw;
     }
     context->setPlanSegmentProcessListEntry(process_plan_segment_entry);
+
+    // Reap this segment's per-query disk-cache stats on every exit path. The normal consume
+    // happens below in collectPostExecutionAttributes(), but it is skipped when the query is
+    // cancelled/fails or when profiling is off. Without this, the
+    // readers' mergeQueryCacheStats() entry would leak forever.
+    String cache_stats_query_id = CurrentThread::getQueryId().toString();
+    SCOPE_EXIT({
+        if (!cache_stats_query_id.empty())
+            DiskCacheFactory::instance().discardQueryCacheStats(cache_stats_query_id);
+    });
 
     if (context->getSettingsRef().bsp_mode)
     {

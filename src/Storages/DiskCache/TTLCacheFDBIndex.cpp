@@ -7,6 +7,7 @@
 #include <Catalog/StringHelper.h>
 #include <Common/hex.h>
 #include <fmt/core.h>
+#include <string>
 
 namespace DB
 {
@@ -15,13 +16,11 @@ namespace DB
 TTLCacheFDBIndex::TTLCacheFDBIndex(
     std::shared_ptr<Catalog::IMetaStore> metastore_,
     const String & name_space,
-    const String & worker_id,
     const String & table_uuid,
-    const String & own_endpoint_)
+    const String & own_worker_id_)
     : metastore(std::move(metastore_))
-    , key_prefix(Catalog::escapeString(name_space) + "_DCI_" + Catalog::escapeString(worker_id) + "_" + table_uuid)
     , rev_key_prefix(Catalog::escapeString(name_space) + "_DCIREV_" + table_uuid)
-    , own_worker_id(own_endpoint_)
+    , own_worker_id(own_worker_id_)
     , log(&Poco::Logger::get("TTLCacheFDBIndex"))
 {
     bg = std::thread([this] { bgLoop(); });
@@ -38,16 +37,6 @@ TTLCacheFDBIndex::~TTLCacheFDBIndex()
         bg.join();
 }
 
-String TTLCacheFDBIndex::makeSegKey(UInt128 key, const String & partition_id) const
-{
-    return key_prefix + "_" + partition_id + "_" + getHexUIntLowercase(key.items[0]) + "_" + getHexUIntLowercase(key.items[1]);
-}
-
-String TTLCacheFDBIndex::makePartPrefix(const String & partition_id, UInt64 hash_high) const
-{
-    return key_prefix + "_" + partition_id + "_" + getHexUIntLowercase(hash_high) + "_";
-}
-
 String TTLCacheFDBIndex::makeRevKey(UInt128 key, const String & partition_id) const
 {
     return rev_key_prefix + "_" + partition_id + "_" + getHexUIntLowercase(key.items[0]) + "_" + getHexUIntLowercase(key.items[1]);
@@ -58,49 +47,24 @@ String TTLCacheFDBIndex::makeRevPartPrefix(const String & partition_id, UInt64 h
     return rev_key_prefix + "_" + partition_id + "_" + getHexUIntLowercase(hash_high) + "_";
 }
 
-String TTLCacheFDBIndex::encodeValue(const String & seg_name, size_t size, time_t part_ts)
+// Only the reverse (DCIREV) index is written: it's the peer-steal index.
+// partition_id is supplied by the caller so the key matches the prefixes evictPart cleans and the lookup in findPeerOwner.
+void TTLCacheFDBIndex::onSet(UInt128 key, const String & partition_id)
 {
-    // Format: "part_ts:size:seg_name"
-    // seg_name uses '/' as separator internally, no ':' — safe delimiter
-    return fmt::format("{}:{}:{}", static_cast<int64_t>(part_ts), size, seg_name);
-}
-
-bool TTLCacheFDBIndex::decodeValue(const String & raw, String & seg_name, size_t & size, time_t & part_ts)
-{
-    auto p1 = raw.find(':');
-    if (p1 == String::npos)
-        return false;
-    auto p2 = raw.find(':', p1 + 1);
-    if (p2 == String::npos)
-        return false;
-
-    try
-    {
-        part_ts = static_cast<time_t>(std::stoll(raw.substr(0, p1)));
-        size    = static_cast<size_t>(std::stoull(raw.substr(p1 + 1, p2 - p1 - 1)));
-        seg_name = raw.substr(p2 + 1);
-        return !seg_name.empty();
-    }
-    catch (...) { return false; }
-}
-
-void TTLCacheFDBIndex::onSet(UInt128 key, const String & seg_name, size_t size, time_t part_ts, const String & partition_id)
-{
-    // partition_id is supplied by the caller so the keys we write here match
-    // the prefixes used by evictPart and the reverse-key lookup in findPeerOwner.
-    PendingOp fwd;
-    fwd.type  = PendingOp::Type::Set;
-    fwd.key   = makeSegKey(key, partition_id);
-    fwd.value = encodeValue(seg_name, size, part_ts);
+    // Value is "<worker_id>:<register_time>". register_time is our RM registration epoch: after
+    // a restart we re-register with a new one, so entries written by the previous incarnation
+    // become detectably stale in findPeerOwner.
+    UInt32 own_epoch = 0;
+    if (auto self = DiskCacheFactory::instance().resolvePeer(own_worker_id))
+        own_epoch = self->register_time;
 
     PendingOp rev;
     rev.type  = PendingOp::Type::Set;
     rev.key   = makeRevKey(key, partition_id);
-    rev.value = own_worker_id;
+    rev.value = own_worker_id + ":" + std::to_string(own_epoch);
 
     {
         std::lock_guard lk(mu);
-        queue.push_back(std::move(fwd));
         queue.push_back(std::move(rev));
     }
     cv.notify_one();
@@ -108,17 +72,12 @@ void TTLCacheFDBIndex::onSet(UInt128 key, const String & seg_name, size_t size, 
 
 void TTLCacheFDBIndex::evictPart(const String & partition_id, UInt64 hash_high)
 {
-    PendingOp fwd;
-    fwd.type = PendingOp::Type::Evict;
-    fwd.key  = makePartPrefix(partition_id, hash_high);
-
     PendingOp rev;
     rev.type = PendingOp::Type::Evict;
     rev.key  = makeRevPartPrefix(partition_id, hash_high);
 
     {
         std::lock_guard lk(mu);
-        queue.push_back(std::move(fwd));
         queue.push_back(std::move(rev));
     }
     cv.notify_one();
@@ -126,17 +85,12 @@ void TTLCacheFDBIndex::evictPart(const String & partition_id, UInt64 hash_high)
 
 void TTLCacheFDBIndex::evictTable()
 {
-    PendingOp fwd;
-    fwd.type = PendingOp::Type::Evict;
-    fwd.key  = key_prefix;
-
     PendingOp rev;
     rev.type = PendingOp::Type::Evict;
     rev.key  = rev_key_prefix;
 
     {
         std::lock_guard lk(mu);
-        queue.push_back(std::move(fwd));
         queue.push_back(std::move(rev));
     }
     cv.notify_one();
@@ -202,26 +156,13 @@ void TTLCacheFDBIndex::flush(std::vector<PendingOp> & ops)
     }
 }
 
-void TTLCacheFDBIndex::clearSelf()
-{
-    try
-    {
-        metastore->clean(key_prefix);
-        LOG_INFO(log, "TTLCacheFDBIndex::clearSelf: cleared forward DCI entries for worker prefix={}", key_prefix);
-    }
-    catch (...)
-    {
-        tryLogCurrentException(log, "TTLCacheFDBIndex::clearSelf: failed to clear DCI entries");
-    }
-}
-
 std::optional<String> TTLCacheFDBIndex::findPeerOwner(UInt128 key, const String & partition_id)
 {
     String rev_key = makeRevKey(key, partition_id);
-    String endpoint;
+    String raw;
     try
     {
-        if (metastore->get(rev_key, endpoint) == 0)
+        if (metastore->get(rev_key, raw) == 0)
             return std::nullopt;  // key not found
     }
     catch (...)
@@ -230,139 +171,38 @@ std::optional<String> TTLCacheFDBIndex::findPeerOwner(UInt128 key, const String 
         return std::nullopt;
     }
 
-    // endpoint now holds the peer's worker_id; skip if it's ourselves
-    if (endpoint.empty() || endpoint == own_worker_id)
-        return std::nullopt;
-
-    return endpoint;  // caller resolves worker_id → host:port via DiskCacheFactory
-}
-
-std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
-    const VolumePtr & volume,
-    std::function<std::filesystem::path(UInt128, const String &)> get_rel_path,
-    std::function<bool(time_t)> should_cache,
-    std::function<void(ReconcileBatch &)> on_reconcile_batch,
-    std::function<void(time_t, size_t)> on_stats_update)
-{
-    // Page through FDB in chunks to avoid hitting the 5-second transaction timeout
-    // that occurs when scanning millions of entries in a single transaction.
-    static constexpr size_t PAGE_SIZE = 100'000;
-
-    const auto & disks = volume->getDisks();
-    if (disks.empty())
-        return std::nullopt;
-
-    size_t total_restored = 0;
-    size_t total_restored_bytes = 0;
-    size_t total_stale = 0;
-    String scan_start_key;  // empty = start from key_prefix
-
-    while (true)
+    // Value is "<worker_id>:<register_time>"
+    UInt32 epoch = 0;
+    String worker = raw;
+    if (auto colon = raw.rfind(':'); colon != String::npos)
     {
-        ReconcileBatch page;
-        page.reserve(PAGE_SIZE);
-        std::vector<String> stale_fwd_keys;
-        size_t page_bytes = 0;
-        size_t page_count = 0;
-        String last_key;
-
-        Catalog::IMetaStore::IteratorPtr it;
-        try { it = metastore->getByPrefix(key_prefix, PAGE_SIZE, DEFAULT_SCAN_BATCH_COUNT, scan_start_key); }
-        catch (...) { tryLogCurrentException(log, "TTLCacheFDBIndex: getByPrefix failed"); return std::nullopt; }
-
-        while (it->next())
-        {
-            last_key = it->key();
-            page_count++;
-
-            // Parse partition_id back out of the key (key_prefix + "_" + partition_id + "_" + ...).
-            // partition_id never contains '_', so this round-trips exactly what onSet() wrote,
-            // keeping the restored in-memory partition_id consistent with eviction/peer lookups.
-            String partition_id;
-            if (last_key.size() > key_prefix.size() + 1)
-            {
-                String tail = last_key.substr(key_prefix.size() + 1);
-                auto us = tail.find('_');
-                if (us != String::npos)
-                    partition_id = tail.substr(0, us);
-            }
-
-            String seg_name;
-            size_t size{0};
-            time_t part_ts{0};
-
-            if (!decodeValue(it->value(), seg_name, size, part_ts))
-            {
-                LOG_WARNING(log, "TTLCacheFDBIndex reconcile: decode failed for key={} value={}", it->key(), it->value());
-                stale_fwd_keys.push_back(last_key);
-                continue;
-            }
-
-            if (!should_cache(part_ts))
-            {
-                LOG_DEBUG(log, "TTLCacheFDBIndex reconcile: TTL expired for seg={} part_ts={}", seg_name, part_ts);
-                stale_fwd_keys.push_back(last_key);
-                continue;
-            }
-
-            auto key = DiskCacheTTL::hash(seg_name);
-            auto rel_path = get_rel_path(key, seg_name);
-
-            // TODO: multi-disk JBOD support — store disk name in FDB value so reconcile can
-            // assign the correct disk without a per-file exists() scan across all disks.
-            // For now assume single-disk volume (one PVC per pod) and trust FDB as authoritative,
-            // skipping the per-file exists() syscall (too costly at millions of entries).
-            page.emplace_back(key, std::make_shared<DiskCacheTTLMeta>(
-                DiskCacheTTLMeta::State::Cached, disks[0], size, time(nullptr), part_ts, rel_path.string()),
-                partition_id);
-            page_bytes += size;
-        }
-
-        if (!page.empty())
-        {
-            on_reconcile_batch(page);
-            DiskCacheFactory::instance().addGlobalTTLUsage(page_bytes);
-            if (on_stats_update)
-            {
-                for (const auto & [key, meta, pid] : page)
-                    on_stats_update(meta->max_timestamp, meta->size);
-            }
-        }
-
-        if (!stale_fwd_keys.empty())
-        {
-            try
-            {
-                Catalog::BatchCommitRequest batch;
-                for (const auto & fwd : stale_fwd_keys)
-                {
-                    batch.AddDelete(Catalog::SingleDeleteRequest(fwd));
-                    String rev = rev_key_prefix + fwd.substr(key_prefix.size());
-                    batch.AddDelete(Catalog::SingleDeleteRequest(rev));
-                }
-                Catalog::BatchCommitResponse resp;
-                metastore->batchWrite(batch, resp);
-                LOG_DEBUG(log, "TTLCacheFDBIndex reconcile: removed {} stale fwd+rev pairs", stale_fwd_keys.size());
-            }
-            catch (...) { tryLogCurrentException(log, "TTLCacheFDBIndex: stale cleanup failed"); }
-        }
-
-        total_restored += page.size();
-        total_restored_bytes += page_bytes;
-        total_stale += stale_fwd_keys.size();
-
-        if (page_count < PAGE_SIZE)
-            break;
-
-        // Advance past the last key seen ('\x00' suffix = next key in FDB ordering).
-        scan_start_key = last_key + '\x00';
+        worker = raw.substr(0, colon);
+        try { epoch = static_cast<UInt32>(std::stoul(raw.substr(colon + 1))); } catch (...) {}
     }
 
-    LOG_INFO(log, "TTLCacheFDBIndex reconcile complete: {} entries restored, {} stale removed", total_restored, total_stale);
-
-    if (total_restored == 0)
+    if (worker.empty() || worker == own_worker_id)
         return std::nullopt;
-    return std::make_pair(total_restored, total_restored_bytes);
+
+    auto peer = DiskCacheFactory::instance().resolvePeer(worker);
+    if (!peer)
+        return std::nullopt;  // can't resolve (RM transient / unknown worker) — skip
+
+    if (peer->register_time != epoch)
+    {
+        // Definitely stale: `worker` re-registered since this entry was written. 
+        // Lazily delete it
+        PendingOp del;
+        del.type = PendingOp::Type::Evict;
+        del.key  = rev_key;
+        {
+            std::lock_guard lk(mu);
+            queue.push_back(std::move(del));
+        }
+        cv.notify_one();
+        return std::nullopt;
+    }
+
+    return worker;  // caller resolves worker_id → endpoint via DiskCacheFactory
 }
 
 }

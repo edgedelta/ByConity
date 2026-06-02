@@ -608,27 +608,23 @@ void CnchWorkerServiceImpl::preloadDataParts(
         }
         else
         {
-            // Group parts by partition and register with PreloadRegistry before scheduling
-            // so in-flight counts are visible immediately.
             auto & registry = PreloadRegistry::instance();
             String table_name = cloud_merge_tree.getStorageID().getFullNameNotQuoted();
             String table_uuid_str = toString(cloud_merge_tree.getStorageUUID());
-            std::unordered_map<String, size_t> partition_counts;
-            for (const auto & part : data_parts)
-                partition_counts[part->info.partition_id]++;
-            for (const auto & [pid, cnt] : partition_counts)
-                registry.registerParts(table_name, table_uuid_str, pid, cnt, preload_level);
 
             ThreadPool * preload_thread_pool = &(IDiskCache::getPreloadPool());
             for (const auto & part : data_parts)
             {
-                String pid = part->info.partition_id;
-                preload_thread_pool->scheduleOrThrowOnError([part, preload_level, submit_ts, read_injection, storage, table_uuid_str, pid, &registry] {
-                    SCOPE_EXIT({ registry.partFinished(table_uuid_str, pid); });
+                // RAII: registerPart counts this part now; the handle decrements when the task
+                // lambda is destroyed on completion, exception, OR failure to schedule.
+                // This makes the in-flight count impossible to strand.
+                auto handle = std::make_shared<PreloadHandle>(
+                    registry.registerPart(table_name, table_uuid_str, part->info.partition_id, preload_level));
+                preload_thread_pool->scheduleOrThrowOnError([part, preload_level, submit_ts, read_injection, storage, handle]() mutable {
                     part->remote_fs_read_failed_injection = read_injection;
                     part->disk_cache_mode = DiskCacheMode::SKIP_DISK_CACHE;// avoid getCheckum & getIndex re-cache
                     part->preload(preload_level, submit_ts);
-                });
+                }).detach();
             }
         }
     })

@@ -19,6 +19,19 @@ compile:
 	-e BUILD_TYPE=${BUILD_TYPE} -e CMAKE_FLAGS=${CMAKE_FLAGS} -e VERSION_SCM=${TAG} -e CCACHE_DIR=/ccache \
 	-it byconity/debian-builder bash /build.sh
 
+unittest:
+	docker run --rm --user=$(UID):$(GID) \
+	--cap-add SYS_PTRACE \
+	--mount=type=bind,source=$(HOME)/.ccache,destination=/ccache \
+	-v ~/.m2:/home/.m2 \
+	-v ${BYCONITY_SOURCE}:/home/ByConity \
+	-e BUILD_TYPE=${BUILD_TYPE} -e CMAKE_FLAGS=${CMAKE_FLAGS} -e VERSION_SCM=${TAG} -e CCACHE_DIR=/ccache \
+	-it byconity/debian-builder bash -c '\
+		cd /home/ByConity && \
+		cmake -DCMAKE_BUILD_TYPE=$${BUILD_TYPE} $${CMAKE_FLAGS} -S . -B build_docker && \
+		ninja -C build_docker unit_tests_dbms -j $$(( ($$(nproc) + 1) / 2 )) && \
+		build_docker/src/unit_tests_dbms --output-on-failure $(if $(GTEST_FILTER),--gtest_filter=$(GTEST_FILTER),)'
+
 image:
 	cp -r ${BYCONITY_SOURCE}/build_install .
 	DOCKER_BUILDKIT=1 docker build -t byconity/byconity:${TAG} .

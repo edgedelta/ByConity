@@ -187,18 +187,19 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
             String ns = context.getCnchConfigRef().getString("catalog.name_space", "default");
             String worker_id = getWorkerID(context.shared_from_this());
             String uuid_str = UUIDHelpers::UUIDToString(table_uuid);
-            // Pass worker_id (not IP) as own identity — stable across pod restarts.
-            // The DCIREV_ reverse index stores worker_id values; findPeerOwner resolves
-            // them to host:port at runtime via DiskCacheFactory::resolveWorkerEndpoint.
-            auto fdb_idx = std::make_shared<TTLCacheFDBIndex>(metastore, ns, worker_id, uuid_str, worker_id);
+            // Pass worker_id as own identity — stable across pod restarts.
+            // Each DCIREV_ reverse-index entry stores "<worker_id>:<register_time>"; findPeerOwner
+            // validates the register_time epoch and resolves worker_id → {endpoint, register_time} at
+            // runtime via DiskCacheFactory::resolvePeer / resolveWorkerEndpoint.
+            auto fdb_idx = std::make_shared<TTLCacheFDBIndex>(metastore, ns, uuid_str, worker_id);
             static_pointer_cast<DiskCacheTTL>(cache)->setFDBIndex(std::move(fdb_idx));
 
             // Set up worker endpoint resolver on first use (captures rm_client shared_ptr).
             if (!worker_endpoint_resolver)
             {
                 auto rm = context.getResourceManagerClient();
-                worker_endpoint_resolver = [rm]() -> std::unordered_map<String, String> {
-                    std::unordered_map<String, String> result;
+                worker_endpoint_resolver = [rm]() -> std::unordered_map<String, WorkerPeerInfo> {
+                    std::unordered_map<String, WorkerPeerInfo> result;
                     if (!rm)
                         return result;
                     std::vector<WorkerNodeResourceData> workers;
@@ -206,7 +207,7 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
                     catch (...) { return result; }
                     for (const auto & w : workers)
                         if (!w.id.empty())
-                            result[w.id] = w.host_ports.getRPCAddress();
+                            result[w.id] = WorkerPeerInfo{w.host_ports.getRPCAddress(), w.register_time};
                     return result;
                 };
             }
@@ -383,8 +384,14 @@ std::optional<QueryCacheStatsSnapshot> DiskCacheFactory::consumeQueryCacheStats(
     return snap;
 }
 
+void DiskCacheFactory::discardQueryCacheStats(const String & query_id)
+{
+    std::unique_lock wl(query_cache_stats_mutex);
+    query_cache_stats_map.erase(query_id);
+}
 
-std::optional<String> DiskCacheFactory::resolveWorkerEndpoint(const String & worker_id)
+
+std::optional<WorkerPeerInfo> DiskCacheFactory::resolvePeer(const String & worker_id)
 {
     if (!worker_endpoint_resolver)
         return std::nullopt;
@@ -399,6 +406,13 @@ std::optional<String> DiskCacheFactory::resolveWorkerEndpoint(const String & wor
     auto it = worker_endpoint_cache.find(worker_id);
     if (it != worker_endpoint_cache.end())
         return it->second;
+    return std::nullopt;
+}
+
+std::optional<String> DiskCacheFactory::resolveWorkerEndpoint(const String & worker_id)
+{
+    if (auto peer = resolvePeer(worker_id))
+        return peer->endpoint;
     return std::nullopt;
 }
 

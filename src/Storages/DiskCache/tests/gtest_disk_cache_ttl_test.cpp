@@ -1242,85 +1242,6 @@ TEST_P(SegmentPrefixTest, EvictRemovesFromDisk)
         << p.ext << " file still on disk after eviction — rel_path prefix bug? path=" << path;
 }
 
-// ---------------------------------------------------------------------------
-// Reconcile: FDB entries for all three types restore with correct rel_path
-// ---------------------------------------------------------------------------
-
-TEST_F(DiskCacheTTLTest, ReconcileRestoresAllTypesWithCorrectRelPath)
-{
-    auto volume = createTestVolume();
-    DiskCacheSettings settings;
-    settings.ttl_cache_max_size = 64 * 1024 * 1024;
-    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
-    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, 60, 0);
-
-    const String uuid = "aaaa-bbbb-cccc-dddd";
-    const String part = todayPart();
-    const time_t now  = time(nullptr);
-
-    struct SegInfo { String ext; String expected_prefix; };
-    SegInfo cases[] = {{".bin", "data/"}, {".mrk", "meta/"}, {".idx", "meta/"}};
-
-    // Write all three types to disk so reconcile can verify file existence
-    std::map<String, String> seg_to_path;
-    for (auto & c : cases)
-    {
-        String seg = makeSegKey(uuid, part, "col", c.ext);
-        String data = "payload";
-        ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false, now);
-        auto [disk, path] = cache.get(seg);
-        ASSERT_FALSE(path.empty()) << "failed to cache: " << seg;
-        EXPECT_NE(path.find(c.expected_prefix), String::npos)
-            << "wrong write prefix for " << c.ext << ": " << path;
-        seg_to_path[seg] = path;
-    }
-
-    // Build mock FDB store — key_prefix = "{ns}_DCI_{worker}_{uuid}"
-    // Seed one entry per segment using encodeValue; the key just needs the prefix.
-    const String ns = "byconity";
-    const String worker = "test-worker";
-    const String key_prefix = fmt::format("{}_DCI_{}_{}", ns, worker, uuid);
-    auto mock_store = std::make_shared<MockMetaStore>();
-    int i = 0;
-    for (auto & [seg, path] : seg_to_path)
-    {
-        String fdb_key = fmt::format("{}_{:04d}", key_prefix, i++);
-        mock_store->store[fdb_key] = fmt::format("{}:{}:{}", static_cast<int64_t>(now), 7, seg);
-    }
-
-    // Reconcile into a fresh cache_map
-    TTLCacheFDBIndex fdb_idx(mock_store, ns, worker, uuid, worker);
-    std::map<UInt128, std::shared_ptr<DiskCacheTTLMeta>> cache_map;
-    auto get_rel_path = [&cache](UInt128 key, const String & seg_name) -> std::filesystem::path
-    {
-        return cache.getRelativePath(key, seg_name);
-    };
-
-    fdb_idx.reconcile(
-        volume,
-        get_rel_path,
-        [](time_t) { return true; },
-        [&cache_map](TTLCacheFDBIndex::ReconcileBatch & batch) {
-            for (auto & [key, meta, pid] : batch)
-                cache_map[key] = meta;
-        }
-    );
-
-    ASSERT_EQ(cache_map.size(), 3u) << "expected 3 entries restored";
-
-    for (auto & [seg, expected_path] : seg_to_path)
-    {
-        auto key = DiskCacheTTL::hash(seg);
-        auto it = cache_map.find(key);
-        ASSERT_NE(it, cache_map.end()) << "segment not restored: " << seg;
-        EXPECT_EQ(it->second->rel_path, expected_path)
-            << "rel_path mismatch for " << seg
-            << "\n  got:  " << it->second->rel_path
-            << "\n  want: " << expected_path;
-    }
-}
-
 // Verify drop() decrements partition_stats correctly
 TEST_F(DiskCacheTTLTest, DropUpdatesPartitionStats)
 {
@@ -1617,10 +1538,11 @@ TEST_F(DiskCacheTTLTest, PartIndexRebuildAfterDrop)
 }
 
 // ---------------------------------------------------------------------------
-// drop() must evict FDB forward + reverse entries for the dropped part
+// drop() evicts the DCIREV reverse entries for the dropped part (reverse-only;
+// there is no forward index).
 // ---------------------------------------------------------------------------
 
-TEST_F(DiskCacheTTLTest, DropEvictsFDBEntries)
+TEST_F(DiskCacheTTLTest, DropEvictsFDBReverseEntries)
 {
     auto volume = createTestVolume();
     DiskCacheSettings settings;
@@ -1631,11 +1553,10 @@ TEST_F(DiskCacheTTLTest, DropEvictsFDBEntries)
     const String uuid   = "test-uuid-fdb";
     const String ns     = "byconity";
     const String worker = "test-worker";
-    const String key_prefix     = ns + "_DCI_" + worker + "_" + uuid;
     const String rev_key_prefix = ns + "_DCIREV_" + uuid;
 
     auto mock_store = std::make_shared<MockMetaStore>();
-    auto fdb_idx = std::make_shared<TTLCacheFDBIndex>(mock_store, ns, worker, uuid, worker);
+    auto fdb_idx = std::make_shared<TTLCacheFDBIndex>(mock_store, ns, uuid, worker);
 
     DiskCacheTTL cache("test_fdb_drop", uuid, volume, nullptr, settings, strategy, 60 * 24 * 365, 0);
     cache.setFDBIndex(fdb_idx);
@@ -1647,7 +1568,7 @@ TEST_F(DiskCacheTTLTest, DropEvictsFDBEntries)
     String partition_id = fmt::format("{:04d}{:02d}{:02d}", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
 
     const size_t seg_bytes = 64;
-    const int num_segs = 3;
+    const int num_segs = 3;  // same part_name → same hash_high → one evictPart prefix covers all
 
     for (int i = 0; i < num_segs; i++)
     {
@@ -1656,91 +1577,29 @@ TEST_F(DiskCacheTTLTest, DropEvictsFDBEntries)
         ReadBufferFromString buf(data);
         cache.set(seg, buf, data.size(), false, now);
 
-        // Seed FDB store manually (batchWrite in MockMetaStore is a no-op).
+        // Seed the DCIREV reverse entry manually (MockMetaStore batchWrite is a no-op for puts).
         // hexKey layout: first 16 chars = hex(items[1]=low), last 16 = hex(items[0]=high).
         auto key  = DiskCacheTTL::hash(seg);
         auto hex  = DiskCacheTTL::hexKey(key);
         String high_hex = hex.substr(16, 16);   // items[0] = sipHash64(part_name)
         String low_hex  = hex.substr(0, 16);    // items[1] = sipHash64(column)
-        mock_store->store[fmt::format("{}_{}_{}_{}",  key_prefix,     partition_id, high_hex, low_hex)]
-            = fmt::format("{}:{}:{}", static_cast<int64_t>(now), seg_bytes, seg);
-        mock_store->store[fmt::format("{}_{}_{}_{}",  rev_key_prefix, partition_id, high_hex, low_hex)]
-            = worker;
+        mock_store->store[fmt::format("{}_{}_{}_{}", rev_key_prefix, partition_id, high_hex, low_hex)]
+            = worker + ":1";
     }
 
     ASSERT_EQ(cache.getKeyCount(), static_cast<size_t>(num_segs));
-    ASSERT_EQ(mock_store->store.size(), static_cast<size_t>(num_segs * 2));  // fwd + rev per segment
+    ASSERT_EQ(mock_store->store.size(), static_cast<size_t>(num_segs));  // reverse-only
 
     cache.drop(uuid + "/" + part);
     ASSERT_EQ(cache.getKeyCount(), 0u);
 
-    // Flush pending evictPart ops: detach fdb_idx from cache then destroy it.
+    // Flush the pending evictPart op: detach fdb_idx from cache then destroy it.
     // The destructor sets stopped=true, drains the queue, and joins the bg thread.
     cache.setFDBIndex(nullptr);
     fdb_idx.reset();
 
     EXPECT_TRUE(mock_store->store.empty())
-        << "FDB entries not cleaned after drop(); remaining=" << mock_store->store.size();
-}
-
-// ---------------------------------------------------------------------------
-// load() with empty cache dir (emptyDir wipe): clears DCI entries, skips reconcile,
-// leaves DCIREV entries untouched.
-// ---------------------------------------------------------------------------
-
-TEST_F(DiskCacheTTLTest, LoadClearsDCIOnEmptyDir)
-{
-    auto volume = createTestVolume();
-    DiskCacheSettings settings;
-    settings.ttl_cache_max_size = 1024 * 1024;
-    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
-
-    const String uuid   = "test-uuid-wipe";
-    const String ns     = "byconity";
-    const String worker = "test-worker";
-    const String key_prefix     = ns + "_DCI_" + worker + "_" + uuid;
-    const String rev_key_prefix = ns + "_DCIREV_" + uuid;
-
-    auto mock_store = std::make_shared<MockMetaStore>();
-
-    // Seed stale DCI (forward) + DCIREV (reverse) entries as if a previous run had cached data.
-    const int num_segs = 3;
-    time_t now = time(nullptr);
-    for (int i = 0; i < num_segs; i++)
-    {
-        String fdb_key = fmt::format("{}_20240101_deadbeef{:04x}_cafebabe{:04x}", key_prefix, i, i);
-        String rev_key = fmt::format("{}_20240101_deadbeef{:04x}_cafebabe{:04x}", rev_key_prefix, i, i);
-        mock_store->store[fdb_key] = fmt::format("{}:64:fake/seg/path_{}.bin", static_cast<int64_t>(now), i);
-        mock_store->store[rev_key] = worker;
-    }
-    ASSERT_EQ(mock_store->store.size(), static_cast<size_t>(num_segs * 2));
-
-    auto fdb_idx = std::make_shared<TTLCacheFDBIndex>(mock_store, ns, worker, uuid, worker);
-    DiskCacheTTL cache("test_wipe", uuid, volume, nullptr, settings, strategy, 60 * 24 * 365, 0);
-    cache.setFDBIndex(fdb_idx);
-
-    // Cache dir (latest_disk_cache_dir = "disk_cache_v1") does not exist on disk —
-    // simulates emptyDir wipe followed by mkdir of the mount point only.
-    cache.load();
-
-    // clearSelf() is synchronous — no need to flush the async queue.
-
-    // DCI forward entries must be gone.
-    size_t dci_remaining = 0;
-    for (const auto & [k, v] : mock_store->store)
-        if (k.starts_with(key_prefix))
-            dci_remaining++;
-    EXPECT_EQ(dci_remaining, 0u) << "stale DCI entries not cleared after emptyDir wipe";
-
-    // DCIREV reverse entries must be untouched (self-heal via overwrites as segments are re-cached).
-    size_t dcirev_remaining = 0;
-    for (const auto & [k, v] : mock_store->store)
-        if (k.starts_with(rev_key_prefix))
-            dcirev_remaining++;
-    EXPECT_EQ(dcirev_remaining, static_cast<size_t>(num_segs)) << "DCIREV entries should not be cleared";
-
-    // cache_map must be empty — no stale entries loaded.
-    EXPECT_EQ(cache.getKeyCount(), 0u) << "cache_map should be empty after emptyDir wipe";
+        << "DCIREV entries not cleaned after drop(); remaining=" << mock_store->store.size();
 }
 
 // Verify evictOldestPartitionsUntilSpace evicts multiple partitions oldest-first

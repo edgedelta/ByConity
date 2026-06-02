@@ -1,10 +1,12 @@
 #include <filesystem>
 #include <map>
+#include <unordered_map>
 #include <fmt/core.h>
 #include <gtest/gtest.h>
 #include <Disks/DiskLocal.h>
 #include <Disks/SingleDiskVolume.h>
 #include <Storages/DiskCache/DiskCacheTTL.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/DiskCacheSettings.h>
 #include <Storages/DiskCache/DiskCacheSimpleStrategy.h>
 #include <Storages/DiskCache/TTLCacheFDBIndex.h>
@@ -31,16 +33,18 @@ static String fdbMakeSegKey(const String & uuid, const String & part, const Stri
     return fmt::format("{}/{}/{}#0{}", uuid, part, col, ext);
 }
 
-static String fdbTodayPart()
+// Build the DCIREV key for a segment exactly as TTLCacheFDBIndex::makeRevKey does:
+// rev_key_prefix + "_" + partition_id + "_" + hex(key.items[0]) + "_" + hex(key.items[1]).
+// hexKey() lays items[0] in the upper 16 hex chars and items[1] in the lower 16 (see getPath).
+static String revKeyFor(const String & rev_key_prefix, const String & pid, const String & seg)
 {
-    time_t now = time(nullptr);
-    struct tm t;
-    gmtime_r(&now, &t);
-    return fmt::format("{:04d}{:02d}{:02d}_1_100_2", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+    auto key = DiskCacheTTL::hash(seg);
+    String hex = DiskCacheTTL::hexKey(key);
+    return fmt::format("{}_{}_{}_{}", rev_key_prefix, pid, hex.substr(16, 16), hex.substr(0, 16));
 }
 
 // ---------------------------------------------------------------------------
-// Mock metastore — respects limit and start_key for pagination testing
+// Mock metastore — batchWrite applies puts+deletes; clean() is a prefix delete.
 // ---------------------------------------------------------------------------
 
 class FDBMockMetaStore : public Catalog::IMetaStore
@@ -133,20 +137,17 @@ public:
 
     void TearDown() override
     {
+        // Reset the injected resolver so it doesn't leak into other tests via the singleton.
+        DiskCacheFactory::instance().setWorkerResolverForTest(nullptr);
         fs::remove_all("tmp_fdb/");
         DB::IDiskCache::close();
     }
 
-    VolumePtr createVolume()
+    // Inject a fixed worker_id -> {endpoint, register_time} map into the factory singleton.
+    static void setPeers(std::unordered_map<String, WorkerPeerInfo> peers)
     {
-        auto disk = std::make_shared<DiskLocal>("fdb_ttl_disk", "tmp_fdb/ttl_disk/", DiskStats{});
-        return std::make_shared<SingleDiskVolume>("fdb_ttl_volume", std::move(disk), 0);
-    }
-
-    DiskCacheSettings makeSettings(size_t max_bytes = 64 * 1024 * 1024) {
-        DiskCacheSettings s;
-        s.ttl_cache_max_size = max_bytes;
-        return s;
+        DiskCacheFactory::instance().setWorkerResolverForTest(
+            [peers = std::move(peers)]() { return peers; });
     }
 
     static std::shared_ptr<Context> ctx;
@@ -155,338 +156,190 @@ public:
 std::shared_ptr<Context> TTLCacheFDBIndexTest::ctx = nullptr;
 
 // ---------------------------------------------------------------------------
-// Helpers to seed the mock store with valid encoded FDB entries
+// onSet writes a reverse entry stamped "<worker_id>:<register_time>".
 // ---------------------------------------------------------------------------
 
-static void seedFDBEntry(FDBMockMetaStore & store, const String & key_prefix,
-    const String & fdb_key_suffix, const String & seg, size_t size, time_t ts)
+TEST_F(TTLCacheFDBIndexTest, OnSetStampsWorkerEpoch)
 {
-    store.store[key_prefix + fdb_key_suffix] = fmt::format("{}:{}:{}", static_cast<int64_t>(ts), size, seg);
-}
-
-// ---------------------------------------------------------------------------
-// Test: all entries restored, on_reconcile_batch called
-// ---------------------------------------------------------------------------
-
-TEST_F(TTLCacheFDBIndexTest, RestoresAllEntries)
-{
-    auto volume = createVolume();
-    auto settings = makeSettings();
-    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
-
-    const String uuid = "restore-uuid";
-    const String ns = "ns", worker = "w1";
-    const String kp = fmt::format("{}_DCI_{}_{}", ns, worker, uuid);
-    const time_t now = time(nullptr);
+    const String ns = "ns", worker = "w1", uuid = "onset-uuid";
+    const String rev_kp = fmt::format("{}_DCIREV_{}", ns, uuid);
+    setPeers({{worker, WorkerPeerInfo{"w1host:9000", 12345}}});
 
     auto mock = std::make_shared<FDBMockMetaStore>();
-    const int N = 5;
-    std::vector<String> segs;
-    for (int i = 0; i < N; ++i)
-    {
-        String seg = fdbMakeSegKey(uuid, fdbTodayPart(), fmt::format("col{}", i), ".bin");
-        segs.push_back(seg);
-        seedFDBEntry(*mock, kp, fmt::format("_k{:04d}", i), seg, 64, now);
-    }
-
-    TTLCacheFDBIndex idx(mock, ns, worker, uuid, worker);
-    DiskCacheTTL cache("rc", uuid, volume, nullptr, settings, strategy, 60 * 24, 0);
-
-    size_t batch_calls = 0;
-    std::map<UInt128, std::shared_ptr<DiskCacheTTLMeta>> restored;
-    auto result = idx.reconcile(
-        volume,
-        [&](UInt128 key, const String & seg) { return cache.getRelativePath(key, seg); },
-        [&](time_t ts) { return ts > now - 3600; },
-        [&](TTLCacheFDBIndex::ReconcileBatch & batch) {
-            batch_calls++;
-            for (auto & [k, m, pid] : batch) restored[k] = m;
-        }
-    );
-
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result->first, static_cast<size_t>(N));
-    EXPECT_EQ(restored.size(), static_cast<size_t>(N));
-    EXPECT_GE(batch_calls, 1u);
-
-    for (auto & seg : segs)
-        EXPECT_NE(restored.find(DiskCacheTTL::hash(seg)), restored.end()) << "missing: " << seg;
-}
-
-// ---------------------------------------------------------------------------
-// Test: expired entries skipped and cleaned from FDB per page
-// ---------------------------------------------------------------------------
-
-TEST_F(TTLCacheFDBIndexTest, StaleEntriesCleanedFromFDB)
-{
-    auto volume = createVolume();
-    auto settings = makeSettings();
-    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
-
-    const String uuid = "stale-uuid";
-    const String ns = "ns", worker = "w1";
-    const String kp = fmt::format("{}_DCI_{}_{}", ns, worker, uuid);
-    const time_t now = time(nullptr);
-    const time_t old_ts = now - 7 * 24 * 3600; // 7 days ago
-
-    auto mock = std::make_shared<FDBMockMetaStore>();
-
-    // 3 fresh entries
-    for (int i = 0; i < 3; ++i)
-        seedFDBEntry(*mock, kp, fmt::format("_fresh_{:04d}", i),
-            fdbMakeSegKey(uuid, fdbTodayPart(), fmt::format("c{}", i), ".bin"), 64, now);
-
-    // 2 expired entries
-    for (int i = 0; i < 2; ++i)
-        seedFDBEntry(*mock, kp, fmt::format("_stale_{:04d}", i),
-            fdbMakeSegKey(uuid, fdbTodayPart(), fmt::format("s{}", i), ".bin"), 64, old_ts);
-
-    ASSERT_EQ(mock->store.size(), 5u);
-
-    TTLCacheFDBIndex idx(mock, ns, worker, uuid, worker);
-    DiskCacheTTL cache("stale", uuid, volume, nullptr, settings, strategy, 60 * 24, 0);
-
-    std::map<UInt128, std::shared_ptr<DiskCacheTTLMeta>> restored;
-    auto result = idx.reconcile(
-        volume,
-        [&](UInt128 key, const String & seg) { return cache.getRelativePath(key, seg); },
-        [&](time_t ts) { return ts > now - 3600; }, // only very recent
-        [&](TTLCacheFDBIndex::ReconcileBatch & batch) {
-            for (auto & [k, m, pid] : batch) restored[k] = m;
-        }
-    );
-
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result->first, 3u);
-    EXPECT_EQ(restored.size(), 3u);
-
-    // Stale entries must have been deleted from the mock store
-    for (auto & [k, v] : mock->store)
-        EXPECT_EQ(k.find("_stale_"), String::npos) << "stale key not cleaned: " << k;
-}
-
-// ---------------------------------------------------------------------------
-// Test: pagination — entries spanning multiple pages all restored, no duplicates
-// ---------------------------------------------------------------------------
-
-TEST_F(TTLCacheFDBIndexTest, PaginationRestoresAllEntries)
-{
-    auto volume = createVolume();
-    auto settings = makeSettings(256 * 1024 * 1024);
-    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
-
-    const String uuid = "page-uuid";
-    const String ns = "ns", worker = "w1";
-    const String kp = fmt::format("{}_DCI_{}_{}", ns, worker, uuid);
-    const time_t now = time(nullptr);
-
-    auto mock = std::make_shared<FDBMockMetaStore>();
-
-    // Seed PAGE_SIZE + 3 entries to force at least 2 pages (PAGE_SIZE = 100000).
-    // MockMetaStore respects limit + start_key, so pagination is exercised end-to-end.
-    const size_t PAGE_SIZE = 100'000;
-    const size_t TOTAL = PAGE_SIZE + 3;
-    for (size_t i = 0; i < TOTAL; ++i)
-    {
-        // Use zero-padded keys so std::map ordering matches FDB lexicographic ordering.
-        String seg = fdbMakeSegKey(uuid, fdbTodayPart(), fmt::format("col{:07d}", i), ".bin");
-        seedFDBEntry(*mock, kp, fmt::format("_{:07d}", i), seg, 32, now);
-    }
-    ASSERT_EQ(mock->store.size(), TOTAL);
-
-    TTLCacheFDBIndex idx(mock, ns, worker, uuid, worker);
-    DiskCacheTTL cache("page", uuid, volume, nullptr, settings, strategy, 60 * 24, 0);
-
-    size_t batch_calls = 0;
-    std::map<UInt128, std::shared_ptr<DiskCacheTTLMeta>> restored;
-    auto result = idx.reconcile(
-        volume,
-        [&](UInt128 key, const String & seg) { return cache.getRelativePath(key, seg); },
-        [&](time_t ts) { return ts > now - 3600; },
-        [&](TTLCacheFDBIndex::ReconcileBatch & batch) {
-            batch_calls++;
-            for (auto & [k, m, pid] : batch) restored[k] = m;
-        }
-    );
-
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result->first, TOTAL) << "got: " << result->first << ", want: " << TOTAL;
-    // No duplicates
-    EXPECT_EQ(restored.size(), TOTAL) << "duplicates detected: map size " << restored.size() << " vs total " << TOTAL;
-    // At least 2 batch calls (one per page)
-    EXPECT_GE(batch_calls, 2u) << "expected pagination but only got " << batch_calls << " batch call(s)";
-}
-
-// ---------------------------------------------------------------------------
-// Test: empty FDB returns nullopt
-// ---------------------------------------------------------------------------
-
-TEST_F(TTLCacheFDBIndexTest, EmptyFDBReturnsNullopt)
-{
-    auto volume = createVolume();
-    auto settings = makeSettings();
-    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
-
-    const String uuid = "empty-uuid";
-    auto mock = std::make_shared<FDBMockMetaStore>();
-
-    TTLCacheFDBIndex idx(mock, "ns", "w1", uuid, "w1");
-    DiskCacheTTL cache("empty", uuid, volume, nullptr, settings, strategy, 60, 0);
-
-    bool batch_called = false;
-    auto result = idx.reconcile(
-        volume,
-        [&](UInt128 key, const String & seg) { return cache.getRelativePath(key, seg); },
-        [](time_t) { return true; },
-        [&](TTLCacheFDBIndex::ReconcileBatch &) { batch_called = true; }
-    );
-
-    EXPECT_FALSE(result.has_value());
-    EXPECT_FALSE(batch_called);
-}
-
-// ---------------------------------------------------------------------------
-// Test: evictTable clears all forward + reverse index entries for the table
-// ---------------------------------------------------------------------------
-
-TEST_F(TTLCacheFDBIndexTest, EvictTableClearsAllEntries)
-{
-    const String uuid       = "evict-table-uuid";
-    const String other_uuid = "other-uuid";
-    const String ns = "ns", worker = "w1";
-
-    // Forward-index prefix for target table and another table
-    const String kp       = fmt::format("{}_DCI_{}_{}", ns, worker, uuid);
-    const String other_kp = fmt::format("{}_DCI_{}_{}", ns, worker, other_uuid);
-    // Reverse-index prefix for target table
-    const String rev_kp   = fmt::format("{}_DCIREV_{}", ns, uuid);
-
-    auto mock = std::make_shared<FDBMockMetaStore>();
-    const time_t now = time(nullptr);
-
-    // Seed 5 forward-index entries for our table
-    for (int i = 0; i < 5; ++i)
-        seedFDBEntry(*mock, kp, fmt::format("_k{:04d}", i),
-            fdbMakeSegKey(uuid, fdbTodayPart(), fmt::format("col{}", i), ".bin"), 64, now);
-
-    // Seed 3 reverse-index entries for our table
-    for (int i = 0; i < 3; ++i)
-        mock->store[rev_kp + fmt::format("_rev{:04d}", i)] = "peer:1234";
-
-    // Seed 2 forward-index entries for a different table (must survive)
-    for (int i = 0; i < 2; ++i)
-        seedFDBEntry(*mock, other_kp, fmt::format("_k{:04d}", i),
-            fdbMakeSegKey(other_uuid, fdbTodayPart(), fmt::format("col{}", i), ".bin"), 64, now);
-
-    ASSERT_EQ(mock->store.size(), 10u);
+    const String pid = "202403";                              // monthly partition id (non-daily)
+    String seg = fdbMakeSegKey(uuid, pid + "_1_100_2", "col", ".bin");
+    auto key = DiskCacheTTL::hash(seg);
 
     {
-        TTLCacheFDBIndex idx(mock, ns, worker, uuid, worker);
-        idx.evictTable();
-        // Destructor joins bg thread, guaranteeing flush
-    }
+        TTLCacheFDBIndex idx(mock, ns, uuid, worker);
+        idx.onSet(key, pid);
+    }  // destructor drains the queue → batchWrite stores the Set op
 
-    // All entries for our table gone
-    for (auto & [k, v] : mock->store)
-    {
-        EXPECT_FALSE(k.starts_with(kp))     << "forward-index entry not cleaned: " << k;
-        EXPECT_FALSE(k.starts_with(rev_kp)) << "reverse-index entry not cleaned: " << k;
-    }
-
-    // Other table's entries intact
-    size_t other_count = 0;
-    for (auto & [k, v] : mock->store)
-        if (k.starts_with(other_kp)) ++other_count;
-    EXPECT_EQ(other_count, 2u);
+    String rk = revKeyFor(rev_kp, pid, seg);
+    ASSERT_EQ(mock->store.count(rk), 1u) << "reverse key not written under partition_id: " << rk;
+    EXPECT_EQ(mock->store[rk], worker + ":12345") << "value must be <worker_id>:<register_time>";
 }
 
 // ---------------------------------------------------------------------------
-// Test: onSet keys entries by the partition_id it is GIVEN, not one re-derived
-// from the timestamp. Guards the fix for non-daily partitioning (e.g. toYYYYMM),
-// where extractPartitionId(part_name) ("202403") differs from formatPartitionId(ts)
-// ("20240315") and the old re-derivation produced keys that eviction could never match.
+// findPeerOwner returns the peer when the stamped epoch matches its current register_time.
 // ---------------------------------------------------------------------------
 
-TEST_F(TTLCacheFDBIndexTest, OnSetKeysByPassedPartitionId)
+TEST_F(TTLCacheFDBIndexTest, FindPeerOwnerReturnsPeerOnEpochMatch)
 {
-    const String uuid = "onset-pid-uuid";
-    const String ns = "ns", worker = "w1";
-    const String kp     = fmt::format("{}_DCI_{}_{}", ns, worker, uuid);
+    const String ns = "ns", own = "w1", peer = "w2", uuid = "fpo-match";
+    const String rev_kp = fmt::format("{}_DCIREV_{}", ns, uuid);
+    setPeers({{own, {"w1:9000", 100}}, {peer, {"w2:9000", 200}}});
+
+    auto mock = std::make_shared<FDBMockMetaStore>();
+    const String pid = "20240315";
+    String seg = fdbMakeSegKey(uuid, pid + "_1_100_2", "col", ".bin");
+    auto key = DiskCacheTTL::hash(seg);
+    String rk = revKeyFor(rev_kp, pid, seg);
+    mock->store[rk] = peer + ":200";  // matches peer's current register_time
+
+    TTLCacheFDBIndex idx(mock, ns, uuid, own);
+    auto r = idx.findPeerOwner(key, pid);
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, peer);
+    EXPECT_EQ(mock->store.count(rk), 1u) << "valid entry must not be deleted";
+}
+
+// ---------------------------------------------------------------------------
+// A stale entry (epoch != peer's current register_time → previous incarnation) is skipped
+// and lazily deleted.
+// ---------------------------------------------------------------------------
+
+TEST_F(TTLCacheFDBIndexTest, FindPeerOwnerStaleEpochLazyDeletes)
+{
+    const String ns = "ns", own = "w1", peer = "w2", uuid = "fpo-stale";
+    const String rev_kp = fmt::format("{}_DCIREV_{}", ns, uuid);
+    setPeers({{own, {"w1:9000", 100}}, {peer, {"w2:9000", 200}}});
+
+    auto mock = std::make_shared<FDBMockMetaStore>();
+    const String pid = "20240315";
+    String seg = fdbMakeSegKey(uuid, pid + "_1_100_2", "col", ".bin");
+    auto key = DiskCacheTTL::hash(seg);
+    String rk = revKeyFor(rev_kp, pid, seg);
+    mock->store[rk] = peer + ":150";  // peer re-registered since (current is 200) → stale
+
+    {
+        TTLCacheFDBIndex idx(mock, ns, uuid, own);
+        auto r = idx.findPeerOwner(key, pid);
+        EXPECT_FALSE(r.has_value()) << "stale-epoch entry must not be returned";
+    }  // destructor flushes the enqueued lazy delete
+
+    EXPECT_EQ(mock->store.count(rk), 0u) << "stale entry must be lazily deleted";
+}
+
+// ---------------------------------------------------------------------------
+// An entry owned by ourselves is skipped (no self-steal) and not deleted.
+// ---------------------------------------------------------------------------
+
+TEST_F(TTLCacheFDBIndexTest, FindPeerOwnerSkipsSelf)
+{
+    const String ns = "ns", own = "w1", uuid = "fpo-self";
+    const String rev_kp = fmt::format("{}_DCIREV_{}", ns, uuid);
+    setPeers({{own, {"w1:9000", 100}}});
+
+    auto mock = std::make_shared<FDBMockMetaStore>();
+    const String pid = "20240315";
+    String seg = fdbMakeSegKey(uuid, pid + "_1_100_2", "col", ".bin");
+    auto key = DiskCacheTTL::hash(seg);
+    String rk = revKeyFor(rev_kp, pid, seg);
+    mock->store[rk] = own + ":100";
+
+    {
+        TTLCacheFDBIndex idx(mock, ns, uuid, own);
+        EXPECT_FALSE(idx.findPeerOwner(key, pid).has_value());
+    }
+    EXPECT_EQ(mock->store.count(rk), 1u) << "our own entry must not be deleted";
+}
+
+// ---------------------------------------------------------------------------
+// A worker that can't be resolved (RM transient / unknown) is skipped WITHOUT deletion,
+// so a transient RM blip doesn't purge valid entries.
+// ---------------------------------------------------------------------------
+
+TEST_F(TTLCacheFDBIndexTest, FindPeerOwnerUnresolvableSkipsWithoutDelete)
+{
+    const String ns = "ns", own = "w1", peer = "w2", uuid = "fpo-unres";
+    const String rev_kp = fmt::format("{}_DCIREV_{}", ns, uuid);
+    setPeers({{own, {"w1:9000", 100}}});  // peer NOT in the map
+
+    auto mock = std::make_shared<FDBMockMetaStore>();
+    const String pid = "20240315";
+    String seg = fdbMakeSegKey(uuid, pid + "_1_100_2", "col", ".bin");
+    auto key = DiskCacheTTL::hash(seg);
+    String rk = revKeyFor(rev_kp, pid, seg);
+    mock->store[rk] = peer + ":200";
+
+    {
+        TTLCacheFDBIndex idx(mock, ns, uuid, own);
+        EXPECT_FALSE(idx.findPeerOwner(key, pid).has_value());
+    }
+    EXPECT_EQ(mock->store.count(rk), 1u) << "unresolvable peer must not trigger deletion";
+}
+
+// ---------------------------------------------------------------------------
+// evictPart cleans the reverse entries of one part (same hash_high) and nothing else.
+// ---------------------------------------------------------------------------
+
+TEST_F(TTLCacheFDBIndexTest, EvictPartCleansReverseForPart)
+{
+    const String ns = "ns", worker = "w1", uuid = "evp-uuid";
     const String rev_kp = fmt::format("{}_DCIREV_{}", ns, uuid);
 
     auto mock = std::make_shared<FDBMockMetaStore>();
+    const String pid = "20240315";
+    const String part = pid + "_1_100_2";
+    String seg1 = fdbMakeSegKey(uuid, part, "col1", ".bin");
+    String seg2 = fdbMakeSegKey(uuid, part, "col2", ".bin");   // same part_name → same hash_high
+    String other_seg = fdbMakeSegKey(uuid, pid + "_2_200_2", "col", ".bin"); // different part
 
-    const String month_pid = "202403";  // extractPartitionId("202403_1_100_2"), no '_', 6 digits
-    const time_t ts = time(nullptr);     // any timestamp; onSet must NOT key off it
-    String seg = fdbMakeSegKey(uuid, "202403_1_100_2", "col", ".bin");
-    auto key = DiskCacheTTL::hash(seg);
+    mock->store[revKeyFor(rev_kp, pid, seg1)] = worker + ":1";
+    mock->store[revKeyFor(rev_kp, pid, seg2)] = worker + ":1";
+    String other_rk = revKeyFor(rev_kp, pid, other_seg);
+    mock->store[other_rk] = worker + ":1";
 
+    UInt64 hash_high = DiskCacheTTL::hash(seg1).items[0];
     {
-        TTLCacheFDBIndex idx(mock, ns, worker, uuid, worker);
-        idx.onSet(key, seg, 64, ts, month_pid);
-    }  // destructor drains the queue → batchWrite stores the Set ops
+        TTLCacheFDBIndex idx(mock, ns, uuid, worker);
+        idx.evictPart(pid, hash_high);
+    }  // destructor flushes the clean()
 
-    auto countUnder = [&](const String & prefix) {
-        size_t n = 0;
-        for (auto & [k, v] : mock->store)
-            if (k.starts_with(prefix)) ++n;
-        return n;
-    };
-
-    EXPECT_EQ(countUnder(kp + "_" + month_pid + "_"), 1u)     << "forward key not under the passed partition_id";
-    EXPECT_EQ(countUnder(rev_kp + "_" + month_pid + "_"), 1u) << "reverse key not under the passed partition_id";
-
-    // The pre-fix bug keyed under formatPartitionId(ts) = today's YYYYMMDD (8 digits).
-    struct tm t;
-    gmtime_r(&ts, &t);
-    String day = fmt::format("{:04d}{:02d}{:02d}", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
-    EXPECT_EQ(countUnder(kp + "_" + day + "_"), 0u) << "key wrongly derived from data day instead of partition_id";
+    EXPECT_EQ(mock->store.count(revKeyFor(rev_kp, pid, seg1)), 0u);
+    EXPECT_EQ(mock->store.count(revKeyFor(rev_kp, pid, seg2)), 0u);
+    EXPECT_EQ(mock->store.count(other_rk), 1u) << "a different part's entry must survive";
 }
 
 // ---------------------------------------------------------------------------
-// Test: reconcile restores each entry's partition_id by parsing it back out of the
-// FDB key, so the in-memory partition_id matches what onSet wrote (and what eviction
-// uses) even across a restart and for non-daily partitions.
+// evictTable clears all reverse entries for this table, leaving other tables intact.
 // ---------------------------------------------------------------------------
 
-TEST_F(TTLCacheFDBIndexTest, ReconcileRoundTripsPartitionIdFromKey)
+TEST_F(TTLCacheFDBIndexTest, EvictTableClearsReverseEntries)
 {
-    auto volume = createVolume();
-    auto settings = makeSettings();
-    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
-
-    const String uuid = "rt-uuid";
-    const String ns = "ns", worker = "w1";
-    const String kp = fmt::format("{}_DCI_{}_{}", ns, worker, uuid);
-    const time_t now = time(nullptr);
+    const String ns = "ns", worker = "w1", uuid = "evict-table-uuid", other_uuid = "other-uuid";
+    const String rev_kp     = fmt::format("{}_DCIREV_{}", ns, uuid);
+    const String other_revkp = fmt::format("{}_DCIREV_{}", ns, other_uuid);
 
     auto mock = std::make_shared<FDBMockMetaStore>();
+    for (int i = 0; i < 3; ++i)
+        mock->store[rev_kp + fmt::format("_20240315_aa{:02d}_bb{:02d}", i, i)] = worker + ":1";
+    for (int i = 0; i < 2; ++i)
+        mock->store[other_revkp + fmt::format("_20240315_aa{:02d}_bb{:02d}", i, i)] = worker + ":1";
+    ASSERT_EQ(mock->store.size(), 5u);
 
-    // Seed one realistic forward key matching makeSegKey: "<kp>_<pid>_<hex(items[0])>_<hex(items[1])>".
-    const String pid = "202403";
-    String seg = fdbMakeSegKey(uuid, "202403_1_100_2", "col", ".bin");
-    auto key = DiskCacheTTL::hash(seg);
-    String hex = DiskCacheTTL::hexKey(key);
-    String high_hex = hex.substr(16, 16);  // items[0]
-    String low_hex  = hex.substr(0, 16);   // items[1]
-    seedFDBEntry(*mock, kp, fmt::format("_{}_{}_{}", pid, high_hex, low_hex), seg, 64, now);
+    {
+        TTLCacheFDBIndex idx(mock, ns, uuid, worker);
+        idx.evictTable();
+    }
 
-    TTLCacheFDBIndex idx(mock, ns, worker, uuid, worker);
-    DiskCacheTTL cache("rt", uuid, volume, nullptr, settings, strategy, 60 * 24, 0);
-
-    String restored_pid;
-    size_t restored = 0;
-    auto result = idx.reconcile(
-        volume,
-        [&](UInt128 k, const String & s) { return cache.getRelativePath(k, s); },
-        [&](time_t ts) { return ts > now - 3600; },
-        [&](TTLCacheFDBIndex::ReconcileBatch & batch) {
-            for (auto & [k, m, p] : batch) { restored_pid = p; ++restored; }
-        });
-
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(restored, 1u);
-    EXPECT_EQ(restored_pid, pid) << "reconcile must restore the partition_id embedded in the FDB key";
+    for (auto & [k, v] : mock->store)
+        EXPECT_FALSE(k.starts_with(rev_kp)) << "reverse-index entry not cleaned: " << k;
+    size_t other_count = 0;
+    for (auto & [k, v] : mock->store)
+        if (k.starts_with(other_revkp)) ++other_count;
+    EXPECT_EQ(other_count, 2u);
 }
 
 } // namespace DB
