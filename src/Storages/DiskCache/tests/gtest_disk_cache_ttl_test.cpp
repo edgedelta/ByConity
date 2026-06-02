@@ -798,29 +798,30 @@ TEST_F(DiskCacheTTLTest, AsyncSizeBasedEviction)
     auto stats_after = cache.getStats();
     ASSERT_EQ(stats_after.async_eviction_triggered, 1);
 
-    // Add another segment IMMEDIATELY, before the async eviction has freed
-    // space. total_size is still over the cap, but we're within the 10s rate-limit window of the
-    // previous trigger, so this must be counted as skipped, not a second trigger. Done before the
-    // sleep below because once eviction frees space the cap is no longer exceeded.
+    // Wait for the async eviction to complete, then verify it freed space.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    auto stats_final = cache.getStats();
+    ASSERT_GT(stats_final.evicted_size_limit, 0);
+
+    // Now exercise the 10s trigger rate-limit deterministically: re-fill past the cap again. We're
+    // still well within 10s of the first trigger, so each set that finds total_size>cap must be
+    // counted as skipped (rate-limited), NOT as a second trigger. (Doing this after eviction has
+    // settled avoids racing the evict pool — with a single part it frees everything in ~0ms.)
+    for (int i = 0; i < segments_to_add + 1; i++)
     {
         String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
             tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
-        String seg = fmt::format("test-uuid-0000-0000-0000-00000000000e/{}/col.bin/offset_rate_limit", part);
+        String seg = fmt::format("test-uuid-0000-0000-0000-00000000000e/{}/col.bin/offset_refill_{}", part, i);
 
         String data = String(segment_size, 'a');
         ReadBufferFromString buf(data);
         cache.set(seg, buf, data.size(), false, now);
     }
 
-    // Should be rate limited (still 1 trigger, but skipped counter increased)
+    // Still exactly one trigger; the re-fill over the cap was rate-limited, not re-triggered.
     auto stats_rate_limit = cache.getStats();
     ASSERT_EQ(stats_rate_limit.async_eviction_triggered, 1);
     ASSERT_GT(stats_rate_limit.async_eviction_skipped_rate_limit, 0);
-
-    // Wait for async eviction to complete, then verify some space was freed.
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    auto stats_final = cache.getStats();
-    ASSERT_GT(stats_final.evicted_size_limit, 0);
 }
 
 // Test explicit min/max time parameters override partition_id parsing

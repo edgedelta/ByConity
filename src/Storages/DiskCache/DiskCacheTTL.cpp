@@ -180,7 +180,9 @@ DiskCacheTTL::DiskCacheTTL(
     , set_throughput_throttler(settings_.cache_set_throughput_limit == 0 ? nullptr : std::make_shared<Throttler>(settings_.cache_set_throughput_limit))
     , table_uuid(table_uuid_)
     , ttl_minutes(ttl_minutes_)
-    , max_size_bytes(max_size_bytes_)  // Already calculated by factory
+    // Single source of truth for the "0 = use worker-level cap" contract: resolve it here so every
+    // caller; factory or direct gets the same effective cap.
+    , max_size_bytes(max_size_bytes_ > 0 ? max_size_bytes_ : settings_.ttl_cache_max_size)
 {
     cache_stats.table_uuid = table_uuid_;
     LOG_INFO(log, "Initialized TTL cache for table {} with ttl_minutes={}, max_size_bytes={} ({}GB)",
