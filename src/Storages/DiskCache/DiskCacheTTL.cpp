@@ -22,7 +22,9 @@
 #include <sys/stat.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
+#include <thread>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -181,6 +183,38 @@ DiskCacheTTL::DiskCacheTTL(
     }
     // load() is called by the factory after this object wins the registry race,
     // so only one disk scan runs per table UUID.
+}
+
+DiskCacheTTL::~DiskCacheTTL()
+{
+    // Stop scheduling new async eviction and wait for any in-flight task to finish before members are destroyed
+    shutting_down.store(true);
+    while (inflight_async.load() > 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
+void DiskCacheTTL::scheduleEvictTask(std::function<void()> task)
+{
+    // Reserve a slot before checking the flag so a concurrent destructor either sees this
+    // count and waits, or we observe shutting_down and back out.
+    inflight_async.fetch_add(1);
+    if (shutting_down.load())
+    {
+        inflight_async.fetch_sub(1);
+        return;
+    }
+    try
+    {
+        IDiskCache::getEvictPool().scheduleOrThrow([this, task = std::move(task)] {
+            SCOPE_EXIT({ inflight_async.fetch_sub(1); });
+            task();
+        });
+    }
+    catch (...)
+    {
+        inflight_async.fetch_sub(1);
+        throw;
+    }
 }
 
 DiskCacheTTL::KeyType DiskCacheTTL::hash(const String & seg_key)
@@ -513,8 +547,7 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
                     LOG_DEBUG(log, "Table cache {}% full, scheduling async eviction to free {} bytes",
                              (total_size.load() * 100 / max_size_bytes), target_free);
 
-                    auto & thread_pool = IDiskCache::getEvictPool();
-                    thread_pool.scheduleOrThrow([this, target_free] {
+                    scheduleEvictTask([this, target_free] {
                         Stopwatch watch;
                         evictOldestPartitionsUntilSpace(target_free);
                         LOG_INFO(log, "Async size-based eviction freed space in {} ms",
@@ -558,8 +591,7 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
         if (last_eviction_check.compare_exchange_strong(last_check, now))
         {
             // Trigger eviction asynchronously
-            auto & thread_pool = IDiskCache::getEvictPool();
-            thread_pool.scheduleOrThrow([this] { evictExpired(); });
+            scheduleEvictTask([this] { evictExpired(); });
         }
     }
 
@@ -785,7 +817,7 @@ void DiskCacheTTL::updateSettings(UInt64 new_ttl_minutes, size_t new_max_size_by
 
     try
     {
-        IDiskCache::getEvictPool().scheduleOrThrow([this, ttl_tightened, size_tightened] {
+        scheduleEvictTask([this, ttl_tightened, size_tightened] {
             if (ttl_tightened)
                 evictExpired();
             if (size_tightened)

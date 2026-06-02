@@ -23,7 +23,6 @@
 
 #include <DataStreams/IBlockInputStream.h>
 #include <Storages/MergeTree/MergeTreeBlockReadUtils.h>
-#include <Storages/MergeTree/MergeTreeRangeReader.h>
 #include <Storages/MergeTree/Index/BitmapIndexHelper.h>
 #include <Storages/MergeTree/IMergeTreeReader.h>
 #include <MergeTreeCommon/MergeTreeMetaBase.h>
@@ -116,8 +115,6 @@ protected:
     MergeTreeIndexExecutorPtr pre_index_executor;
     NameSet bitmap_index_columns_superset;
     bool support_intermedicate_result_cache;
-    /// Populated in initializeReaders; consumed in initializeRangeReaders.
-    std::vector<IndexCoveredExpr> gin_covered_exprs;
 
 };
 

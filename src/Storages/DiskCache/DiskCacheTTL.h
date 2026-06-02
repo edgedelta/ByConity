@@ -85,6 +85,11 @@ public:
         size_t max_size_bytes_ = 0,  // 0 = use settings.ttl_cache_max_size
         IDiskCache::DataType type_ = IDiskCache::DataType::ALL);
 
+    /// Drains in-flight async eviction tasks before members are torn down. Async eviction
+    /// (get/set/updateSettings) is scheduled on a shared pool capturing `this`; without this
+    /// drain a task could run against a destroyed cache on table-drop or settings-replace.
+    ~DiskCacheTTL() override;
+
     void set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload, time_t max_time = 0) override;
     std::pair<DiskPtr, String> get(const String& seg_name) override;
     void load() override;
@@ -252,6 +257,9 @@ private:
     /// Caller must NOT hold any shard mutex. Increments total_evicted by result.count for each entry.
     void applyEraseResults(std::vector<CacheEraseResult> & results, size_t & total_evicted, const char * log_tag);
 
+    /// Schedule `task` on the shared evict pool, tracking it in inflight_async so the destructor can drain it. No-op once shutting_down is set.
+    void scheduleEvictTask(std::function<void()> task);
+
     // NOTE: the parallel disk-walk machinery (DiskIterator + DiskCacheLoader/Migrator/Deleter)
     // was removed. Its only real purpose was rebuilding the in-memory index by scanning the
     // on-disk tree on startup — pointless on instance/NVMe disk, which does not survive a
@@ -265,6 +273,10 @@ private:
     ThrottlerPtr set_rate_throttler;
     ThrottlerPtr set_throughput_throttler;
     std::atomic<bool> is_droping{false};
+
+    /// Async-eviction lifetime guard: ~DiskCacheTTL sets shutting_down and waits for inflight_async to drain so no scheduled task outlives this object.
+    std::atomic<bool> shutting_down{false};
+    std::atomic<int> inflight_async{0};
 
     const String table_uuid;
     std::atomic<UInt64> ttl_minutes;

@@ -157,14 +157,14 @@ void MergeTreeBaseSelectProcessor::initializeRangeReaders(MergeTreeReadTask & cu
     {
         if (reader->getColumns().empty() && !reader->hasBitmapIndexReader())
         {
-            current_task.range_reader = MergeTreeRangeReader(pre_reader.get(), nullptr, prewhere_actions.get(), task->delete_bitmap, true, non_const_virtual_column_names, filtered_ratio_to_use_skip_read, gin_covered_exprs);
+            current_task.range_reader = MergeTreeRangeReader(pre_reader.get(), nullptr, prewhere_actions.get(), task->delete_bitmap, true, non_const_virtual_column_names, filtered_ratio_to_use_skip_read);
         }
         else
         {
             MergeTreeRangeReader * pre_reader_ptr = nullptr;
             if (pre_reader != nullptr)
             {
-                current_task.pre_range_reader = MergeTreeRangeReader(pre_reader.get(), nullptr, prewhere_actions.get(), task->delete_bitmap, false, non_const_virtual_column_names, filtered_ratio_to_use_skip_read, gin_covered_exprs);
+                current_task.pre_range_reader = MergeTreeRangeReader(pre_reader.get(), nullptr, prewhere_actions.get(), task->delete_bitmap, false, non_const_virtual_column_names, filtered_ratio_to_use_skip_read);
                 pre_reader_ptr = &current_task.pre_range_reader;
             }
 
@@ -182,8 +182,6 @@ void MergeTreeBaseSelectProcessor::initializeReaders(
     const IMergeTreeReader::ValueSizeMap & avg_value_size_hints,
     const ReadBufferFromFileBase::ProfileCallback & profile_callback)
 {
-    gin_covered_exprs.clear();
-
     if (stream_settings.use_uncompressed_cache)
         owned_uncompressed_cache = storage.getContext()->getUncompressedCache();
 
@@ -259,29 +257,8 @@ void MergeTreeBaseSelectProcessor::initializeReaders(
                 pre_index_executor.reset();
         }
 
-        // Remove GIN-covered columns from pre_columns; the range reader will inject dummy values instead.
-        NamesAndTypesList effective_pre_columns = task->task_columns.pre_columns;
-        for (auto & cov : task->gin_coverage)
-        {
-            auto it = std::find_if(
-                effective_pre_columns.begin(), effective_pre_columns.end(),
-                [&](const NameAndTypePair & c) { return c.name == cov.source_column; });
-
-            if (it == effective_pre_columns.end())
-                continue;
-
-            bool in_where = task->task_columns.columns.contains(cov.source_column);
-            bool in_output = std::find(task->ordered_names.begin(), task->ordered_names.end(),
-                                       cov.source_column) != task->ordered_names.end();
-            if (in_where || in_output)
-                continue;
-
-            gin_covered_exprs.push_back({cov.source_column, cov.dummy_value, it->type});
-            effective_pre_columns.erase(it);
-        }
-
         pre_reader = task->data_part->getReader(
-            effective_pre_columns,
+            task->task_columns.pre_columns,
             storage_snapshot->metadata,
             mark_ranges,
             owned_uncompressed_cache.get(),

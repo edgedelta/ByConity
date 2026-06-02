@@ -201,6 +201,8 @@ std::vector<Protos::TTLCachePartitionStats> CnchWorkerClient::getTTLCachePartiti
     Protos::GetTTLCachePartitionStatsReq request;
     Protos::GetTTLCachePartitionStatsResp response;
 
+    // Cap the per-worker wait so a slow/dead worker can't stall the whole fan-out.
+    cntl.set_timeout_ms(5000);
     stub->getTTLCachePartitionStats(&cntl, &request, &response, nullptr);
 
     assertController(cntl);
@@ -219,6 +221,8 @@ std::vector<Protos::PreloadPartitionStats> CnchWorkerClient::getPreloadStats()
     Protos::GetPreloadStatsReq request;
     Protos::GetPreloadStatsResp response;
 
+    // Cap the per-worker wait so a slow/dead worker can't stall the whole fan-out.
+    cntl.set_timeout_ms(5000);
     stub->getPreloadStats(&cntl, &request, &response, nullptr);
 
     assertController(cntl);

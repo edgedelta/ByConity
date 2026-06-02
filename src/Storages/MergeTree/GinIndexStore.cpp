@@ -553,27 +553,7 @@ size_t GinIndexStore::cacheWeight() const
         weight += 2 * sizeof(UInt64); //postings_start_offset + dict_start_offset
         weight += (pair.second->offsets.getData().capacity()) * sizeof(UInt8); //offsets
     }
-    weight += decoded_cache_weight.load(std::memory_order_relaxed);
     return weight;
-}
-
-GinPostingsCachePtr GinIndexStore::getDecodedPostings(const String & query_string) const
-{
-    std::shared_lock lock(decoded_cache_mutex);
-    auto it = decoded_postings_cache.find(query_string);
-    return it == decoded_postings_cache.end() ? nullptr : it->second;
-}
-
-void GinIndexStore::setDecodedPostings(const String & query_string, GinPostingsCachePtr postings, size_t weight)
-{
-    if (decoded_cache_max_weight == 0)
-        return;
-    std::unique_lock lock(decoded_cache_mutex);
-    if (decoded_cache_weight.load(std::memory_order_relaxed) + weight > decoded_cache_max_weight)
-        return;
-    auto [_, inserted] = decoded_postings_cache.emplace(query_string, std::move(postings));
-    if (inserted)
-        decoded_cache_weight.fetch_add(weight, std::memory_order_relaxed);
 }
 
 GinIndexStoreDeserializer::GinIndexStoreDeserializer(const GinIndexStorePtr & store_)
@@ -715,8 +695,8 @@ GinIndexStoreFactory::GinIndexStoreFactory(const GinIndexStoreCacheSettings & se
             .max_nums = std::numeric_limits<size_t>::max(),
             .enable_customize_evict_handler = false
         })
-    , decoded_cache_max_weight_per_store(settings.decoded_cache_max_weight_per_store)
 {
+
 }
 
 GinIndexStorePtr GinIndexStoreFactory::get(const String & name, GinDataPartHelperPtr && storage_info)
@@ -733,7 +713,6 @@ GinIndexStorePtr GinIndexStoreFactory::get(const String & name, GinDataPartHelpe
         if (!store->exists())
             return nullptr;
 
-        store->setDecodedCacheMaxWeight(decoded_cache_max_weight_per_store);
         GinIndexStoreDeserializer deserializer(store);
         deserializer.readSegments();
         deserializer.readSegmentDictionaries();

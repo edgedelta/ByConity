@@ -1229,7 +1229,6 @@ int Server::main(const std::vector<std::string> & /*args*/)
     ginindex_store_cache_settings.mapping_bucket_size = config().getUInt64("ginindex_store_cache_bucket", 1000); //1000
     ginindex_store_cache_settings.cache_shard_num = config().getUInt64("ginindex_store_cache_shard", 2); //2
     ginindex_store_cache_settings.lru_update_interval = config().getUInt64("ginindex_store_cache_lru_update_interval", 60); //60 seconds
-    ginindex_store_cache_settings.decoded_cache_max_weight_per_store = config().getUInt64("ginindex_store_decoded_cache_per_store_size", 50ULL * 1024 * 1024); //50MB
     global_context->setGinIndexStoreFactory(ginindex_store_cache_settings);
 
     /// A cache for part's primary index

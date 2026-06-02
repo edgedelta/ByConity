@@ -293,67 +293,6 @@ bool MergeTreeConditionInverted::alwaysUnknownOrTrue() const
     return rpn_stack[0];
 }
 
-void MergeTreeConditionInverted::prefetchPostingsCache(PostingsCacheForStore & cache_store) const
-{
-    if (!cache_store.store)
-        return;
-
-    static auto * log = &Poco::Logger::get("GinIndex");
-
-    auto t0 = std::chrono::steady_clock::now();
-    /// Reader is constructed lazily — opening file streams is skipped entirely on full cache hits.
-    std::optional<GinIndexStoreDeserializer> reader;
-    auto t1 = t0;
-
-    auto preload = [&](const GinFilter & gin_filter) {
-        const String & key = gin_filter.getQueryString();
-        if (cache_store.cache.contains(key))
-            return;
-
-        /// Check store-level decoded cache first (shared across queries on this part/worker).
-        if (auto cached = cache_store.store->getDecodedPostings(key))
-        {
-            LOG_DEBUG(log, "decoded postings cache HIT part={} query={}", cache_store.store->getName(), key);
-            cache_store.cache[key] = std::move(cached);
-            return;
-        }
-
-        LOG_DEBUG(log, "decoded postings cache MISS part={} query={}", cache_store.store->getName(), key);
-
-        /// Initialize file streams on first miss.
-        if (!reader)
-        {
-            reader.emplace(cache_store.store);
-            t1 = std::chrono::steady_clock::now();
-        }
-        auto decoded = reader->createPostingsCacheFromTerms(gin_filter.getTerms());
-
-        size_t weight = 0;
-        for (const auto & [term, seg_container] : *decoded)
-            for (const auto & [seg_id, bitmap] : seg_container)
-                weight += bitmap->getSizeInBytes();
-        cache_store.store->setDecodedPostings(key, decoded, weight);
-
-        cache_store.cache[key] = std::move(decoded);
-    };
-
-    for (const auto & element : rpn)
-    {
-        if (element.gin_filter)
-            preload(*element.gin_filter);
-
-        for (const auto & gin_filters : element.set_gin_filters)
-            for (const auto & gf : gin_filters)
-                preload(gf);
-    }
-
-    auto t2 = std::chrono::steady_clock::now();
-    auto init_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-    auto decode_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-    LOG_DEBUG(log, "prefetchPostingsCache part={} initFileStreams={}us decodePostings={}us",
-        cache_store.store->getName(), init_us, decode_us);
-}
-
 // TODO @caichangheng
 // filter_bitmap without text search query may case wrong with not
 // will ignore filter_bitmap select without text search;
@@ -364,12 +303,7 @@ bool MergeTreeConditionInverted::mayBeTrueOnGranuleInPart(
     if (!granule)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "GinFilter index condition got a granule with the wrong type.");
     
-    // Populate filter_bitmap for EQUALS-only conditions (no NOT/NOT_EQUALS in RPN).
-    // NOT_EQUALS would require inverting the bitmap (~95% rows for common tokens) which
-    // is worse than granule-level filtering, so fall back to empty_bitmap in that case.
-    bool has_negation = std::any_of(rpn.begin(), rpn.end(), [](const RPNElement & e) {
-        return e.function == RPNElement::FUNCTION_NOT_EQUALS || e.function == RPNElement::FUNCTION_NOT;
-    });
+    // filter without text search do not return filter_bitmap
     roaring::Roaring empty_bitmap;
 
     /// Check like in KeyCondition.
@@ -382,9 +316,7 @@ bool MergeTreeConditionInverted::mayBeTrueOnGranuleInPart(
         }
         else if (element.function == RPNElement::FUNCTION_EQUALS || element.function == RPNElement::FUNCTION_NOT_EQUALS)
         {
-            roaring::Roaring & bitmap_ref = (!has_negation && element.function == RPNElement::FUNCTION_EQUALS)
-                ? filter_bitmap : empty_bitmap;
-            rpn_stack.emplace_back(granule->gin_filters[element.key_column].contains(*element.gin_filter, cache_store, bitmap_ref), true);
+            rpn_stack.emplace_back(granule->gin_filters[element.key_column].contains(*element.gin_filter, cache_store, empty_bitmap), true);
 
             if (element.function == RPNElement::FUNCTION_NOT_EQUALS)
                 rpn_stack.back() = !rpn_stack.back();
@@ -907,51 +839,6 @@ void ginIndexValidator(const IndexDescription & index, bool /*attach*/)
         Float64 density = index.arguments.size() < 2 ? 1.0 : index.arguments[1].get<Float64>();
         GinFilterParameters params(ngrams, density);
     }
-}
-
-std::pair<String, String> MergeTreeConditionInverted::getCoveredColumnAndDummy() const
-{
-    std::optional<size_t> single_key_col;
-    String dummy_value;
-
-    for (const auto & elem : rpn)
-    {
-        switch (elem.function)
-        {
-            case RPNElement::FUNCTION_AND:
-            case RPNElement::FUNCTION_OR:
-            case RPNElement::FUNCTION_NOT:
-            case RPNElement::ALWAYS_TRUE:
-            case RPNElement::ALWAYS_FALSE:
-            case RPNElement::FUNCTION_UNKNOWN:
-                continue;
-            case RPNElement::FUNCTION_NOT_EQUALS:
-            case RPNElement::FUNCTION_NOT_IN:
-                return {"", ""};
-            default:
-                break;
-        }
-
-        if (!single_key_col)
-            single_key_col = elem.key_column;
-        else if (*single_key_col != elem.key_column)
-            return {"", ""};
-
-        if (elem.gin_filter)
-        {
-            for (const String & term : elem.gin_filter->getTerms())
-            {
-                if (!dummy_value.empty())
-                    dummy_value += ' ';
-                dummy_value += term;
-            }
-        }
-    }
-
-    if (!single_key_col || dummy_value.empty())
-        return {"", ""};
-
-    return {header.getByPosition(*single_key_col).name, dummy_value};
 }
 
 }

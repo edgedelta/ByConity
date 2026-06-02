@@ -16,7 +16,6 @@
 #include <boost/core/noncopyable.hpp>
 #include <cstddef>
 #include <memory>
-#include <shared_mutex>
 #include <unordered_map>
 #include <roaring.hh>
 
@@ -138,13 +137,6 @@ struct GinSegmentDictionary
 
 using GinSegmentDictionaryPtr = std::shared_ptr<GinSegmentDictionary>;
 
-/// Container for postings lists for each segment
-using GinSegmentedPostingsListContainer = std::unordered_map<UInt32, GinIndexPostingsListPtr>;
-
-/// Postings lists and terms built from query string
-using GinPostingsCache = std::unordered_map<std::string, GinSegmentedPostingsListContainer>;
-using GinPostingsCachePtr = std::shared_ptr<GinPostingsCache>;
-
 /// Gin index store which has gin index meta data for the corresponding column data part
 class GinIndexStore
 {
@@ -209,13 +201,6 @@ public:
 
     size_t cacheWeight() const;
 
-    /// Decoded postings cache: returns nullptr on miss.
-    GinPostingsCachePtr getDecodedPostings(const String & query_string) const;
-    /// Store decoded postings if under budget. weight = sum of bitmap getSizeInBytes().
-    void setDecodedPostings(const String & query_string, GinPostingsCachePtr postings, size_t weight);
-    /// Set the per-store decoded cache budget (0 = disabled). Called by factory and tests.
-    void setDecodedCacheMaxWeight(size_t w) { decoded_cache_max_weight = w; }
-
 private:
     friend class GinIndexStoreDeserializer;
 
@@ -247,14 +232,6 @@ private:
     const UInt64 max_digestion_size = 0;
     Float32 density = 1.0;
 
-    /// Per-store decoded postings cache. Shared across queries on the same part.
-    /// Bounded to decoded_cache_max_weight bytes;
-    /// entries live until the GinIndexStore is evicted from the outer LRU.
-    size_t decoded_cache_max_weight = 0;
-    mutable std::shared_mutex decoded_cache_mutex;
-    std::unordered_map<String, GinPostingsCachePtr> decoded_postings_cache;
-    std::atomic<size_t> decoded_cache_weight{0};
-
     /// File streams for segment, dictionaries and postings lists
     std::unique_ptr<WriteBufferFromFileBase> metadata_file_stream;
     std::unique_ptr<WriteBufferFromFileBase> dict_file_stream;
@@ -270,6 +247,13 @@ private:
 };
 
 using GinIndexStorePtr = std::shared_ptr<GinIndexStore>;
+
+/// Container for postings lists for each segment
+using GinSegmentedPostingsListContainer = std::unordered_map<UInt32, GinIndexPostingsListPtr>;
+
+/// Postings lists and terms built from query string
+using GinPostingsCache = std::unordered_map<std::string, GinSegmentedPostingsListContainer>;
+using GinPostingsCachePtr = std::shared_ptr<GinPostingsCache>;
 
 class GinIndexStoreDeserializer : private boost::noncopyable
 {
@@ -337,11 +321,6 @@ struct GinIndexStoreCacheSettings
     size_t lru_update_interval {60};
 
     size_t cache_shard_num {2};
-
-    // Max bytes of decoded roaring bitmaps cached per GinIndexStore per part.
-    // Decoded postings are kept in RAM across queries on the same part/worker.
-    // 0 disables the per-store decoded cache entirely.
-    size_t decoded_cache_max_weight_per_store {50ULL * 1024 * 1024 /*50MB*/};
 };
 
 struct GinIndexStoreWeightFunction
@@ -361,8 +340,6 @@ public:
     ///Get GinIndexStore by using index name and data part
     GinIndexStorePtr get(const String & name, GinDataPartHelperPtr && storage_info);
 
-    size_t getDecodedCacheMaxWeightPerStore() const { return decoded_cache_max_weight_per_store; }
-
     size_t count() const { return stores_lru_cache.count(); }
     size_t weight() const { return stores_lru_cache.weight(); }
 
@@ -372,7 +349,6 @@ public:
 private:
     ShardCache<String, std::hash<String>,
         BucketLRUCache<String, GinIndexStore, std::hash<String>, GinIndexStoreWeightFunction>> stores_lru_cache;
-    size_t decoded_cache_max_weight_per_store;
 };
 
 }

@@ -22,9 +22,7 @@
 #pragma once
 #include <optional>
 #include <Core/Block.h>
-#include <DataTypes/IDataType.h>
 #include <Storages/MergeTree/MarkRange.h>
-#include <Storages/MergeTree/RangesInDataPart.h>
 #include <common/logger_useful.h>
 #include "Storages/MergeTree/IMergeTreeDataPart_fwd.h"
 
@@ -62,15 +60,9 @@ struct PrewhereExprInfo
     bool need_filter = false;
 };
 
-/// GIN-covered PREWHERE column: disk read is skipped and a dummy constant is injected
-/// so that hasToken(dummy, token) == 1; the delete_bitmap handles actual row filtering.
-struct IndexCoveredExpr
-{
-    String source_column;
-    String dummy_value;
-    DataTypePtr source_type;
-};
-
+/// MergeTreeReader iterator which allows sequential reading for arbitrary number of rows between pairs of marks in the same part.
+/// Stores reading state, which can be inside granule. Can skip rows in current granule and start reading from next mark.
+/// Used generally for reading number of rows less than index granularity to decrease cache misses for fat blocks.
 class MergeTreeRangeReader
 {
 public:
@@ -81,8 +73,7 @@ public:
         ImmutableDeleteBitmapPtr delete_bitmap_,
         bool last_reader_in_chain_,
         const Names & non_const_virtual_column_names_,
-        size_t filtered_ratio_to_use_skip_read_,
-        std::vector<IndexCoveredExpr> covered_exprs_ = {});
+        size_t filtered_ratio_to_use_skip_read_);
 
     MergeTreeRangeReader() = default;
 
@@ -277,14 +268,12 @@ private:
     Columns continueReadingChain(ReadResult & result, size_t & num_rows, bool filter_when_read);
     void executePrewhereActionsAndFilterColumns(ReadResult & result);
     void extractBitmapIndexColumns(Columns & columns, Block & bitmap_block);
-    void injectGinDummyColumns(Block & block, size_t num_rows) const;
 
     IMergeTreeReader * merge_tree_reader = nullptr;
     const MergeTreeIndexGranularity * index_granularity = nullptr;
     MergeTreeRangeReader * prev_reader = nullptr; /// If not nullptr, read from prev_reader firstly.
     const PrewhereExprInfo * prewhere_info;
     ImmutableDeleteBitmapPtr delete_bitmap = nullptr; /// If not nullptr, rows in delete bitmap are removed
-    std::vector<IndexCoveredExpr> covered_exprs;      /// GIN-covered PREWHERE columns — column reads skipped, dummy injected
 
     Stream stream;
 

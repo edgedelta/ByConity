@@ -195,95 +195,6 @@ TEST(GinFilter_MatchInRange, RareTermFirst_EarlyPrune)
     EXPECT_FALSE(idx.contains(qry, cs, result));
 }
 
-// ===== GinIndexStore decoded cache tests =====
-
-class NoOpGinDataPartHelper : public IGinDataPartHelper
-{
-public:
-    std::unique_ptr<SeekableReadBuffer> readFile(const String &) override { return nullptr; }
-    std::unique_ptr<WriteBufferFromFileBase> writeFile(const String &, size_t, WriteMode) override { return nullptr; }
-    size_t getFileSize(const String &) const override { return 0; }
-    String getPartUniqueID() const override { return "test-part"; }
-    bool exists(const String &) const override { return false; }
-};
-
-GinIndexStorePtr makeStore(size_t max_weight)
-{
-    auto store = std::make_shared<GinIndexStore>("test", std::make_unique<NoOpGinDataPartHelper>());
-    store->setDecodedCacheMaxWeight(max_weight);
-    return store;
-}
-
-TEST(GinIndexStore_DecodedCache, MissThenHit)
-{
-    auto store = makeStore(1024 * 1024);
-
-    EXPECT_EQ(store->getDecodedPostings("q1"), nullptr);
-
-    auto cache = makePostings({{"hello", 0, makeBitmap({1, 2, 3})}});
-    store->setDecodedPostings("q1", cache, 100);
-
-    auto got = store->getDecodedPostings("q1");
-    ASSERT_NE(got, nullptr);
-    EXPECT_EQ(got.get(), cache.get());
-}
-
-TEST(GinIndexStore_DecodedCache, ZeroMaxWeight_Disabled)
-{
-    auto store = makeStore(0);
-
-    auto cache = makePostings({{"hello", 0, makeBitmap({1, 2})}});
-    store->setDecodedPostings("q1", cache, 100);
-    EXPECT_EQ(store->getDecodedPostings("q1"), nullptr);
-}
-
-TEST(GinIndexStore_DecodedCache, OverBudget_NotStored)
-{
-    auto store = makeStore(50);
-
-    auto cache = makePostings({{"hello", 0, makeBitmap({1, 2})}});
-    store->setDecodedPostings("q1", cache, 100); // 100 > 50 budget
-    EXPECT_EQ(store->getDecodedPostings("q1"), nullptr);
-}
-
-TEST(GinIndexStore_DecodedCache, FitsExactly_ThenNextExceeds)
-{
-    auto store = makeStore(200);
-
-    auto c1 = makePostings({{"hello", 0, makeBitmap({1})}});
-    auto c2 = makePostings({{"world", 0, makeBitmap({2})}});
-    store->setDecodedPostings("q1", c1, 100);
-    store->setDecodedPostings("q2", c2, 100); // 100+100 = 200, fits exactly
-
-    ASSERT_NE(store->getDecodedPostings("q1"), nullptr);
-    ASSERT_NE(store->getDecodedPostings("q2"), nullptr);
-
-    auto c3 = makePostings({{"foo", 0, makeBitmap({3})}});
-    store->setDecodedPostings("q3", c3, 1); // budget exhausted
-    EXPECT_EQ(store->getDecodedPostings("q3"), nullptr);
-}
-
-TEST(GinIndexStore_DecodedCache, DuplicateInsert_WeightNotDoubled)
-{
-    auto store = makeStore(150); // tight budget
-
-    auto c1 = makePostings({{"hello", 0, makeBitmap({1})}});
-    auto c2 = makePostings({{"hello", 0, makeBitmap({9})}});
-    store->setDecodedPostings("q1", c1, 100);
-    store->setDecodedPostings("q1", c2, 100); // same key — emplace is no-op
-
-    // First value wins
-    auto got = store->getDecodedPostings("q1");
-    ASSERT_NE(got, nullptr);
-    EXPECT_EQ(got.get(), c1.get());
-
-    // If weight was double-counted (200), this 50-byte entry would be rejected.
-    // If weight is correct (100), it should fit in the remaining 50 bytes.
-    auto c3 = makePostings({{"bar", 0, makeBitmap({2})}});
-    store->setDecodedPostings("q2", c3, 50);
-    EXPECT_NE(store->getDecodedPostings("q2"), nullptr);
-}
-
 // ===== Additional matchInRange coverage =====
 
 TEST(GinFilter_MatchInRange, MixedContainsAll_RealBitmapDeterminesResult)
@@ -356,29 +267,6 @@ TEST(GinFilter_MatchInRange, SingleRowRange_Miss)
 }
 
 // ===== GinFilter::match (multi-range) =====
-
-TEST(GinFilter_Match, MultiSegment_BothMatch)
-{
-    GinFilterParameters params(0, 0.01);
-    GinFilter idx(params);
-    idx.addRowRangeToGinFilter(0, 0, 99);
-    idx.addRowRangeToGinFilter(1, 0, 99);
-
-    auto qry = makeQueryFilter("hello", {"hello"});
-
-    PostingsCacheForStore cs;
-    cs.cache["hello"] = makePostings({
-        {"hello", 0, makeBitmap({10, 20})},
-        {"hello", 1, makeBitmap({50})},
-    });
-
-    roaring::Roaring result;
-    EXPECT_TRUE(idx.contains(qry, cs, result));
-    EXPECT_EQ(result.cardinality(), 3u);
-    EXPECT_TRUE(result.contains(10));
-    EXPECT_TRUE(result.contains(20));
-    EXPECT_TRUE(result.contains(50));
-}
 
 TEST(GinFilter_Match, MultiSegment_OneMatchOneMiss)
 {

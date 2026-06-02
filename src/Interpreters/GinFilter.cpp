@@ -265,17 +265,11 @@ bool GinFilter::match(const GinPostingsCache & postings_cache , roaring::Roaring
     if (hasEmptyPostingsList(postings_cache))
         return false;
 
-    bool any_match = false;
+    /// Check for each row ID ranges
     for (const auto & rowid_range: rowid_ranges)
-    {
-        roaring::Roaring range_result;
-        if (matchInRange(postings_cache, rowid_range.segment_id, rowid_range.range_start, rowid_range.range_end, range_result))
-        {
-            filter_result |= range_result;
-            any_match = true;
-        }
-    }
-    return any_match;
+        if (matchInRange(postings_cache, rowid_range.segment_id, rowid_range.range_start, rowid_range.range_end, filter_result))
+            return true;
+    return false;
 }
 
 String GinFilter::getTermsInString() const
