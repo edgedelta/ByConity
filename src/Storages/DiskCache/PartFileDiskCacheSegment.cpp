@@ -178,19 +178,20 @@ void PartFileDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool throw_e
         auto disk = data_part->volume->getDisk();
         auto data_file = disk->readFile(data_path, merge_tree_reader_settings.read_settings);
 
+        // Get max time from part for TTL cache granularity.
+        // Used by both the local cache writes below and the remote-stealing WriteFile entries.
+        time_t max_time = data_part->getMinMaxTime().second;
+
         /// cache data segment
         if (data_part->disk_cache_mode
             != DiskCacheMode::
                 FORCE_STEAL_DISK_CACHE) // FORCE_STEAL_DISK_CACHE is used for testing, which only allow remote cache request so will skip local cache write
         {
-            // Get min/max time from part for TTL cache granularity
-            auto [min_time, max_time] = data_part->getMinMaxTime();
-
             if (!preload_level || (preload_level & PreloadLevelSettings::DataPreload) == PreloadLevelSettings::DataPreload)
             {
                 data_file->seek(stream_file_pos.file_offset + cache_data_left_offset);
                 LimitReadBuffer segment_value(*data_file, cache_data_bytes, false);
-                disk_cache.getDataCache()->set(getSegmentName(), segment_value, cache_data_bytes, preload_level > 0, min_time, max_time);
+                disk_cache.getDataCache()->set(getSegmentName(), segment_value, cache_data_bytes, preload_level > 0, max_time);
                 LOG_TRACE(disk_cache.getLogger(), "Cached part{} data file: {}, preload_level: {}", extension, getSegmentName(), preload_level);
             }
 
@@ -200,7 +201,7 @@ void PartFileDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool throw_e
                 data_file->seek(mrk_file_pos.file_offset);
                 LimitReadBuffer marks_value(*data_file, mrk_file_pos.file_size, false);
                 String marks_key = getMarkName();
-                disk_cache.getMetaCache()->set(marks_key, marks_value, mrk_file_pos.file_size, preload_level > 0, min_time, max_time);
+                disk_cache.getMetaCache()->set(marks_key, marks_value, mrk_file_pos.file_size, preload_level > 0, max_time);
                 LOG_TRACE(disk_cache.getLogger(), "Cached part{} mark file: {}, preload_level: {}", extension, marks_key, preload_level);
             }
 
@@ -221,8 +222,8 @@ void PartFileDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool throw_e
                 && removeBracketsIfIpv6(parsed_assign_compute_host.value()) != removeBracketsIfIpv6(parsed_disk_cache_host.value())))
         {
             std::vector<WriteFile> files{
-                {getMarkName(), data_path, static_cast<UInt64>(mrk_file_pos.file_offset), mrk_file_pos.file_size},
-                {getSegmentName(), data_path, static_cast<UInt64>(stream_file_pos.file_offset + cache_data_left_offset), cache_data_bytes}};
+                {getMarkName(), data_path, static_cast<UInt64>(mrk_file_pos.file_offset), mrk_file_pos.file_size, max_time},
+                {getSegmentName(), data_path, static_cast<UInt64>(stream_file_pos.file_offset + cache_data_left_offset), cache_data_bytes, max_time}};
 
             DistributedDataClientOption option{
                 .max_request_rate = disk_cache.getSettings().stealing_max_request_rate,

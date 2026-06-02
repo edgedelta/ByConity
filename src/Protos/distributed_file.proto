@@ -22,6 +22,7 @@ message FileInfo
     required string path = 2;
     required int32 offset = 3;
     required int32 length = 4;
+    optional int64 max_time = 5;
 }
 
 message writeFileRquest

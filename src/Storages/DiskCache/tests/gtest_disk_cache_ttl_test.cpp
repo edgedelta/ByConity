@@ -99,10 +99,12 @@ std::shared_ptr<Context> DiskCacheTTLTest::ctx = nullptr;
 // Test parsing partition timestamps from part names
 TEST_F(DiskCacheTTLTest, ParsePartitionTimestamp)
 {
+    // parsePartitionTimestamp expects a full segment key: uuid/part_name/col.bin/offset
+
     // YYYYMMDD format (20240315)
     {
-        String part_name = "20240315_1_100_2";
-        time_t ts = DiskCacheTTL::parsePartitionTimestamp(part_name);
+        String seg = "uuid/20240315_1_100_2/col.bin/offset_0";
+        time_t ts = DiskCacheTTL::parsePartitionTimestamp(seg);
         ASSERT_GT(ts, 0);
 
         struct tm tm_time;
@@ -114,8 +116,8 @@ TEST_F(DiskCacheTTLTest, ParsePartitionTimestamp)
 
     // YYYYMMDDHH format (2024031523)
     {
-        String part_name = "2024031523_1_100_2";
-        time_t ts = DiskCacheTTL::parsePartitionTimestamp(part_name);
+        String seg = "uuid/2024031523_1_100_2/col.bin/offset_0";
+        time_t ts = DiskCacheTTL::parsePartitionTimestamp(seg);
         ASSERT_GT(ts, 0);
 
         struct tm tm_time;
@@ -128,8 +130,8 @@ TEST_F(DiskCacheTTLTest, ParsePartitionTimestamp)
 
     // YYYYMM format (202403)
     {
-        String part_name = "202403_1_100_2";
-        time_t ts = DiskCacheTTL::parsePartitionTimestamp(part_name);
+        String seg = "uuid/202403_1_100_2/col.bin/offset_0";
+        time_t ts = DiskCacheTTL::parsePartitionTimestamp(seg);
         ASSERT_GT(ts, 0);
 
         struct tm tm_time;
@@ -141,22 +143,22 @@ TEST_F(DiskCacheTTLTest, ParsePartitionTimestamp)
 
     // Non-time partition (string partition)
     {
-        String part_name = "some_partition_1_100_2";
-        time_t ts = DiskCacheTTL::parsePartitionTimestamp(part_name);
+        String seg = "uuid/some_partition_1_100_2/col.bin/offset_0";
+        time_t ts = DiskCacheTTL::parsePartitionTimestamp(seg);
         ASSERT_EQ(ts, 0);
     }
 
     // Invalid format
     {
-        String part_name = "999_1_100_2";
-        time_t ts = DiskCacheTTL::parsePartitionTimestamp(part_name);
+        String seg = "uuid/999_1_100_2/col.bin/offset_0";
+        time_t ts = DiskCacheTTL::parsePartitionTimestamp(seg);
         ASSERT_EQ(ts, 0);
     }
 
     // Empty partition
     {
-        String part_name = "_1_100_2";
-        time_t ts = DiskCacheTTL::parsePartitionTimestamp(part_name);
+        String seg = "uuid/_1_100_2/col.bin/offset_0";
+        time_t ts = DiskCacheTTL::parsePartitionTimestamp(seg);
         ASSERT_EQ(ts, 0);
     }
 }
@@ -185,7 +187,7 @@ TEST_F(DiskCacheTTLTest, TTLBehaviorThroughOperations)
 
         String data = "test";
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false);
+        cache.set(seg, buf, data.size(), false, recent_time);
 
         auto [disk, path] = cache.get(seg);
         ASSERT_FALSE(path.empty()); // Should be cached
@@ -304,7 +306,7 @@ TEST_F(DiskCacheTTLTest, BasicOperations)
     {
         String test_data = "test data content";
         ReadBufferFromString buffer(test_data);
-        cache.set(recent_seg, buffer, test_data.size(), false);
+        cache.set(recent_seg, buffer, test_data.size(), false, now);
 
         auto [disk, path] = cache.get(recent_seg);
         ASSERT_FALSE(path.empty());
@@ -330,49 +332,46 @@ TEST_F(DiskCacheTTLTest, EvictExpired)
     settings.ttl_cache_max_size = 1024 * 1024;
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
-    UInt64 ttl_minutes = 60; // 1 hour TTL
-    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
+    // Large TTL so we can insert entries with old max_time, then shrink to test eviction
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, 60 * 24 * 365, 0);
 
     time_t now = time(nullptr);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
 
-    // Create recent partition (30 minutes old - should survive)
-    struct tm tm_recent;
-    time_t recent_time = now - (30 * 60);
-    gmtime_r(&recent_time, &tm_recent);
+    // Different _N_N_N suffixes → different part_name hashes (different hash_highs)
+    // so evictExpired targets them independently
     String recent_part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
-        tm_recent.tm_year + 1900, tm_recent.tm_mon + 1, tm_recent.tm_mday);
+        tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    String old_part = fmt::format("{:04d}{:02d}{:02d}_2_200_2",
+        tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+
     String recent_seg = fmt::format("test-uuid-0000-0000-0000-000000000005/{}/column.bin/offset_0", recent_part);
+    String old_seg    = fmt::format("test-uuid-0000-0000-0000-000000000005/{}/column.bin/offset_0", old_part);
 
-    // Create old partition (2 hours old - should be evicted)
-    struct tm tm_old;
-    time_t old_time = now - (2 * 60 * 60);
-    gmtime_r(&old_time, &tm_old);
-    String old_part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
-        tm_old.tm_year + 1900, tm_old.tm_mon + 1, tm_old.tm_mday);
-    String old_seg = fmt::format("test-uuid-0000-0000-0000-000000000005/{}/column.bin/offset_1", old_part);
+    {
+        String data = "test data";
+        ReadBufferFromString buf(data);
+        cache.set(recent_seg, buf, data.size(), false, now);
+    }
+    {
+        String data = "test data";
+        ReadBufferFromString buf(data);
+        cache.set(old_seg, buf, data.size(), false, now - 7200);
+    }
 
-    // Add both segments
-    String data = "test data";
-    ReadBufferFromString buf1(data);
-    ReadBufferFromString buf2(data);
-    cache.set(recent_seg, buf1, data.size(), false);
-    cache.set(old_seg, buf2, data.size(), false);
+    ASSERT_EQ(cache.getKeyCount(), 2);
 
-    // Verify both exist initially
-    size_t initial_count = cache.getKeyCount();
-    ASSERT_EQ(initial_count, 2);
+    // Shrink TTL to 60 min: old entry's max_time (now-7200 > 3600s) is now expired
+    cache.updateSettings(60, 0);
+    cache.evictExpired();
 
-    // Wait a moment for potential background eviction
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    // Old partition should be evicted, recent should remain
     ASSERT_EQ(cache.getKeyCount(), 1);
 
     auto [disk1, path1] = cache.get(recent_seg);
     auto [disk2, path2] = cache.get(old_seg);
-
-    ASSERT_FALSE(path1.empty());  // Recent still cached
-    ASSERT_TRUE(path2.empty());   // Old evicted
+    ASSERT_FALSE(path1.empty());
+    ASSERT_TRUE(path2.empty());
 }
 
 // Periodic eviction is tested indirectly through EvictExpired test
@@ -405,7 +404,7 @@ TEST_F(DiskCacheTTLTest, ConcurrentAccess)
             String seg_name = fmt::format("test_uuid/{}/col.bin/offset_{}", part, i);
             String data = fmt::format("data_{}", i);
             ReadBufferFromString buffer(data);
-            cache.set(seg_name, buffer, data.size(), false);
+            cache.set(seg_name, buffer, data.size(), false, now);
 
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
@@ -450,8 +449,8 @@ TEST_F(DiskCacheTTLTest, DropPart)
         String data = "test data";
         ReadBufferFromString buf1(data);
         ReadBufferFromString buf2(data);
-        cache.set(seg1, buf1, data.size(), false);
-        cache.set(seg2, buf2, data.size(), false);
+        cache.set(seg1, buf1, data.size(), false, now);
+        cache.set(seg2, buf2, data.size(), false, now);
     }
 
     size_t initial_count = cache.getKeyCount();
@@ -498,7 +497,7 @@ TEST_F(DiskCacheTTLTest, CacheStats)
         String seg_name = fmt::format("test_uuid/{}/col.bin/offset_{}", part, i);
         String data = String(100, 'a');
         ReadBufferFromString buffer(data);
-        cache.set(seg_name, buffer, data.size(), false);
+        cache.set(seg_name, buffer, data.size(), false, now);
     }
 
     ASSERT_EQ(cache.getKeyCount(), 5);
@@ -528,7 +527,7 @@ TEST_F(DiskCacheTTLTest, MultiDiskVolume)
         String seg_name = fmt::format("test_uuid/{}/col.bin/offset_{}", part, i);
         String data = String(1000, 'a');
         ReadBufferFromString buffer(data);
-        cache.set(seg_name, buffer, data.size(), false);
+        cache.set(seg_name, buffer, data.size(), false, now);
     }
 
     ASSERT_EQ(cache.getKeyCount(), 10);
@@ -552,7 +551,7 @@ TEST_F(DiskCacheTTLTest, DetailedStats)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL cache("test-cache", "test-uuid-0000-0000-0000-00000000000b", volume, nullptr, settings, strategy, ttl_minutes, 0);
 
     time_t now = time(nullptr);
 
@@ -568,7 +567,7 @@ TEST_F(DiskCacheTTLTest, DetailedStats)
         String seg = fmt::format("test-uuid-0000-0000-0000-00000000000b/{}/col.bin/offset_{}", recent_part, i);
         String data = String(100, 'a');
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false);
+        cache.set(seg, buf, data.size(), false, recent_time);
     }
 
     // Try to add old entries (should be rejected)
@@ -650,53 +649,46 @@ TEST_F(DiskCacheTTLTest, StatsAfterEviction)
     settings.ttl_cache_max_size = 1024 * 1024;
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
-    UInt64 ttl_minutes = 60;
-    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, ttl_minutes, 0);
+    // Large TTL so we can insert entries with old max_time, then shrink to test eviction
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, 60 * 24 * 365, 0);
 
     time_t now = time(nullptr);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
 
-    // Add recent entries
-    struct tm tm_recent;
-    time_t recent_time = now - (30 * 60);
-    gmtime_r(&recent_time, &tm_recent);
+    // Different suffixes → different hash_highs so evictExpired targets independently
     String recent_part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
-        tm_recent.tm_year + 1900, tm_recent.tm_mon + 1, tm_recent.tm_mday);
+        tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    String old_part = fmt::format("{:04d}{:02d}{:02d}_2_200_2",
+        tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
 
     for (int i = 0; i < 3; i++)
     {
         String seg = fmt::format("test-uuid-0000-0000-0000-00000000000c/{}/col.bin/offset_{}", recent_part, i);
         String data = "test data";
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false);
+        cache.set(seg, buf, data.size(), false, now - 1800);
     }
-
-    // Add old entries (will be cached initially but evicted later)
-    struct tm tm_old;
-    time_t old_time = now - (2 * 60 * 60);
-    gmtime_r(&old_time, &tm_old);
-    String old_part = fmt::format("{:04d}{:02d}{:02d}_1_100_2",
-        tm_old.tm_year + 1900, tm_old.tm_mon + 1, tm_old.tm_mday);
 
     for (int i = 0; i < 2; i++)
     {
         String seg = fmt::format("test-uuid-0000-0000-0000-00000000000c/{}/col.bin/offset_{}", old_part, i);
         String data = "test data";
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false);
+        cache.set(seg, buf, data.size(), false, now - 7200);
     }
 
     auto stats_before = cache.getStats();
-    size_t entries_before = stats_before.total_entries;
+    ASSERT_EQ(stats_before.total_entries, 5u);
 
-    // Wait for eviction
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Shrink TTL to 60 min: old entries' max_time (now-7200 > 3600s) are now expired
+    cache.updateSettings(60, 0);
+    cache.evictExpired();
 
     auto stats_after = cache.getStats();
-
-    // Old entries should be evicted
-    ASSERT_LT(stats_after.total_entries, entries_before);
-    ASSERT_GT(stats_after.evicted_expired, 0);
-    ASSERT_GT(stats_after.last_eviction_run, 0);
+    ASSERT_LT(stats_after.total_entries, stats_before.total_entries);
+    ASSERT_GT(stats_after.evicted_expired, 0u);
+    ASSERT_GT(stats_after.last_eviction_run, 0u);
 }
 
 // Test per-partition hit rate calculation
@@ -724,7 +716,7 @@ TEST_F(DiskCacheTTLTest, PartitionHitRate)
         String seg = fmt::format("test-uuid-0000-0000-0000-00000000000d/{}/col.bin/offset_{}", part, i);
         String data = "test";
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false);
+        cache.set(seg, buf, data.size(), false, now);
     }
 
     // Hit 7 segments, miss 3
@@ -784,7 +776,7 @@ TEST_F(DiskCacheTTLTest, AsyncSizeBasedEviction)
 
         String data = String(segment_size, 'a');
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false);
+        cache.set(seg, buf, data.size(), false, now);
     }
 
     auto stats_before = cache.getStats();
@@ -799,7 +791,7 @@ TEST_F(DiskCacheTTLTest, AsyncSizeBasedEviction)
 
         String data = String(segment_size, 'a');
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false);
+        cache.set(seg, buf, data.size(), false, now);
     }
 
     // Check that async eviction was triggered
@@ -821,7 +813,7 @@ TEST_F(DiskCacheTTLTest, AsyncSizeBasedEviction)
 
         String data = String(segment_size, 'a');
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false);
+        cache.set(seg, buf, data.size(), false, now);
     }
 
     // Should be rate limited (still 1 trigger, but skipped counter increased)
@@ -870,7 +862,7 @@ TEST_F(DiskCacheTTLTest, ExplicitTimestamps)
         ReadBufferFromString buf(data);
 
         time_t recent_max_time = now - (30 * 60); // 30 minutes ago (within TTL)
-        cache.set(seg, buf, data.size(), false, 0, recent_max_time);
+        cache.set(seg, buf, data.size(), false, recent_max_time);
 
         auto [disk, path] = cache.get(seg);
         ASSERT_FALSE(path.empty()); // Should BE cached (explicit max_time is recent)
@@ -883,7 +875,7 @@ TEST_F(DiskCacheTTLTest, ExplicitTimestamps)
         ReadBufferFromString buf(data);
 
         time_t old_max_time = now - (90 * 60); // 90 minutes ago (outside TTL)
-        cache.set(seg, buf, data.size(), false, 0, old_max_time);
+        cache.set(seg, buf, data.size(), false, old_max_time);
 
         auto [disk, path] = cache.get(seg);
         ASSERT_TRUE(path.empty()); // Should NOT be cached (explicit max_time is old)
@@ -912,7 +904,7 @@ TEST_F(DiskCacheTTLTest, PreloadQueryStats)
         String seg = fmt::format("test-uuid-0000-0000-0000-000000000011/{}/col.bin/offset_0", part);
         String data = String(100, 'a');
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false); // is_preload=false
+        cache.set(seg, buf, data.size(), false, now); // is_preload=false
 
         auto stats = cache.getStats();
         ASSERT_EQ(stats.cached_from_query, 1);
@@ -926,7 +918,7 @@ TEST_F(DiskCacheTTLTest, PreloadQueryStats)
         String seg = fmt::format("test-uuid-0000-0000-0000-000000000011/{}/col.bin/offset_1", part);
         String data = String(200, 'b');
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), true); // is_preload=true
+        cache.set(seg, buf, data.size(), true, now); // is_preload=true
 
         auto stats = cache.getStats();
         ASSERT_EQ(stats.cached_from_query, 1);
@@ -940,7 +932,7 @@ TEST_F(DiskCacheTTLTest, PreloadQueryStats)
         String seg = fmt::format("test-uuid-0000-0000-0000-000000000011/{}/col.bin/offset_2", part);
         String data = String(50, 'c');
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false); // is_preload=false
+        cache.set(seg, buf, data.size(), false, now); // is_preload=false
 
         auto stats = cache.getStats();
         ASSERT_EQ(stats.cached_from_query, 2);
@@ -975,7 +967,7 @@ TEST_F(DiskCacheTTLTest, UnlimitedPerTable)
         String seg = fmt::format("test-uuid-0000-0000-0000-000000000012/{}/col.bin/offset_{}", part, i);
         String data = String(1024, 'x');
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false);
+        cache.set(seg, buf, data.size(), false, now);
     }
 
     // Verify cached (no per-table eviction triggered)
@@ -1013,7 +1005,7 @@ TEST_F(DiskCacheTTLTest, SizeLimitPrecedence)
             String seg = fmt::format("test-uuid-0000-0000-0000-000000000013/{}/col.bin/offset_{}", part, i);
             String data = String(segment_size, 'a');
             ReadBufferFromString buf(data);
-            cache.set(seg, buf, data.size(), false);
+            cache.set(seg, buf, data.size(), false, now);
         }
 
         // Should trigger eviction at 1MB limit, not 10MB
@@ -1039,7 +1031,7 @@ TEST_F(DiskCacheTTLTest, SizeLimitPrecedence)
             String seg = fmt::format("test-uuid-0000-0000-0000-000000000014/{}/col.bin/offset_{}", part, i);
             String data = String(segment_size, 'b');
             ReadBufferFromString buf(data);
-            cache.set(seg, buf, data.size(), false);
+            cache.set(seg, buf, data.size(), false, now);
         }
 
         // Should trigger eviction at 10MB limit
@@ -1068,7 +1060,7 @@ TEST_F(DiskCacheTTLTest, SizeLimitPrecedence)
             String seg = fmt::format("test-uuid-0000-0000-0000-000000000015/{}/col.bin/offset_{}", part, i);
             String data = String(1024, 'c');
             ReadBufferFromString buf(data);
-            cache.set(seg, buf, data.size(), false);
+            cache.set(seg, buf, data.size(), false, now);
         }
 
         // No per-table eviction (unlimited, only constrained by global)
@@ -1189,7 +1181,7 @@ TEST_P(SegmentPrefixTest, SetGoesToCorrectDir)
     String seg = makeSegKey("aaaa-bbbb", todayPart(), "col", p.ext);
     String data = "payload";
     ReadBufferFromString buf(data);
-    cache.set(seg, buf, data.size(), false);
+    cache.set(seg, buf, data.size(), false, time(nullptr));
 
     auto [disk, path] = cache.get(seg);
     ASSERT_FALSE(path.empty()) << "segment not found after set: " << seg;
@@ -1212,7 +1204,7 @@ TEST_P(SegmentPrefixTest, GetReturnsExistingFile)
     String seg = makeSegKey("aaaa-bbbb", todayPart(), "col", p.ext);
     String data = "payload";
     ReadBufferFromString buf(data);
-    cache.set(seg, buf, data.size(), false);
+    cache.set(seg, buf, data.size(), false, time(nullptr));
 
     // get() must return a path that actually contains the prefix and the file
     auto [disk, path] = cache.get(seg);
@@ -1229,19 +1221,20 @@ TEST_P(SegmentPrefixTest, EvictRemovesFromDisk)
     DiskCacheSettings settings;
     settings.ttl_cache_max_size = 64 * 1024 * 1024;
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
-    // 1-minute TTL — 2-day-old part is expired
-    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, 1, 0);
+    // Large TTL so we can insert old entry, then shrink to 1 min to test eviction
+    DiskCacheTTL cache("test-cache", "test-uuid", volume, nullptr, settings, strategy, 60 * 24 * 365, 0);
 
     time_t old_ts = time(nullptr) - 2 * 24 * 3600;
     String seg = makeSegKey("aaaa-bbbb", expiredPart(), "col", p.ext);
     String data = "payload";
     ReadBufferFromString buf(data);
-    cache.set(seg, buf, data.size(), false, 0, old_ts);
+    cache.set(seg, buf, data.size(), false, old_ts);
 
     ASSERT_EQ(cache.getKeyCount(), 1);
     auto [disk, path] = cache.get(seg);
     ASSERT_TRUE(disk && disk->exists(path)) << "file should exist before eviction: " << path;
 
+    cache.updateSettings(1, 0);  // shrink TTL to 1 min: 2-day-old entry is now expired
     cache.evictExpired();
 
     EXPECT_EQ(cache.getKeyCount(), 0);
@@ -1275,7 +1268,7 @@ TEST_F(DiskCacheTTLTest, ReconcileRestoresAllTypesWithCorrectRelPath)
         String seg = makeSegKey(uuid, part, "col", c.ext);
         String data = "payload";
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false, 0, now);
+        cache.set(seg, buf, data.size(), false, now);
         auto [disk, path] = cache.get(seg);
         ASSERT_FALSE(path.empty()) << "failed to cache: " << seg;
         EXPECT_NE(path.find(c.expected_prefix), String::npos)
@@ -1309,7 +1302,7 @@ TEST_F(DiskCacheTTLTest, ReconcileRestoresAllTypesWithCorrectRelPath)
         get_rel_path,
         [](time_t) { return true; },
         [&cache_map](TTLCacheFDBIndex::ReconcileBatch & batch) {
-            for (auto & [key, meta] : batch)
+            for (auto & [key, meta, pid] : batch)
                 cache_map[key] = meta;
         }
     );
@@ -1426,7 +1419,7 @@ TEST_F(DiskCacheTTLTest, EvictExpiredNoOpKeepsPartitionStats)
         String seg = fmt::format("{}/{}/col.bin/offset_{}", uuid, part, i);
         String data(100, 'a');
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false);
+        cache.set(seg, buf, data.size(), false, now);
     }
     ASSERT_EQ(cache.getKeyCount(), 4);
 
@@ -1463,7 +1456,7 @@ TEST_F(DiskCacheTTLTest, SizeLimitEvictionUpdatesPartitionStats)
     auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
 
     // ttl_minutes=0: no TTL rejection so we can use different-day partitions freely
-    DiskCacheTTL cache("test_size_pstats", "test-uuid-size", volume, nullptr, settings, strategy, 0, 100 * 1024 * 1024);
+    DiskCacheTTL cache("test_size_pstats", "test-uuid-size", volume, nullptr, settings, strategy, 60 * 24 * 2, 100 * 1024 * 1024);
 
     time_t now = time(nullptr);
     time_t yesterday = now - 25 * 3600;  // definitely the previous calendar day
@@ -1488,14 +1481,14 @@ TEST_F(DiskCacheTTLTest, SizeLimitEvictionUpdatesPartitionStats)
         String seg = fmt::format("{}/{}/col.bin/offset_{}", uuid, yest_part, i);
         String data(seg_size, 'y');
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false);
+        cache.set(seg, buf, data.size(), false, yesterday);
     }
     for (int i = 0; i < 3; i++)
     {
         String seg = fmt::format("{}/{}/col.bin/offset_{}", uuid, today_part, i);
         String data(seg_size, 't');
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false);
+        cache.set(seg, buf, data.size(), false, now);
     }
 
     ASSERT_EQ(cache.getKeyCount(), 7);
@@ -1526,18 +1519,15 @@ TEST_F(DiskCacheTTLTest, SizeLimitEvictionUpdatesPartitionStats)
 
     {
         auto pstats = cache.getPartitionStats();
+        bool found_yest = false;
+        bool found_today = false;
         for (const auto & ps : pstats)
         {
-            if (ps.partition_id == yest_pid)
-            {
-                ASSERT_EQ(ps.entry_count, 0u) << "yesterday partition should be empty after eviction";
-                ASSERT_EQ(ps.total_bytes,  0u);
-            }
-            if (ps.partition_id == today_pid)
-            {
-                ASSERT_EQ(ps.entry_count, 3u) << "today partition should be untouched";
-            }
+            if (ps.partition_id == yest_pid)  found_yest = true;
+            if (ps.partition_id == today_pid) { found_today = true; ASSERT_EQ(ps.entry_count, 3u) << "today partition should be untouched"; }
         }
+        ASSERT_FALSE(found_yest)  << "yesterday partition should be removed from stats after full eviction";
+        ASSERT_TRUE(found_today)  << "today partition should still be present";
     }
 }
 
@@ -1664,7 +1654,7 @@ TEST_F(DiskCacheTTLTest, DropEvictsFDBEntries)
         String seg = makeSegKey(uuid, part, fmt::format("col{}", i), ".bin");
         String data(seg_bytes, 'a');
         ReadBufferFromString buf(data);
-        cache.set(seg, buf, data.size(), false, 0, now);
+        cache.set(seg, buf, data.size(), false, now);
 
         // Seed FDB store manually (batchWrite in MockMetaStore is a no-op).
         // hexKey layout: first 16 chars = hex(items[1]=low), last 16 = hex(items[0]=high).
@@ -1751,6 +1741,166 @@ TEST_F(DiskCacheTTLTest, LoadClearsDCIOnEmptyDir)
 
     // cache_map must be empty — no stale entries loaded.
     EXPECT_EQ(cache.getKeyCount(), 0u) << "cache_map should be empty after emptyDir wipe";
+}
+
+// Verify evictOldestPartitionsUntilSpace evicts multiple partitions oldest-first
+// and leaves the newest partition intact. Tests the single-pass shard scan logic.
+TEST_F(DiskCacheTTLTest, SizeLimitEvictionMultiplePartitions)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 10 * 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    DiskCacheTTL cache("test_multi_part_evict", "test-uuid-mpe", volume, nullptr, settings, strategy, 60 * 24 * 30, 0);
+
+    time_t now = time(nullptr);
+    // Three partitions: 3 days ago, 2 days ago, today
+    time_t t_old  = now - 3 * 24 * 3600;
+    time_t t_mid  = now - 2 * 24 * 3600;
+    time_t t_new  = now;
+
+    struct tm tm_old, tm_mid, tm_new;
+    gmtime_r(&t_old, &tm_old);
+    gmtime_r(&t_mid, &tm_mid);
+    gmtime_r(&t_new, &tm_new);
+
+    String pid_old = fmt::format("{:04d}{:02d}{:02d}", tm_old.tm_year + 1900, tm_old.tm_mon + 1, tm_old.tm_mday);
+    String pid_mid = fmt::format("{:04d}{:02d}{:02d}", tm_mid.tm_year + 1900, tm_mid.tm_mon + 1, tm_mid.tm_mday);
+    String pid_new = fmt::format("{:04d}{:02d}{:02d}", tm_new.tm_year + 1900, tm_new.tm_mon + 1, tm_new.tm_mday);
+
+    if (pid_old == pid_mid || pid_mid == pid_new)
+        GTEST_SKIP() << "test requires three distinct calendar days (running near midnight boundary)";
+
+    const String uuid = "test-uuid-mpe";
+    const size_t seg_size = 512;
+
+    // 2 segments in oldest partition
+    for (int i = 0; i < 2; i++)
+    {
+        String part = fmt::format("{}_{}_200_2", pid_old, i + 1);
+        String seg  = fmt::format("{}/{}/col.bin/0", uuid, part);
+        String data(seg_size, 'o');
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false, t_old);
+    }
+    // 3 segments in middle partition
+    for (int i = 0; i < 3; i++)
+    {
+        String part = fmt::format("{}_{}_200_2", pid_mid, i + 1);
+        String seg  = fmt::format("{}/{}/col.bin/0", uuid, part);
+        String data(seg_size, 'm');
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false, t_mid);
+    }
+    // 4 segments in newest partition
+    for (int i = 0; i < 4; i++)
+    {
+        String part = fmt::format("{}_{}_200_2", pid_new, i + 1);
+        String seg  = fmt::format("{}/{}/col.bin/0", uuid, part);
+        String data(seg_size, 'n');
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false, t_new);
+    }
+
+    ASSERT_EQ(cache.getKeyCount(), 9u);
+
+    // Evict enough to free the 2 oldest partitions (2 + 3 = 5 segments = 5 * seg_size bytes).
+    // Request slightly more than the middle partition alone to force both old + mid to be evicted.
+    cache.evictOldestPartitionsUntilSpace(5 * seg_size);
+
+    ASSERT_EQ(cache.getKeyCount(), 4u) << "only newest partition should remain";
+
+    auto gstats = cache.getStats();
+    ASSERT_EQ(gstats.total_entries,      4u);
+    ASSERT_EQ(gstats.total_bytes,        4 * seg_size);
+    ASSERT_EQ(gstats.evicted_size_limit, 5u);
+
+    auto pstats = cache.getPartitionStats();
+    bool found_old = false, found_mid = false, found_new = false;
+    for (const auto & ps : pstats)
+    {
+        if (ps.partition_id == pid_old) found_old = true;
+        if (ps.partition_id == pid_mid) found_mid = true;
+        if (ps.partition_id == pid_new) { found_new = true; ASSERT_EQ(ps.entry_count, 4u); }
+    }
+    ASSERT_FALSE(found_old) << "oldest partition should be evicted";
+    ASSERT_FALSE(found_mid) << "middle partition should be evicted";
+    ASSERT_TRUE(found_new)  << "newest partition should remain";
+}
+
+// Race A guard: size-eviction removes only the exact files it tracked, never the whole
+// partition directory. A file that the eviction snapshot doesn't know about (e.g. one a
+// concurrent set() just wrote into the same partition dir) must survive.
+TEST_F(DiskCacheTTLTest, SizeEvictionPreservesUntrackedFilesInPartitionDir)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 10 * 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+    const String uuid = "test-uuid-stray";
+    DiskCacheTTL cache("test_evict_stray", uuid, volume, nullptr, settings, strategy, 60 * 24 * 30, 0);
+
+    time_t now = time(nullptr);
+    time_t t_old = now - 3 * 24 * 3600;
+    struct tm tm_old, tm_new;
+    gmtime_r(&t_old, &tm_old);
+    gmtime_r(&now, &tm_new);
+    String pid_old = fmt::format("{:04d}{:02d}{:02d}", tm_old.tm_year + 1900, tm_old.tm_mon + 1, tm_old.tm_mday);
+    String pid_new = fmt::format("{:04d}{:02d}{:02d}", tm_new.tm_year + 1900, tm_new.tm_mon + 1, tm_new.tm_mday);
+    if (pid_old == pid_new)
+        GTEST_SKIP() << "test requires two distinct calendar days (running near midnight boundary)";
+
+    const size_t seg_size = 512;
+
+    // Old partition (one part, 2 segments) — will be evicted.
+    String old_part = fmt::format("{}_1_100_2", pid_old);
+    std::vector<String> old_segs;
+    for (int i = 0; i < 2; i++)
+    {
+        String seg = fmt::format("{}/{}/col.bin/offset_{}", uuid, old_part, i);
+        old_segs.push_back(seg);
+        String data(seg_size, 'o');
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false, t_old);
+    }
+    // New partition — kept.
+    String new_part = fmt::format("{}_1_100_2", pid_new);
+    for (int i = 0; i < 2; i++)
+    {
+        String seg = fmt::format("{}/{}/col.bin/offset_{}", uuid, new_part, i);
+        String data(seg_size, 'n');
+        ReadBufferFromString buf(data);
+        cache.set(seg, buf, data.size(), false, now);
+    }
+    ASSERT_EQ(cache.getKeyCount(), 4u);
+
+    // Locate the old partition's on-disk dir from a cached segment's path:
+    // <...>/data/<uuid>/<pid_old>/<hex3>/<hexhigh>/<hexlow> → partition dir is 3 levels up.
+    auto [disk, old_seg_path] = cache.get(old_segs[0]);
+    ASSERT_TRUE(disk && disk->exists(old_seg_path));
+    fs::path pid_dir = fs::path(old_seg_path).parent_path().parent_path().parent_path();
+
+    // Drop an untracked file straight into the partition dir.
+    String stray = (pid_dir / "stray.bin").string();
+    {
+        auto wb = disk->writeFile(stray);
+        wb->write("stray", 5);
+        wb->finalize();
+    }
+    ASSERT_TRUE(disk->exists(stray));
+
+    // Evict the old partition (free its 2 segments).
+    cache.evictOldestPartitionsUntilSpace(2 * seg_size);
+
+    EXPECT_EQ(cache.getKeyCount(), 2u) << "old partition evicted, new partition kept";
+    for (const auto & seg : old_segs)
+    {
+        auto [d, p] = cache.get(seg);
+        EXPECT_TRUE(p.empty()) << "old segment should be evicted: " << seg;
+    }
+    // The untracked file survives — exact-file removal never touched it.
+    EXPECT_TRUE(disk->exists(stray)) << "untracked file in partition dir must survive exact-file eviction";
 }
 
 } // namespace DB

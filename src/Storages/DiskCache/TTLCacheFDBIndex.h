@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <tuple>
 #include <utility>
 
 #include <Catalog/IMetastore.h>
@@ -42,10 +43,11 @@ public:
     ~TTLCacheFDBIndex();
 
     /// Enqueue async FDB write after a segment is successfully cached.
-    void onSet(UInt128 key, const String & seg_name, size_t size, time_t part_ts);
+    /// partition_id must be the same value the rest of the cache uses for this segment
+    void onSet(UInt128 key, const String & seg_name, size_t size, time_t part_ts, const String & partition_id);
 
-    /// Issue FDB clean() for all segments of one part (hash_high).
-    /// partition_id: YYYYMMDD string derived from max_timestamp (same as path structure).
+    /// Issue FDB clean() for all segments of one part.
+    /// partition_id: same derivation used at onSet().
     void evictPart(const String & partition_id, UInt64 hash_high);
 
     /// Issue FDB clean() for all entries of this table (forward + reverse index).
@@ -66,7 +68,10 @@ public:
     /// Calls on_stats_update for each successfully restored entry so the
     /// caller can update partition_stats without re-scanning cache_map
     /// Returns {entries, bytes} restored, or nullopt if index is empty/unavailable.
-    using ReconcileBatch = std::vector<std::pair<UInt128, std::shared_ptr<DiskCacheTTLMeta>>>;
+    /// Each entry carries the partition_id parsed from its FDB key, so the restored
+    /// in-memory partition_id matches what onSet() wrote.
+    /// Only applicable for disks that persist accross restarts.
+    using ReconcileBatch = std::vector<std::tuple<UInt128, std::shared_ptr<DiskCacheTTLMeta>, String>>;
 
     std::optional<std::pair<size_t, size_t>> reconcile(
         const VolumePtr & volume,

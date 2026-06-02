@@ -38,6 +38,7 @@ struct WriteFile
     String path{};
     UInt64 offset{0};
     UInt64 length{0};
+    time_t max_time{0};
 };
 
 class DataStreamReader

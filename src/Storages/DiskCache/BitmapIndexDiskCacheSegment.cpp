@@ -48,6 +48,7 @@ void BitmapIndexDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool)
     std::unique_ptr<ReadBufferFromFileBase> segment_file = disk->readFile(
         data_path, read_settings
     );
+    time_t max_time = data_part->getMinMaxTime().second;
 
     // try cache idx file
     String index_key = getSegmentName();
@@ -60,7 +61,7 @@ void BitmapIndexDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool)
 
         segment_file->seek(index_offset);
         LimitReadBuffer index_value(*segment_file, index_size, false);
-        disk_cache.set(index_key, index_value, index_size, false);
+        disk_cache.set(index_key, index_value, index_size, false, max_time);
 
         LOG_TRACE(log, "Cached local cache for BitmapIndex {}#{}{} of column ", part_name, stream_name, extension);
     }
@@ -76,7 +77,7 @@ void BitmapIndexDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool)
 
         segment_file->seek(mark_offset);
         LimitReadBuffer mark_value(*segment_file, mark_size, false);
-        disk_cache.set(mark_key, mark_value, mark_size, false);
+        disk_cache.set(mark_key, mark_value, mark_size, false, max_time);
 
         LOG_TRACE(log, "Cached local cache for BitmapIndex {}#{}{} of column ", part_name, stream_name, BITMAP_IRK_EXTENSION);
     }

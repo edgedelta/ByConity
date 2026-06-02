@@ -84,13 +84,10 @@ bool TTLCacheFDBIndex::decodeValue(const String & raw, String & seg_name, size_t
     catch (...) { return false; }
 }
 
-void TTLCacheFDBIndex::onSet(UInt128 key, const String & seg_name, size_t size, time_t part_ts)
+void TTLCacheFDBIndex::onSet(UInt128 key, const String & seg_name, size_t size, time_t part_ts, const String & partition_id)
 {
-    // partition_id is the YYYYMMDD component of the file path, derived from part_ts
-    struct tm t{};
-    gmtime_r(&part_ts, &t);
-    String partition_id = fmt::format("{:04d}{:02d}{:02d}", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
-
+    // partition_id is supplied by the caller so the keys we write here match
+    // the prefixes used by evictPart and the reverse-key lookup in findPeerOwner.
     PendingOp fwd;
     fwd.type  = PendingOp::Type::Set;
     fwd.key   = makeSegKey(key, partition_id);
@@ -278,6 +275,18 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
             last_key = it->key();
             page_count++;
 
+            // Parse partition_id back out of the key (key_prefix + "_" + partition_id + "_" + ...).
+            // partition_id never contains '_', so this round-trips exactly what onSet() wrote,
+            // keeping the restored in-memory partition_id consistent with eviction/peer lookups.
+            String partition_id;
+            if (last_key.size() > key_prefix.size() + 1)
+            {
+                String tail = last_key.substr(key_prefix.size() + 1);
+                auto us = tail.find('_');
+                if (us != String::npos)
+                    partition_id = tail.substr(0, us);
+            }
+
             String seg_name;
             size_t size{0};
             time_t part_ts{0};
@@ -304,7 +313,8 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
             // For now assume single-disk volume (one PVC per pod) and trust FDB as authoritative,
             // skipping the per-file exists() syscall (too costly at millions of entries).
             page.emplace_back(key, std::make_shared<DiskCacheTTLMeta>(
-                DiskCacheTTLMeta::State::Cached, disks[0], size, time(nullptr), part_ts, rel_path.string()));
+                DiskCacheTTLMeta::State::Cached, disks[0], size, time(nullptr), part_ts, rel_path.string()),
+                partition_id);
             page_bytes += size;
         }
 
@@ -314,7 +324,7 @@ std::optional<std::pair<size_t, size_t>> TTLCacheFDBIndex::reconcile(
             DiskCacheFactory::instance().addGlobalTTLUsage(page_bytes);
             if (on_stats_update)
             {
-                for (const auto & [key, meta] : page)
+                for (const auto & [key, meta, pid] : page)
                     on_stats_update(meta->max_timestamp, meta->size);
             }
         }

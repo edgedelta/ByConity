@@ -74,6 +74,11 @@ static constexpr auto DISK_CACHE_TEMP_FILE_SUFFIX = ".temp";
 static constexpr auto META_DISK_CACHE_DIR_PREFIX = "meta";
 static constexpr auto DATA_DISK_CACHE_DIR_PREFIX = "data";
 
+// On a size-eviction we deliberately free the overflow PLUS this fraction of the cap, so a
+// cache sitting right at the limit under steady writes doesn't evict-on-every-set. Combined
+// with the 10s trigger rate-limit, this bounds eviction churn.
+static constexpr double SIZE_EVICTION_HEADROOM_FRACTION = 0.10;
+
 namespace
 {
     constexpr size_t HEX_KEY_LEN = sizeof(DiskCacheTTL::KeyType) * 2;
@@ -435,17 +440,33 @@ void DiskCacheTTL::subtractFromPartitionStats(const CacheEraseResult & result)
 {
     if (result.count == 0)
         return;
-    // shared_lock suffices: we only decrement existing atomics, no map insert/rehash.
-    std::shared_lock<std::shared_mutex> lk(cache_stats.partition_stats_mutex);
-    auto it = cache_stats.partition_stats.find(result.partition_id);
-    if (it == cache_stats.partition_stats.end())
+
+    // Single chokepoint for every eviction/drop path, consistent everywhere.
+    bool emptied = false;
+    {
+        // Fast path stays on shared_lock so eviction decrements never block set()'s concurrent
+        // addToPartitionStats increments.
+        std::shared_lock<std::shared_mutex> lk(cache_stats.partition_stats_mutex);
+        auto it = cache_stats.partition_stats.find(result.partition_id);
+        if (it == cache_stats.partition_stats.end())
+            return;
+        size_t prev_count = it->second.entry_count.fetch_sub(result.count);
+        it->second.total_bytes.fetch_sub(result.bytes);
+        emptied = (prev_count == result.count);  // reached exactly 0
+    }
+
+    if (!emptied)
         return;
-    auto & ps = it->second;
-    ps.entry_count -= result.count;
-    ps.total_bytes -= result.bytes;
+
+    // Rare: the partition's last entry was evicted. Take the exclusive lock only now to erase,
+    // re-checking under the lock so a concurrent set() that re-populated it is preserved.
+    std::unique_lock<std::shared_mutex> lk(cache_stats.partition_stats_mutex);
+    auto it = cache_stats.partition_stats.find(result.partition_id);
+    if (it != cache_stats.partition_stats.end() && it->second.entry_count.load() == 0)
+        cache_stats.partition_stats.erase(it);
 }
 
-void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload, time_t /*min_time*/, time_t max_time)
+void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload, time_t max_time)
 {
     if (is_droping)
     {
@@ -544,7 +565,7 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
         addToPartitionStats(partition_id, part_ts, weight);
 
         if (fdb_index)
-            fdb_index->onSet(key, seg_name, weight, part_ts);
+            fdb_index->onSet(key, seg_name, weight, part_ts, partition_id);
 
         // Async size-based eviction once the hard cap is exceeded.
         // max_size_bytes is always set (factory falls back to global limit when no per-table limit
@@ -561,7 +582,7 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
                 if (last_size_eviction_trigger.compare_exchange_strong(last_trigger, now))
                 {
                     size_t excess = total_size.load() - max_size_bytes;
-                    size_t target_free = excess + max_size_bytes * 0.10;
+                    size_t target_free = excess + max_size_bytes * SIZE_EVICTION_HEADROOM_FRACTION;
                     cache_stats.async_eviction_triggered++;
                     LOG_DEBUG(log, "Table cache {}% full, scheduling async eviction to free {} bytes",
                              (total_size.load() * 100 / max_size_bytes), target_free);
@@ -599,10 +620,10 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
     SCOPE_EXIT({ProfileEvents::increment(ProfileEvents::DiskCacheGetMetaMicroSeconds,
         watch.elapsedMicroseconds());});
 
-    // Periodic eviction check (every 5 minutes)
+    // Periodic eviction check
     time_t now = time(nullptr);
     time_t last_check = last_eviction_check.load();
-    if (now - last_check > 300)
+    if (now - last_check > 60)
     {
         if (last_eviction_check.compare_exchange_strong(last_check, now))
         {
@@ -764,62 +785,57 @@ void DiskCacheTTL::evictOldestPartitionsUntilSpace(size_t needed_bytes)
 {
     size_t cur = total_size.load();
     size_t target_size = cur > needed_bytes ? cur - needed_bytes : 0;
+    if (cur <= target_size)
+        return;
 
     LOG_DEBUG(log, "Size eviction: current={}, needed={}, target={}", cur, needed_bytes, target_size);
 
-    size_t total_evicted = 0;
-    size_t evicted_bytes = 0;
-
-    for (auto & shard : shards)
+    // Snapshot every part as (partition_ts, shard, hash_high) under short per-shard read
+    // locks. partition_ts is per-part, so sorting on it directly gives a globally correct
+    // oldest-first order with no representative-timestamp guesswork.
+    struct PartRef { time_t ts; size_t shard; UInt64 hash_high; };
+    std::vector<PartRef> parts;
+    for (size_t s = 0; s < shards.size(); ++s)
     {
-        if (total_size.load() <= target_size)
+        std::shared_lock<std::shared_mutex> lock(shards[s].mutex);
+        parts.reserve(parts.size() + shards[s].part_index.size());
+        for (const auto & [hash_high, entry] : shards[s].part_index)
+            parts.push_back({entry.partition_ts, s, hash_high});
+    }
+    std::sort(parts.begin(), parts.end(), [](const PartRef & a, const PartRef & b) { return a.ts < b.ts; });
+
+    // Evict oldest parts one at a time until we'd be under target. cacheErasePartLocked does
+    // all the per-part bookkeeping (cache_map + part_index erase, exact file list); a part
+    // removed between snapshot and now returns count==0 and is skipped.
+    std::vector<CacheEraseResult> erased;
+    size_t freed = 0;
+    for (const auto & p : parts)
+    {
+        if (cur - freed <= target_size)
             break;
-
-        // Snapshot part timestamps under a short lock — no allocations, just push_backs.
-        std::vector<std::pair<time_t, UInt64>> by_ts; // (partition_ts, hash_high)
+        std::unique_lock<std::shared_mutex> lock(shards[p.shard].mutex);
+        auto r = cacheErasePartLocked(shards[p.shard], p.hash_high);
+        if (r.count > 0)
         {
-            std::unique_lock<std::shared_mutex> lock(shard.mutex);
-            by_ts.reserve(shard.part_index.size());
-            for (const auto & [hash_high, entry] : shard.part_index)
-                by_ts.emplace_back(entry.partition_ts, hash_high);
+            total_entries -= r.count;
+            total_size -= r.bytes;
+            freed += r.bytes;
+            erased.push_back(std::move(r));
         }
-
-        // Sort oldest-first outside the lock.
-        std::sort(by_ts.begin(), by_ts.end());
-
-        // Evict under a second lock. Parts may have been removed between the two locks;
-        // cacheErasePartLocked returns count=0 for missing entries and is skipped.
-        std::vector<CacheEraseResult> erase_results;
-        {
-            std::unique_lock<std::shared_mutex> lock(shard.mutex);
-            size_t current_size = total_size.load();
-            for (auto & [ts, hash_high] : by_ts)
-            {
-                if (current_size <= target_size)
-                    break;
-
-                auto result = cacheErasePartLocked(shard, hash_high);
-                if (result.count > 0)
-                {
-                    total_entries -= result.count;
-                    total_size -= result.bytes;
-                    current_size -= result.bytes;
-                    evicted_bytes += result.bytes;
-                    erase_results.push_back(std::move(result));
-                }
-            }
-        }
-
-        applyEraseResults(erase_results, total_evicted, "Failed to evict segment for size limit");
     }
+    if (erased.empty())
+        return;
 
-    if (total_evicted > 0)
-    {
-        cache_stats.evicted_size_limit += total_evicted;
-        DiskCacheFactory::instance().releaseGlobalTTL(evicted_bytes);
-        LOG_INFO(log, "Evicted {} segments from oldest parts for size limit, freed {} bytes",
-                 total_evicted, evicted_bytes);
-    }
+    // Remove the exact files, evict each part from FDB, and decrement partition stats —
+    // all via the shared helper used by evictExpired/drop (per-file removeFileIfExists, so a
+    // concurrent set() in the same partition dir is never collateral-deleted; subtractFrom-
+    // PartitionStats drops a partition's stats row once its last part is evicted).
+    size_t total_evicted = 0;
+    applyEraseResults(erased, total_evicted, "Failed to evict segment for size limit");
+
+    cache_stats.evicted_size_limit += total_evicted;
+    DiskCacheFactory::instance().releaseGlobalTTL(freed);
+    LOG_INFO(log, "Size eviction: freed {} bytes ({} segments across {} parts)", freed, total_evicted, erased.size());
 }
 
 void DiskCacheTTL::load()
@@ -867,23 +883,24 @@ void DiskCacheTTL::load()
             [this](time_t ts) { return shouldCache(ts); },
             [this](TTLCacheFDBIndex::ReconcileBatch & batch) {
                 // Group by shard: one lock per shard instead of one per entry.
-                std::array<std::vector<std::pair<UInt128, std::shared_ptr<DiskCacheTTLMeta>>>, NUM_SHARDS> by_shard;
-                for (auto & [key, meta] : batch)
-                    by_shard[key.items[0] & (NUM_SHARDS - 1)].emplace_back(key, meta);
+                // partition_id comes from the FDB key (same value onSet wrote / eviction uses),
+                // not re-derived from max_timestamp, so it round-trips across restarts.
+                std::array<std::vector<std::tuple<UInt128, std::shared_ptr<DiskCacheTTLMeta>, String>>, NUM_SHARDS> by_shard;
+                for (auto & [key, meta, pid] : batch)
+                    by_shard[key.items[0] & (NUM_SHARDS - 1)].emplace_back(key, meta, pid);
                 for (size_t i = 0; i < NUM_SHARDS; ++i)
                 {
                     if (by_shard[i].empty())
                         continue;
                     std::unique_lock<std::shared_mutex> lock(shards[i].mutex);
-                    for (auto & [key, meta] : by_shard[i])
-                        cacheInsertLocked(shards[i], key, meta);
+                    for (auto & [key, meta, pid] : by_shard[i])
+                        cacheInsertLocked(shards[i], key, meta, pid);
                 }
 
                 // Batch stats update: one lock per unique partition instead of one per entry.
                 std::unordered_map<String, std::tuple<time_t, size_t, size_t>> stats_acc; // pid -> (ts, bytes, count)
-                for (auto & [key, meta] : batch)
+                for (auto & [key, meta, pid] : batch)
                 {
-                    auto pid = formatPartitionId(meta->max_timestamp);
                     auto & [ts, bytes, count] = stats_acc[pid];
                     ts = meta->max_timestamp;
                     bytes += meta->size;

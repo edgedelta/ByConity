@@ -53,7 +53,8 @@ void ChecksumsDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool)
     size_t file_size = write_buffer.count();
     if (auto read_buffer = write_buffer.tryGetReadBuffer())
     {
-        disk_cache.set(getSegmentName(), *read_buffer, file_size, preload_level > 0);
+        time_t max_time = data_part->getMinMaxTime().second;
+        disk_cache.set(getSegmentName(), *read_buffer, file_size, preload_level > 0, max_time);
         LOG_TRACE(disk_cache.getLogger(), "Cached checksums file: {}, preload_level: {}", getSegmentName(), preload_level);
     }
 }
@@ -103,7 +104,8 @@ void PrimaryIndexDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool)
     size_t file_size = write_buffer.count();
     if (auto read_buffer = write_buffer.tryGetReadBuffer())
     {
-        disk_cache.set(getSegmentName(), *read_buffer, file_size, preload_level > 0);
+        time_t max_time = data_part->getMinMaxTime().second;
+        disk_cache.set(getSegmentName(), *read_buffer, file_size, preload_level > 0, max_time);
         LOG_TRACE(disk_cache.getLogger(), "Cached primary index file: {}, preload_level: {}", getSegmentName(), preload_level);
     }
 }
@@ -134,7 +136,8 @@ void MetaInfoDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool)
     size_t file_size = write_buffer.count();
     if (auto read_buffer = write_buffer.tryGetReadBuffer())
     {
-        disk_cache.set(getSegmentName(), *read_buffer, file_size, preload_level > 0);
+        time_t max_time = data_part->getMinMaxTime().second;
+        disk_cache.set(getSegmentName(), *read_buffer, file_size, preload_level > 0, max_time);
         LOG_TRACE(disk_cache.getLogger(), "Cached meta_info file: {}, preload_level: {}", getSegmentName(), preload_level);
     }
 }

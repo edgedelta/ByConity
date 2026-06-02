@@ -18,6 +18,7 @@
 #include <array>
 #include <atomic>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <shared_mutex>
@@ -84,7 +85,7 @@ public:
         size_t max_size_bytes_ = 0,  // 0 = use settings.ttl_cache_max_size
         IDiskCache::DataType type_ = IDiskCache::DataType::ALL);
 
-    void set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload, time_t min_time = 0, time_t max_time = 0) override;
+    void set(const String& seg_name, ReadBuffer& value, size_t weight_hint, bool is_preload, time_t max_time = 0) override;
     std::pair<DiskPtr, String> get(const String& seg_name) override;
     void load() override;
     size_t drop(const String & part_name) override;

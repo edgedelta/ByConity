@@ -67,6 +67,8 @@ public:
     std::vector<std::pair<String, UInt64>> multiGet(const std::vector<String> &) override { return {}; }
     bool batchWrite(const Catalog::BatchCommitRequest & req, Catalog::BatchCommitResponse &) override
     {
+        for (auto & p : req.puts)
+            store[p.key] = p.value;
         for (auto & d : req.deletes)
             store.erase(d.key);
         return true;
@@ -198,7 +200,7 @@ TEST_F(TTLCacheFDBIndexTest, RestoresAllEntries)
         [&](time_t ts) { return ts > now - 3600; },
         [&](TTLCacheFDBIndex::ReconcileBatch & batch) {
             batch_calls++;
-            for (auto & [k, m] : batch) restored[k] = m;
+            for (auto & [k, m, pid] : batch) restored[k] = m;
         }
     );
 
@@ -250,7 +252,7 @@ TEST_F(TTLCacheFDBIndexTest, StaleEntriesCleanedFromFDB)
         [&](UInt128 key, const String & seg) { return cache.getRelativePath(key, seg); },
         [&](time_t ts) { return ts > now - 3600; }, // only very recent
         [&](TTLCacheFDBIndex::ReconcileBatch & batch) {
-            for (auto & [k, m] : batch) restored[k] = m;
+            for (auto & [k, m, pid] : batch) restored[k] = m;
         }
     );
 
@@ -303,7 +305,7 @@ TEST_F(TTLCacheFDBIndexTest, PaginationRestoresAllEntries)
         [&](time_t ts) { return ts > now - 3600; },
         [&](TTLCacheFDBIndex::ReconcileBatch & batch) {
             batch_calls++;
-            for (auto & [k, m] : batch) restored[k] = m;
+            for (auto & [k, m, pid] : batch) restored[k] = m;
         }
     );
 
@@ -396,6 +398,95 @@ TEST_F(TTLCacheFDBIndexTest, EvictTableClearsAllEntries)
     for (auto & [k, v] : mock->store)
         if (k.starts_with(other_kp)) ++other_count;
     EXPECT_EQ(other_count, 2u);
+}
+
+// ---------------------------------------------------------------------------
+// Test: onSet keys entries by the partition_id it is GIVEN, not one re-derived
+// from the timestamp. Guards the fix for non-daily partitioning (e.g. toYYYYMM),
+// where extractPartitionId(part_name) ("202403") differs from formatPartitionId(ts)
+// ("20240315") and the old re-derivation produced keys that eviction could never match.
+// ---------------------------------------------------------------------------
+
+TEST_F(TTLCacheFDBIndexTest, OnSetKeysByPassedPartitionId)
+{
+    const String uuid = "onset-pid-uuid";
+    const String ns = "ns", worker = "w1";
+    const String kp     = fmt::format("{}_DCI_{}_{}", ns, worker, uuid);
+    const String rev_kp = fmt::format("{}_DCIREV_{}", ns, uuid);
+
+    auto mock = std::make_shared<FDBMockMetaStore>();
+
+    const String month_pid = "202403";  // extractPartitionId("202403_1_100_2"), no '_', 6 digits
+    const time_t ts = time(nullptr);     // any timestamp; onSet must NOT key off it
+    String seg = fdbMakeSegKey(uuid, "202403_1_100_2", "col", ".bin");
+    auto key = DiskCacheTTL::hash(seg);
+
+    {
+        TTLCacheFDBIndex idx(mock, ns, worker, uuid, worker);
+        idx.onSet(key, seg, 64, ts, month_pid);
+    }  // destructor drains the queue → batchWrite stores the Set ops
+
+    auto countUnder = [&](const String & prefix) {
+        size_t n = 0;
+        for (auto & [k, v] : mock->store)
+            if (k.starts_with(prefix)) ++n;
+        return n;
+    };
+
+    EXPECT_EQ(countUnder(kp + "_" + month_pid + "_"), 1u)     << "forward key not under the passed partition_id";
+    EXPECT_EQ(countUnder(rev_kp + "_" + month_pid + "_"), 1u) << "reverse key not under the passed partition_id";
+
+    // The pre-fix bug keyed under formatPartitionId(ts) = today's YYYYMMDD (8 digits).
+    struct tm t;
+    gmtime_r(&ts, &t);
+    String day = fmt::format("{:04d}{:02d}{:02d}", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+    EXPECT_EQ(countUnder(kp + "_" + day + "_"), 0u) << "key wrongly derived from data day instead of partition_id";
+}
+
+// ---------------------------------------------------------------------------
+// Test: reconcile restores each entry's partition_id by parsing it back out of the
+// FDB key, so the in-memory partition_id matches what onSet wrote (and what eviction
+// uses) even across a restart and for non-daily partitions.
+// ---------------------------------------------------------------------------
+
+TEST_F(TTLCacheFDBIndexTest, ReconcileRoundTripsPartitionIdFromKey)
+{
+    auto volume = createVolume();
+    auto settings = makeSettings();
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    const String uuid = "rt-uuid";
+    const String ns = "ns", worker = "w1";
+    const String kp = fmt::format("{}_DCI_{}_{}", ns, worker, uuid);
+    const time_t now = time(nullptr);
+
+    auto mock = std::make_shared<FDBMockMetaStore>();
+
+    // Seed one realistic forward key matching makeSegKey: "<kp>_<pid>_<hex(items[0])>_<hex(items[1])>".
+    const String pid = "202403";
+    String seg = fdbMakeSegKey(uuid, "202403_1_100_2", "col", ".bin");
+    auto key = DiskCacheTTL::hash(seg);
+    String hex = DiskCacheTTL::hexKey(key);
+    String high_hex = hex.substr(16, 16);  // items[0]
+    String low_hex  = hex.substr(0, 16);   // items[1]
+    seedFDBEntry(*mock, kp, fmt::format("_{}_{}_{}", pid, high_hex, low_hex), seg, 64, now);
+
+    TTLCacheFDBIndex idx(mock, ns, worker, uuid, worker);
+    DiskCacheTTL cache("rt", uuid, volume, nullptr, settings, strategy, 60 * 24, 0);
+
+    String restored_pid;
+    size_t restored = 0;
+    auto result = idx.reconcile(
+        volume,
+        [&](UInt128 k, const String & s) { return cache.getRelativePath(k, s); },
+        [&](time_t ts) { return ts > now - 3600; },
+        [&](TTLCacheFDBIndex::ReconcileBatch & batch) {
+            for (auto & [k, m, p] : batch) { restored_pid = p; ++restored; }
+        });
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(restored, 1u);
+    EXPECT_EQ(restored_pid, pid) << "reconcile must restore the partition_id embedded in the FDB key";
 }
 
 } // namespace DB
