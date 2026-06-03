@@ -144,7 +144,8 @@ public:
         Context & context,
         const ThrottlerPtr & throttler,
         UInt64 ttl_minutes,
-        size_t max_size_bytes = 0);
+        size_t max_size_bytes = 0,
+        size_t segment_size_override = 0);
 
     /// Return a snapshot of all registered per-table TTL caches (UUID → cache ptr).
     std::unordered_map<UUID, IDiskCachePtr> getAllTableTTLCaches() const

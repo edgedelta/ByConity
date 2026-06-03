@@ -129,7 +129,8 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
     Context & context,
     const ThrottlerPtr & throttler,
     UInt64 ttl_minutes,
-    size_t max_size_bytes)
+    size_t max_size_bytes,
+    size_t segment_size_override)
 {
     Poco::Logger * log = &Poco::Logger::get("DiskCacheFactory");
     DiskCacheSettings cache_settings;
@@ -143,6 +144,12 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
     // Multiple tables should each have an explicit per-table limit; the global limit
     // is the single-table default.
     size_t effective_max_size = max_size_bytes > 0 ? max_size_bytes : cache_settings.ttl_cache_max_size;
+
+    // Align the cache segment size with the table's hybrid-allocation virtual-part size so a big part
+    // sliced across workers is cached without cross-worker duplication. 0 = keep the global default.
+    // cache_settings.segment_size is the single source of truth from here on (the strategy reads it).
+    if (segment_size_override > 0)
+        cache_settings.segment_size = segment_size_override;
 
     // Compare against effective_max_size so callers passing 0
     // don't trigger recreation of a cache that was already created with the global limit.
@@ -158,6 +165,19 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
     if (existing_cache)
     {
         auto existing = static_pointer_cast<DiskCacheTTL>(existing_cache);
+
+        // segment_size is fixed for a cache's lifetime. It lives in the strategy and re-keys every cached
+        // segment, so changing it on a live, UUID-shared cache would orphan all existing files and race
+        // with concurrent readers. It is therefore set once at creation; a later change is applied on the next worker restart or an explicit DROP DISK CACHE.
+        // ttl/max_size remain mutable in place below.
+        if (existing->getStrategy()->getSegmentSize() != cache_settings.segment_size)
+            LOG_WARNING(
+                log,
+                "TTL cache segment_size for {} (UUID: {}) differs from the table's current hybrid alignment "
+                "({} vs {} marks); keeping the existing cache. Restart the workers or DROP DISK CACHE to apply.",
+                table_name, UUIDHelpers::UUIDToString(table_uuid),
+                existing->getStrategy()->getSegmentSize(), cache_settings.segment_size);
+
         if (existing->getTTLMinutes() == ttl_minutes && existing->getMaxSizeBytes() == effective_max_size)
         {
             LOG_TRACE(log, "Reusing existing TTL cache for {} (UUID: {})", table_name, UUIDHelpers::UUIDToString(table_uuid));

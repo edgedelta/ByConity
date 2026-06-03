@@ -23,6 +23,7 @@
 #include <Interpreters/ExpressionAnalyzer.h>
 #include <Interpreters/TreeRewriter.h>
 #include <MergeTreeCommon/CnchBucketTableCommon.h>
+#include <MergeTreeCommon/assignCnchParts.h>
 #include <Processors/Pipe.h>
 #include <Processors/Sources/SourceFromInputStream.h>
 #include <Processors/Sources/NullSource.h>
@@ -112,18 +113,28 @@ IDiskCachePtr StorageCloudMergeTree::getDiskCache() const
     {
         if (getSettings()->disk_cache_ttl_hours.value > 0)
         {
+            auto st = getSettings();
+            // When hybrid allocation slices big parts across workers, align the cache segment size to the
+            // virtual-part size so each segment is owned by one worker, preventing cross-worker duplication.
+            // Derived from TABLE settings.
+            // It cannot track per-query allocation decisions: a session-level `min_rows_per_virtual_part`
+            // override or the `part_to_vw_size_ratio` gate can make the actual slice size differ, in which
+            // case some duplication can reappear. Accepted limitation; keep these table settings stable.
+            size_t segment_size_override = deriveHybridAlignedSegmentSize(
+                st->enable_hybrid_allocation, st->min_rows_per_virtual_part, st->index_granularity);
             disk_cache_ptr = DiskCacheFactory::instance().createDiskCacheFromTableSettings(
                 getStorageID().getFullNameNotQuoted(),
                 getStorageUUID(),
                 *getContext(),
                 getContext()->getDiskCacheThrottler(),
-                getSettings()->disk_cache_ttl_hours.value * 60,
-                getSettings()->disk_cache_max_size_bytes.value
+                st->disk_cache_ttl_hours.value * 60,
+                st->disk_cache_max_size_bytes.value,
+                segment_size_override
             );
         }
         else
         {
-            // TTL disabled — evict any stale registry entry so re-enabling picks up fresh settings.
+            // TTL disabled, evict any stale registry entry so re-enabling picks up fresh settings.
             DiskCacheFactory::instance().removeTableTTLCache(getStorageUUID());
             disk_cache_ptr = DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
         }

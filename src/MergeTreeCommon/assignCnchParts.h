@@ -104,6 +104,12 @@ struct HybridPart
 
 size_t computeVirtualPartSize(size_t min_rows_per_vp, size_t index_granularity);
 
+/// Disk-cache segment size in marks that keeps cache segments aligned with hybrid-allocation
+/// virtual parts. When a big part is sliced across workers, an aligned segment size guarantees
+/// each cache segment is owned by exactly one worker, so the part is cached without cross-worker
+/// duplication. Returns 0 when hybrid allocation is off.
+size_t deriveHybridAlignedSegmentSize(bool enable_hybrid_allocation, size_t min_rows_per_virtual_part, size_t index_granularity);
+
 std::pair<ServerAssignmentMap, VirtualPartAssignmentMap> assignCnchHybridParts(
     const WorkerGroupHandle & worker_group, const ServerDataPartsVector & parts, size_t virtual_part_size /* unit = num marks */, const ContextPtr & context);
 

@@ -397,6 +397,18 @@ size_t computeVirtualPartSize(size_t min_rows_per_vp, size_t index_granularity)
     return min_rows_per_vp % index_granularity ? min_rows_per_vp / index_granularity + 1 : min_rows_per_vp / index_granularity;
 }
 
+size_t deriveHybridAlignedSegmentSize(bool enable_hybrid_allocation, size_t min_rows_per_virtual_part, size_t index_granularity)
+{
+    /// Only relevant when parts are sliced into virtual parts; otherwise keep the global default.
+    if (!enable_hybrid_allocation || min_rows_per_virtual_part == 0 || index_granularity == 0)
+        return 0;
+    /// Must return the SAME value the allocator uses for the virtual-part size, so slice
+    /// boundaries land exactly on cache-segment boundaries. Both go through computeVirtualPartSize()
+    /// keep that the single source of truth 
+    /// see assignCnchHybridParts callers in CnchServerResource.
+    return computeVirtualPartSize(min_rows_per_virtual_part, index_granularity);
+}
+
 static std::pair<ServerAssignmentMap, VirtualPartAssignmentMap> assignCnchHybridPartsWithMod(
     Poco::Logger * log, const WorkerGroupHandle & worker_group, const ServerDataPartsVector & parts, size_t virtual_part_size /* unit = num marks */)
 {
