@@ -565,6 +565,13 @@ void CnchWorkerServiceImpl::preloadDataParts(
         StoragePtr storage = createStorageFromQuery(request->create_table_query(), rpc_context);
         auto & cloud_merge_tree = dynamic_cast<StorageCloudMergeTree &>(*storage);
         auto data_parts = createPartVectorFromModelsForSend<MutableMergeTreeDataPartCNCHPtr>(cloud_merge_tree, request->parts());
+        /// Virtual parts are mark ranges of big parts assigned by hybrid allocation. They carry
+        /// mark_ranges_for_virtual_part, so preload() caches only those ranges; matching query-time reads.
+        auto virtual_data_parts = createPartVectorFromModelsForSend<MutableMergeTreeDataPartCNCHPtr>(cloud_merge_tree, request->virtual_parts());
+        data_parts.insert(
+            data_parts.end(),
+            std::make_move_iterator(virtual_data_parts.begin()),
+            std::make_move_iterator(virtual_data_parts.end()));
 
         LOG_TRACE(
             log,

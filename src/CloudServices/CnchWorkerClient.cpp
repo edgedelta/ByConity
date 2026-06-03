@@ -328,6 +328,7 @@ brpc::CallId CnchWorkerClient::preloadDataParts(
     const IStorage & storage,
     const String & create_local_table_query,
     const ServerDataPartsVector & parts,
+    const ServerVirtualPartVector & virtual_parts,
     const ExceptionHandlerPtr & handler,
     bool enable_parts_sync_preload,
     UInt64 parts_preload_level,
@@ -341,6 +342,9 @@ brpc::CallId CnchWorkerClient::preloadDataParts(
     request.set_preload_level(parts_preload_level);
     request.set_submit_ts(submit_ts);
     fillPartsModelForSend(storage, parts, *request.mutable_parts());
+    /// Hybrid allocation slices big parts into virtual parts; send them so the worker preloads
+    /// the same mark ranges it will read at query time.
+    fillPartsModelForSend(storage, virtual_parts, *request.mutable_virtual_parts());
 
     auto * cntl = new brpc::Controller();
     auto * response = new Protos::PreloadDataPartsResp();

@@ -107,6 +107,7 @@ public:
         const IStorage & storage,
         const String & create_local_table_query,
         const ServerDataPartsVector & parts,
+        const ServerVirtualPartVector & virtual_parts,
         const ExceptionHandlerPtr & handler,
         bool enable_parts_sync_preload,
         UInt64 parts_preload_level,

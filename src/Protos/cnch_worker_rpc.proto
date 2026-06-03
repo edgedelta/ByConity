@@ -297,6 +297,9 @@ message PreloadDataPartsReq
   optional uint64 preload_level = 5;
   optional uint64 submit_ts = 6;
   optional int64 read_injection = 7;
+  /// Big parts split by hybrid allocation are sent as virtual parts (whole part + assigned mark ranges)
+  /// so each worker preloads exactly the slices it will read at query time, matching query-time assignment.
+  repeated DataModelVirtualPart virtual_parts = 8;
 }
 
 message PreloadDataPartsResp

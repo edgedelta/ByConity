@@ -1241,7 +1241,11 @@ void MergeTreeDataPartCNCH::preload(UInt64 preload_level, UInt64 submit_ts) cons
         auto cache_strategy = disk_cache->getStrategy();
         IDiskCache * mark_disk_cache = disk_cache->getMetaCache().get();
 
-        MarkRanges all_mark_ranges{MarkRange(0, getMarksCount())};
+        /// For a virtual part, cache only the assigned mark ranges so each worker preloads exactly what it reads at query time.
+        /// Meta segments (checksums/primary index/metainfo) below are still cached in full, they are per-part and needed by any read of any slice.
+        MarkRanges all_mark_ranges = (mark_ranges_for_virtual_part && !mark_ranges_for_virtual_part->empty())
+            ? *mark_ranges_for_virtual_part
+            : MarkRanges{MarkRange(0, getMarksCount())};
         MarkCachePtr mark_cache_holder = storage.getContext()->getMarkCache();
         auto add_segments = [&, this](const NameAndTypePair & real_column) {
             ISerialization::StreamCallback stream_callback = [&](const ISerialization::SubstreamPath & substream_path) {
