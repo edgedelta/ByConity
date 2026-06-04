@@ -23,8 +23,10 @@
 #include <atomic>
 #include <functional>
 #include <optional>
+#include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <Poco/Exception.h>
 
@@ -51,19 +53,23 @@ struct QueryCacheStats
     std::atomic<size_t> s3_fallback_segs{0};  // data segments read directly from S3
     std::atomic<size_t> cache_bytes{0};       // bytes through cache_buffer for data (local + steal)
     std::atomic<size_t> s3_bytes{0};          // bytes through source_buffer for data (S3)
-    std::atomic<uint64_t> cache_read_ms{0};
-    std::atomic<uint64_t> cache_read_ms_max{0};
-    std::atomic<uint64_t> cache_read_ms_min{UINT64_MAX};
-    std::atomic<uint64_t> s3_read_ms{0};
+    std::atomic<uint64_t> cache_read_us{0};
+    std::atomic<uint64_t> cache_read_us_max{0};
+    std::atomic<uint64_t> cache_read_us_min{UINT64_MAX};
+    std::atomic<uint64_t> s3_read_us{0};
     std::atomic<size_t> reader_count{0};
     // Skip-index segment counters (extension .idx)
     std::atomic<size_t> idx_hit_segs{0};
     std::atomic<size_t> idx_miss_segs{0};
     std::atomic<size_t> idx_cache_bytes{0};
     std::atomic<size_t> idx_s3_bytes{0};
-    std::atomic<uint64_t> idx_cache_read_ms{0};
-    std::atomic<uint64_t> idx_s3_read_ms{0};
+    std::atomic<uint64_t> idx_cache_read_us{0};
+    std::atomic<uint64_t> idx_s3_read_us{0};
     std::atomic<size_t> idx_reader_count{0};
+    // Diagnostics for the long-pole reader, part name of the slowest flush batch and the set of distinct threads that performed cache/S3 reads.
+    std::mutex aux_mutex;
+    String max_reader_label;
+    std::unordered_set<UInt64> read_thread_ids;
 };
 
 /// Plain snapshot, used for local accumulation and return values.
@@ -75,19 +81,21 @@ struct QueryCacheStatsSnapshot
     size_t s3_fallback_segs{0};
     size_t cache_bytes{0};
     size_t s3_bytes{0};
-    uint64_t cache_read_ms{0};
-    uint64_t cache_read_ms_max{0};
-    uint64_t cache_read_ms_min{0};
-    uint64_t s3_read_ms{0};
+    uint64_t cache_read_us{0};
+    uint64_t cache_read_us_max{0};
+    uint64_t cache_read_us_min{0};
+    uint64_t s3_read_us{0};
     size_t reader_count{0};
     // Skip-index segment counters (extension .idx)
     size_t idx_hit_segs{0};
     size_t idx_miss_segs{0};
     size_t idx_cache_bytes{0};
     size_t idx_s3_bytes{0};
-    uint64_t idx_cache_read_ms{0};
-    uint64_t idx_s3_read_ms{0};
+    uint64_t idx_cache_read_us{0};
+    uint64_t idx_s3_read_us{0};
     size_t idx_reader_count{0};
+    String max_reader_label;   // part of the slowest flush batch
+    size_t read_threads{0};    // distinct threads that performed cache/S3 reads
 
     bool empty() const { return cache_hit_segs == 0 && cache_miss_segs == 0 && steal_segs == 0 && s3_fallback_segs == 0
         && idx_hit_segs == 0 && idx_miss_segs == 0; }
@@ -180,7 +188,7 @@ public:
 
     /// Per-query cache stats registry.
     /// unique_lock only for first insertion, then atomic fetch_add on the fields.
-    void mergeQueryCacheStats(const String & query_id, const QueryCacheStatsSnapshot & local);
+    void mergeQueryCacheStats(const String & query_id, const QueryCacheStatsSnapshot & local, const String & reader_label = {});
     std::optional<QueryCacheStatsSnapshot> consumeQueryCacheStats(const String & query_id);
     /// Drop a query's entry without reading it, no-op if already consumed.
     /// Called on query teardown so entries aren't leaked when consume is skipped.

@@ -184,7 +184,7 @@ private:
     bool collect_cache_stats{false};
     String cached_query_id;
     QueryCacheStatsSnapshot local_cache_stats;
-    uint64_t active_segment_start_ms{0};  // wall-clock ms when current segment read started
+    uint64_t active_segment_start_us{0};  // wall-clock us when current segment read started
     bool active_is_cache{false};          // true = cache_buffer active, false = source_buffer
 
     void flushLocalCacheStats();

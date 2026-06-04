@@ -27,6 +27,7 @@
 #include <Storages/DiskCache/DiskCacheSettings.h>
 #include <Storages/DiskCache/DiskCacheSimpleStrategy.h>
 #include <Storages/DiskCache/TTLCacheFDBIndex.h>
+#include <common/getThreadId.h>
 #include <common/logger_useful.h>
 #include <Disks/SingleDiskVolume.h>
 #include <Storages/DiskCache/IDiskCache.h>
@@ -352,7 +353,7 @@ void DiskCacheFactory::addNewCache(Context & context, const std::string & cache_
     }
 }
 
-void DiskCacheFactory::mergeQueryCacheStats(const String & query_id, const QueryCacheStatsSnapshot & local)
+void DiskCacheFactory::mergeQueryCacheStats(const String & query_id, const QueryCacheStatsSnapshot & local, const String & reader_label)
 {
     if (local.empty())
         return;
@@ -377,21 +378,30 @@ void DiskCacheFactory::mergeQueryCacheStats(const String & query_id, const Query
     entry->s3_fallback_segs.fetch_add(local.s3_fallback_segs, std::memory_order_relaxed);
     entry->cache_bytes.fetch_add(local.cache_bytes, std::memory_order_relaxed);
     entry->s3_bytes.fetch_add(local.s3_bytes, std::memory_order_relaxed);
-    entry->cache_read_ms.fetch_add(local.cache_read_ms, std::memory_order_relaxed);
-    entry->s3_read_ms.fetch_add(local.s3_read_ms, std::memory_order_relaxed);
+    entry->cache_read_us.fetch_add(local.cache_read_us, std::memory_order_relaxed);
+    entry->s3_read_us.fetch_add(local.s3_read_us, std::memory_order_relaxed);
     entry->reader_count.fetch_add(1, std::memory_order_relaxed);
-    for (auto cur = entry->cache_read_ms_max.load(std::memory_order_relaxed);
-         local.cache_read_ms > cur && !entry->cache_read_ms_max.compare_exchange_weak(cur, local.cache_read_ms, std::memory_order_relaxed);)
+    for (auto cur = entry->cache_read_us_max.load(std::memory_order_relaxed);
+         local.cache_read_us > cur && !entry->cache_read_us_max.compare_exchange_weak(cur, local.cache_read_us, std::memory_order_relaxed);)
         ;
-    for (auto cur = entry->cache_read_ms_min.load(std::memory_order_relaxed);
-         local.cache_read_ms < cur && !entry->cache_read_ms_min.compare_exchange_weak(cur, local.cache_read_ms, std::memory_order_relaxed);)
+    for (auto cur = entry->cache_read_us_min.load(std::memory_order_relaxed);
+         local.cache_read_us < cur && !entry->cache_read_us_min.compare_exchange_weak(cur, local.cache_read_us, std::memory_order_relaxed);)
         ;
+    // Long-pole diagnostics: name the part whose flush won the max, and track distinct read threads.
+    {
+        std::lock_guard<std::mutex> aux_lock(entry->aux_mutex);
+        if (!reader_label.empty() && local.cache_read_us > 0
+            && entry->cache_read_us_max.load(std::memory_order_relaxed) == local.cache_read_us)
+            entry->max_reader_label = reader_label;
+        if (local.cache_read_us > 0 || local.s3_read_us > 0 || local.cache_hit_segs > 0 || local.s3_fallback_segs > 0)
+            entry->read_thread_ids.insert(getThreadId());
+    }
     entry->idx_hit_segs.fetch_add(local.idx_hit_segs, std::memory_order_relaxed);
     entry->idx_miss_segs.fetch_add(local.idx_miss_segs, std::memory_order_relaxed);
     entry->idx_cache_bytes.fetch_add(local.idx_cache_bytes, std::memory_order_relaxed);
     entry->idx_s3_bytes.fetch_add(local.idx_s3_bytes, std::memory_order_relaxed);
-    entry->idx_cache_read_ms.fetch_add(local.idx_cache_read_ms, std::memory_order_relaxed);
-    entry->idx_s3_read_ms.fetch_add(local.idx_s3_read_ms, std::memory_order_relaxed);
+    entry->idx_cache_read_us.fetch_add(local.idx_cache_read_us, std::memory_order_relaxed);
+    entry->idx_s3_read_us.fetch_add(local.idx_s3_read_us, std::memory_order_relaxed);
     if (local.idx_hit_segs > 0 || local.idx_miss_segs > 0 || local.idx_cache_bytes > 0 || local.idx_s3_bytes > 0)
         entry->idx_reader_count.fetch_add(1, std::memory_order_relaxed);
 }
@@ -411,18 +421,23 @@ std::optional<QueryCacheStatsSnapshot> DiskCacheFactory::consumeQueryCacheStats(
     snap.s3_fallback_segs = e.s3_fallback_segs.load(std::memory_order_relaxed);
     snap.cache_bytes      = e.cache_bytes.load(std::memory_order_relaxed);
     snap.s3_bytes         = e.s3_bytes.load(std::memory_order_relaxed);
-    snap.cache_read_ms     = e.cache_read_ms.load(std::memory_order_relaxed);
-    snap.cache_read_ms_max = e.cache_read_ms_max.load(std::memory_order_relaxed);
-    auto raw_min           = e.cache_read_ms_min.load(std::memory_order_relaxed);
-    snap.cache_read_ms_min = (raw_min == UINT64_MAX) ? 0 : raw_min;
-    snap.s3_read_ms        = e.s3_read_ms.load(std::memory_order_relaxed);
+    snap.cache_read_us     = e.cache_read_us.load(std::memory_order_relaxed);
+    snap.cache_read_us_max = e.cache_read_us_max.load(std::memory_order_relaxed);
+    auto raw_min           = e.cache_read_us_min.load(std::memory_order_relaxed);
+    snap.cache_read_us_min = raw_min; // UINT64_MAX = no flush recorded, formatter prints "-"
+    snap.s3_read_us        = e.s3_read_us.load(std::memory_order_relaxed);
     snap.reader_count      = e.reader_count.load(std::memory_order_relaxed);
     snap.idx_hit_segs     = e.idx_hit_segs.load(std::memory_order_relaxed);
     snap.idx_miss_segs    = e.idx_miss_segs.load(std::memory_order_relaxed);
     snap.idx_cache_bytes  = e.idx_cache_bytes.load(std::memory_order_relaxed);
     snap.idx_s3_bytes     = e.idx_s3_bytes.load(std::memory_order_relaxed);
-    snap.idx_cache_read_ms = e.idx_cache_read_ms.load(std::memory_order_relaxed);
-    snap.idx_s3_read_ms   = e.idx_s3_read_ms.load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> aux_lock(it->second->aux_mutex);
+        snap.max_reader_label = it->second->max_reader_label;
+        snap.read_threads = it->second->read_thread_ids.size();
+    }
+    snap.idx_cache_read_us = e.idx_cache_read_us.load(std::memory_order_relaxed);
+    snap.idx_s3_read_us   = e.idx_s3_read_us.load(std::memory_order_relaxed);
     snap.idx_reader_count  = e.idx_reader_count.load(std::memory_order_relaxed);
     query_cache_stats_map.erase(it);
     return snap;

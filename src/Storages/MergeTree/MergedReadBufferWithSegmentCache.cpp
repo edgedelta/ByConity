@@ -178,25 +178,25 @@ void MergedReadBufferWithSegmentCache::flushLocalCacheStats()
     if (!collect_cache_stats || local_cache_stats.empty())
         return;
     // Close out any open segment timer
-    if (active_segment_start_ms > 0)
+    if (active_segment_start_us > 0)
     {
         uint64_t elapsed = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count()) - active_segment_start_ms;
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count()) - active_segment_start_us;
         if (is_idx)
         {
-            if (active_is_cache) local_cache_stats.idx_cache_read_ms += elapsed;
-            else local_cache_stats.idx_s3_read_ms += elapsed;
+            if (active_is_cache) local_cache_stats.idx_cache_read_us += elapsed;
+            else local_cache_stats.idx_s3_read_us += elapsed;
         }
         else
         {
-            if (active_is_cache) local_cache_stats.cache_read_ms += elapsed;
-            else local_cache_stats.s3_read_ms += elapsed;
+            if (active_is_cache) local_cache_stats.cache_read_us += elapsed;
+            else local_cache_stats.s3_read_us += elapsed;
         }
-        active_segment_start_ms = 0;
+        active_segment_start_us = 0;
     }
     if (!cached_query_id.empty())
-        DiskCacheFactory::instance().mergeQueryCacheStats(cached_query_id, local_cache_stats);
+        DiskCacheFactory::instance().mergeQueryCacheStats(cached_query_id, local_cache_stats, part_name);
     local_cache_stats = {};
 }
 
@@ -253,26 +253,26 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
         // Segment boundary: stop timer, then flush to DiskCacheFactory immediately.
         // Flushing per-boundary ensures stats are available even for LIMIT queries
         // that cancel before reaching EOF.
-        if (collect_cache_stats && active_segment_start_ms > 0)
+        if (collect_cache_stats && active_segment_start_us > 0)
         {
             uint64_t elapsed = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count()) - active_segment_start_ms;
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count()) - active_segment_start_us;
             if (is_idx)
             {
-                if (active_is_cache) local_cache_stats.idx_cache_read_ms += elapsed;
-                else local_cache_stats.idx_s3_read_ms += elapsed;
+                if (active_is_cache) local_cache_stats.idx_cache_read_us += elapsed;
+                else local_cache_stats.idx_s3_read_us += elapsed;
             }
             else
             {
-                if (active_is_cache) local_cache_stats.cache_read_ms += elapsed;
-                else local_cache_stats.s3_read_ms += elapsed;
+                if (active_is_cache) local_cache_stats.cache_read_us += elapsed;
+                else local_cache_stats.s3_read_us += elapsed;
             }
-            active_segment_start_ms = 0;
+            active_segment_start_us = 0;
         }
         if (collect_cache_stats && !local_cache_stats.empty())
         {
-            DiskCacheFactory::instance().mergeQueryCacheStats(cached_query_id, local_cache_stats);
+            DiskCacheFactory::instance().mergeQueryCacheStats(cached_query_id, local_cache_stats, part_name);
             local_cache_stats = {};
         }
 
@@ -416,8 +416,8 @@ void MergedReadBufferWithSegmentCache::seekToPosition(size_t segment_idx,
         // For data: count s3_fallback_segs here (complements cache_miss_segs from seekToMarkInSegmentCache).
         // For idx: miss already counted in seekToMarkInSegmentCache; skip here to avoid double-count.
         if (!is_idx) ++local_cache_stats.s3_fallback_segs;
-        active_segment_start_ms = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
+        active_segment_start_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
         active_is_cache = false;
     }
@@ -527,8 +527,8 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
         {
             if (is_idx) ++local_cache_stats.idx_hit_segs;
             else ++local_cache_stats.cache_hit_segs;
-            active_segment_start_ms = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
+            active_segment_start_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count());
             active_is_cache = true;
         }
@@ -603,8 +603,8 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInRemoteSegmentCache(size_t seg
         {
             if (is_idx) ++local_cache_stats.idx_hit_segs;
             else ++local_cache_stats.cache_hit_segs;
-            active_segment_start_ms = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
+            active_segment_start_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count());
             active_is_cache = true;
         }
