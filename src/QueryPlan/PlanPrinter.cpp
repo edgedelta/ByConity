@@ -626,6 +626,9 @@ String PlanPrinter::TextPrinter::printStepProfiles(PlanNodeBase & plan, const Te
         out << intent.detailIntent() << "Act. WallTime: " << prettySeconds(profile->sum_elapsed_us/profile->worker_cnt);
         if (profile->worker_cnt > 1)
             out << "[max= " << prettySeconds(profile->max_elapsed_us) << ", min=" << prettySeconds(profile->min_elapsed_us) << "]";
+        // Lanes that actually did work vs lanes allocated, summed across workers.
+        if (profile->parallel_size > 0)
+            out << ", Threads: " << profile->active_parallel_size << "/" << profile->parallel_size << " active";
         out << intent.detailIntent() << "     Output: " << prettyNum(profile->output_rows, settings.pretty_num) << " rows("
             << prettyBytes(profile->output_bytes) << ")";
         out << ", WaitTime: " << prettySeconds(profile->output_wait_sum_elapsed_us / profile->worker_cnt);

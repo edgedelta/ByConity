@@ -76,6 +76,8 @@ struct GroupedProcessorProfile
     UInt64 grouped_output_rows{};
     UInt64 grouped_output_bytes{};
     size_t parallel_size = 0;
+    /// Instances that actually did work; parallel_size counts all allocated lanes.
+    size_t active_parallel_size = 0;
 
     std::unordered_set<ProcessorId> processor_ids;
     bool visited = false;

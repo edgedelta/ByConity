@@ -215,6 +215,9 @@ message ProfileMetric {
   repeated InputProfileMetric inputs = 13;
 
   map<string, RuntimeAttributeDescription> attributes = 14;
+
+  // Lanes that actually did work (elapsed/rows > 0) out of parallel_size allocated.
+  optional uint32 active_parallel_size = 15;
 }
 
 message PlanSegmentProfileRequest{

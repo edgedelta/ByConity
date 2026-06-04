@@ -19,7 +19,9 @@
  * All Bytedance's Modifications are Copyright (2023) Bytedance Ltd. and/or its affiliates.
  */
 
+#include <chrono>
 #include <memory>
+#include <thread>
 #include <Client/Connection.h>
 #include <Interpreters/executeQueryHelper.h>
 #include <Common/HistogramMetrics.h>
@@ -1862,6 +1864,26 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
                         {
                             if (auto scheduler = context->getSegmentScheduler())
                             {
+                                // Worker profile RPCs race with query finish: profiles are sent before the final
+                                // segment status, but RPC scheduling can deliver them after the query is logged,
+                                // leaving segment_profiles without runtime (cache/index) stats. EXPLAIN ANALYZE
+                                // already waits for them (ExplainAnalyzeTransform); do the same bounded wait here.
+                                // Stop once the received count is non-zero and stable across a poll, or at 100ms.
+                                const auto profile_wait_start = std::chrono::steady_clock::now();
+                                size_t last_received = 0;
+                                while (true)
+                                {
+                                    size_t received = 0;
+                                    for (const auto & [seg_id, profs] : scheduler->getSegmentsProfile(elem.client_info.current_query_id))
+                                        received += profs.size();
+                                    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - profile_wait_start).count();
+                                    if ((received > 0 && received == last_received) || elapsed_ms >= 100)
+                                        break;
+                                    last_received = received;
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                                }
+
                                 auto seg_profiles = scheduler->getSegmentsProfile(elem.client_info.current_query_id);
                                 if (!seg_profiles.empty())
                                 {

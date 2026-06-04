@@ -528,6 +528,7 @@ void CnchServerResource::allocateResource(
             }
 
             auto & assigned_storage_worker_indexs = assigned_storage_workers[storage->getStorageUUID()];
+            String alloc_summary; // per-worker part counts, logged once per table after the loop
             for (const auto & host_ports : host_ports_vec)
             {
                 std::set<Int64> assigned_buckets;
@@ -592,6 +593,9 @@ void CnchServerResource::allocateResource(
                         host_ports.toDebugString());
                 }
 
+                alloc_summary += fmt::format(
+                    "{} -> parts={} vparts={}; ", host_ports.id, assigned_parts.size(), assigned_virtual_parts.size());
+
                 bool empty = (resource.table_version == 0 || (use_bucket_assignment && assigned_buckets.empty()))
                         && assigned_parts.empty()
                         && assigned_virtual_parts.empty()
@@ -631,6 +635,10 @@ void CnchServerResource::allocateResource(
                 worker_resource.table_definition = resource.table_definition;
                 worker_resource.object_columns = resource.object_columns;
             }
+
+            // which workers were in the group and how many parts/virtual-parts each got
+            LOG_DEBUG(log, "Allocated {} across {} worker(s): {}",
+                storage->getStorageID().getNameForLogs(), host_ports_vec.size(), alloc_summary);
         }
     }
 }
