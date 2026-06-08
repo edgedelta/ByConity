@@ -187,7 +187,7 @@ void PartFileDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool throw_e
             != DiskCacheMode::
                 FORCE_STEAL_DISK_CACHE) // FORCE_STEAL_DISK_CACHE is used for testing, which only allow remote cache request so will skip local cache write
         {
-            if (!preload_level || (preload_level & PreloadLevelSettings::DataPreload) == PreloadLevelSettings::DataPreload)
+            if (shouldCacheData(preload_level, getSegmentType()))
             {
                 data_file->seek(stream_file_pos.file_offset + cache_data_left_offset);
                 LimitReadBuffer segment_value(*data_file, cache_data_bytes, false);
@@ -196,7 +196,7 @@ void PartFileDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool throw_e
             }
 
             /// cache mark segment
-            if (!preload_level || (preload_level & PreloadLevelSettings::MetaPreload) == PreloadLevelSettings::MetaPreload)
+            if (shouldCacheMarks(preload_level))
             {
                 data_file->seek(mrk_file_pos.file_offset);
                 LimitReadBuffer marks_value(*data_file, mrk_file_pos.file_size, false);

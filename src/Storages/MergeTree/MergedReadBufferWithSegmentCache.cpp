@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include <Common/Stopwatch.h>
 #include <chrono>
 #include <cstddef>
 #include <memory>
@@ -190,8 +191,8 @@ void MergedReadBufferWithSegmentCache::flushLocalCacheStats()
         }
         else
         {
-            if (active_is_cache) local_cache_stats.cache_read_us += elapsed;
-            else local_cache_stats.s3_read_us += elapsed;
+            if (active_is_cache) local_cache_stats.cache_open_us += elapsed;
+            else local_cache_stats.s3_open_us += elapsed;
         }
         active_segment_start_us = 0;
     }
@@ -225,7 +226,19 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
         // There is a active cache buffer, trying to use it
         ReadBuffer& active_buffer = cache_buffer.activeBuffer();
 
-        if (likely(!active_buffer.eof()))
+        // eof() performs the actual disk read + decompression when the buffer is drained,
+        // time it to get pure IO cost, as opposed to the segment-open wall time tracked at boundaries.
+        bool cache_buffer_eof;
+        if (collect_cache_stats && !is_idx)
+        {
+            Stopwatch refill_watch;
+            cache_buffer_eof = active_buffer.eof();
+            local_cache_stats.cache_io_us += refill_watch.elapsedMicroseconds();
+        }
+        else
+            cache_buffer_eof = active_buffer.eof();
+
+        if (likely(!cache_buffer_eof))
         {
             // Cache buffer not eof yet, use it
             Position buf_pos = active_buffer.position();
@@ -265,8 +278,8 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
             }
             else
             {
-                if (active_is_cache) local_cache_stats.cache_read_us += elapsed;
-                else local_cache_stats.s3_read_us += elapsed;
+                if (active_is_cache) local_cache_stats.cache_open_us += elapsed;
+                else local_cache_stats.s3_open_us += elapsed;
             }
             active_segment_start_us = 0;
         }
@@ -307,7 +320,16 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
     ReadBuffer& active_buffer = cache_buffer.initialized() ?
         cache_buffer.activeBuffer() : source_buffer.activeBuffer();
 
-    bool encounter_eof = active_buffer.eof();
+    bool encounter_eof;
+    if (collect_cache_stats && !is_idx)
+    {
+        Stopwatch refill_watch;
+        encounter_eof = active_buffer.eof();
+        (cache_buffer.initialized() ? local_cache_stats.cache_io_us : local_cache_stats.s3_io_us)
+            += refill_watch.elapsedMicroseconds();
+    }
+    else
+        encounter_eof = active_buffer.eof();
     if (!encounter_eof)
     {
         Position buf_pos = active_buffer.position();

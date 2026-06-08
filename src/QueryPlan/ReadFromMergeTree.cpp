@@ -1889,10 +1889,13 @@ void ReadFromMergeTree::collectCacheStats()
     cache_map.add("cache_bytes",      cache_stats->cache_bytes);
     cache_map.add("s3_bytes",         cache_stats->s3_bytes);
     /// Internally tracked in microseconds, JSON keys stay in ms for downstream compatibility.
-    cache_map.add("cache_read_ms",     cache_stats->cache_read_us / 1000);
-    cache_map.add("cache_read_ms_max", cache_stats->cache_read_us_max / 1000);
-    cache_map.add("cache_read_ms_min", cache_stats->cache_read_us_min == UINT64_MAX ? 0 : cache_stats->cache_read_us_min / 1000);
-    cache_map.add("s3_read_ms",        cache_stats->s3_read_us / 1000);
+    /// read_ms = pure IO+decompress time; open_ms = segment-open wall time. open finds long-pole streams, io measures actual work.
+    cache_map.add("cache_read_ms",     cache_stats->cache_io_us / 1000);
+    cache_map.add("s3_read_ms",        cache_stats->s3_io_us / 1000);
+    cache_map.add("cache_open_ms",     cache_stats->cache_open_us / 1000);
+    cache_map.add("cache_open_ms_max", cache_stats->cache_open_us_max / 1000);
+    cache_map.add("cache_open_ms_min", cache_stats->cache_open_us_min == UINT64_MAX ? 0 : cache_stats->cache_open_us_min / 1000);
+    cache_map.add("s3_open_ms",        cache_stats->s3_open_us / 1000);
     cache_map.add("read_threads",      cache_stats->read_threads);
     cache_map.add("idx_hit_segs",     cache_stats->idx_hit_segs);
     cache_map.add("idx_miss_segs",    cache_stats->idx_miss_segs);
@@ -1906,28 +1909,22 @@ void ReadFromMergeTree::collectCacheStats()
     cache_map.format(json_fmt, fmt_ctx);
     RuntimeAttributeDescription cache_desc;
     cache_desc.description = buf.str();
-    double cache_wall_ms = (cache_stats->reader_count > 0
-        ? double(cache_stats->cache_read_us) / cache_stats->reader_count
-        : double(cache_stats->cache_read_us)) / 1000.0;
-    double s3_wall_ms = (cache_stats->reader_count > 0
-        ? double(cache_stats->s3_read_us) / cache_stats->reader_count
-        : double(cache_stats->s3_read_us)) / 1000.0;
-    /// min: UINT64_MAX means no flush ever recorded a read time, show "-" instead of a fake 0.
-    String min_str = cache_stats->cache_read_us_min == UINT64_MAX
+    /// min: UINT64_MAX means no flush ever recorded, show "-" instead of a fake 0.
+    String min_str = cache_stats->cache_open_us_min == UINT64_MAX
         ? "-"
-        : fmt::format("{:.1f}ms", cache_stats->cache_read_us_min / 1000.0);
-    /// Name the long-pole, the part whose flush batch won the max.
+        : fmt::format("{:.1f}ms", cache_stats->cache_open_us_min / 1000.0);
+    /// Name the long-pole, the part whose flush batch won the open-time max.
     String max_label = cache_stats->max_reader_label.empty()
         ? ""
         : fmt::format(" ({})", cache_stats->max_reader_label);
     cache_desc.name_and_detail.emplace_back("data",
-        fmt::format("data: hit={} miss={} steal={} s3={} cache={:.1f}MB ReadTime: {:.1f}ms over {} flushes, threads={} [max={:.1f}ms{}, min={}] s3={:.1f}MB/{:.1f}ms",
+        fmt::format("data: hit={} miss={} steal={} s3={} cache={:.1f}MB io={:.1f}ms over {} flushes, threads={}, open[max={:.1f}ms{}, min={}] s3={:.1f}MB io={:.1f}ms",
             cache_stats->cache_hit_segs, cache_stats->cache_miss_segs,
             cache_stats->steal_segs, cache_stats->s3_fallback_segs,
             cache_stats->cache_bytes / (1024.0 * 1024.0),
-            cache_wall_ms, cache_stats->reader_count, cache_stats->read_threads,
-            cache_stats->cache_read_us_max / 1000.0, max_label, min_str,
-            cache_stats->s3_bytes / (1024.0 * 1024.0), s3_wall_ms));
+            cache_stats->cache_io_us / 1000.0, cache_stats->reader_count, cache_stats->read_threads,
+            cache_stats->cache_open_us_max / 1000.0, max_label, min_str,
+            cache_stats->s3_bytes / (1024.0 * 1024.0), cache_stats->s3_io_us / 1000.0));
     double idx_s3_wall_ms = (cache_stats->idx_reader_count > 0
         ? double(cache_stats->idx_s3_read_us) / cache_stats->idx_reader_count
         : double(cache_stats->idx_s3_read_us)) / 1000.0;

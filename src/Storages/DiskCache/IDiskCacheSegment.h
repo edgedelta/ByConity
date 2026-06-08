@@ -59,6 +59,12 @@ public:
     static String formatSegmentName(
         const String & uuid, const String & part_name, const String & column_name, UInt32 segment_number, const String & extension);
 
+    /// Whether a preload at `preload_level` should write the data payload of a segment of `seg_type`.
+    /// preload_level == 0 is query-time read-through: cache everything.
+    static bool shouldCacheData(UInt64 preload_level, SegmentType seg_type);
+    /// Whether a preload at `preload_level` should write the mark payload of a segment.
+    static bool shouldCacheMarks(UInt64 preload_level);
+
 protected:
     size_t segment_number;
     size_t segment_size;

@@ -53,10 +53,14 @@ struct QueryCacheStats
     std::atomic<size_t> s3_fallback_segs{0};  // data segments read directly from S3
     std::atomic<size_t> cache_bytes{0};       // bytes through cache_buffer for data (local + steal)
     std::atomic<size_t> s3_bytes{0};          // bytes through source_buffer for data (S3)
-    std::atomic<uint64_t> cache_read_us{0};
-    std::atomic<uint64_t> cache_read_us_max{0};
-    std::atomic<uint64_t> cache_read_us_min{UINT64_MAX};
-    std::atomic<uint64_t> s3_read_us{0};
+    std::atomic<uint64_t> cache_open_us{0};
+    std::atomic<uint64_t> cache_open_us_max{0};
+    std::atomic<uint64_t> cache_open_us_min{UINT64_MAX};
+    std::atomic<uint64_t> s3_open_us{0};
+    // Pure refill time (inside ReadBuffer::eof()->next(): disk/S3 fetch + decompression), excludes
+    // time a segment sits open but parked. open_* above includes parked time and finds long poles.
+    std::atomic<uint64_t> cache_io_us{0};
+    std::atomic<uint64_t> s3_io_us{0};
     std::atomic<size_t> reader_count{0};
     // Skip-index segment counters (extension .idx)
     std::atomic<size_t> idx_hit_segs{0};
@@ -81,10 +85,12 @@ struct QueryCacheStatsSnapshot
     size_t s3_fallback_segs{0};
     size_t cache_bytes{0};
     size_t s3_bytes{0};
-    uint64_t cache_read_us{0};
-    uint64_t cache_read_us_max{0};
-    uint64_t cache_read_us_min{0};
-    uint64_t s3_read_us{0};
+    uint64_t cache_open_us{0};
+    uint64_t cache_open_us_max{0};
+    uint64_t cache_open_us_min{0};
+    uint64_t s3_open_us{0};
+    uint64_t cache_io_us{0};
+    uint64_t s3_io_us{0};
     size_t reader_count{0};
     // Skip-index segment counters (extension .idx)
     size_t idx_hit_segs{0};
