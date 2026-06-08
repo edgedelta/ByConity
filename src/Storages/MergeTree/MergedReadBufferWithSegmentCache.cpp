@@ -158,13 +158,12 @@ MergedReadBufferWithSegmentCache::MergedReadBufferWithSegmentCache(
         logger(&Poco::Logger::get("MergedReadBufferWithSegmentCache")),
         cached_query_id(CurrentThread::getQueryId().toString())
 {
-    bool is_ttl_cache = dynamic_cast<DiskCacheTTL *>(segment_cache_) != nullptr;
-    if (is_ttl_cache)
-    {
-        if (auto ctx = CurrentThread::get().getQueryContext())
-            collect_cache_stats = ctx->getSettingsRef().report_segment_profiles
-                               || ctx->getSettingsRef().log_segment_profiles;
-    }
+    // Collect read stats whenever profiling is requested, independent of whether a disk
+    // cache is present. With no/disabled cache every read falls through to S3, and we
+    // still want its open/io/bytes timing in the profile (it all lands in the S3 columns).
+    if (auto ctx = CurrentThread::get().getQueryContext())
+        collect_cache_stats = ctx->getSettingsRef().report_segment_profiles
+                           || ctx->getSettingsRef().log_segment_profiles;
     initialize();
 }
 

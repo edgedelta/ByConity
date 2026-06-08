@@ -1897,45 +1897,53 @@ void ReadFromMergeTree::collectCacheStats()
     cache_map.add("cache_open_ms_min", cache_stats->cache_open_us_min == UINT64_MAX ? 0 : cache_stats->cache_open_us_min / 1000);
     cache_map.add("s3_open_ms",        cache_stats->s3_open_us / 1000);
     cache_map.add("read_threads",      cache_stats->read_threads);
+    cache_map.add("eff_par_x10",       (cache_stats->cache_io_us + cache_stats->s3_io_us) * 10
+                                           / std::max<uint64_t>(cache_stats->cache_open_us_max, 1));
     cache_map.add("idx_hit_segs",     cache_stats->idx_hit_segs);
     cache_map.add("idx_miss_segs",    cache_stats->idx_miss_segs);
     cache_map.add("idx_cache_bytes",  cache_stats->idx_cache_bytes);
     cache_map.add("idx_s3_bytes",     cache_stats->idx_s3_bytes);
     cache_map.add("idx_cache_read_ms", cache_stats->idx_cache_read_us / 1000);
     cache_map.add("idx_s3_read_ms",   cache_stats->idx_s3_read_us / 1000);
+    cache_map.add("slowest_open_part", cache_stats->max_reader_label);
     WriteBufferFromOwnString buf;
     JSONBuilder::FormatSettings json_fmt{.settings = {}};
     JSONBuilder::FormatContext fmt_ctx{.out = buf};
     cache_map.format(json_fmt, fmt_ctx);
     RuntimeAttributeDescription cache_desc;
     cache_desc.description = buf.str();
-    /// min: UINT64_MAX means no flush ever recorded, show "-" instead of a fake 0.
-    String min_str = cache_stats->cache_open_us_min == UINT64_MAX
-        ? "-"
-        : fmt::format("{:.1f}ms", cache_stats->cache_open_us_min / 1000.0);
-    /// Name the long-pole, the part whose flush batch won the open-time max.
-    String max_label = cache_stats->max_reader_label.empty()
-        ? ""
-        : fmt::format(" ({})", cache_stats->max_reader_label);
+    /// eff = total refill time / longest stream lifetime: the average number of streams doing useful
+    /// IO concurrently. ~1-2 = a serial long pole dominates; rises toward lane count as reads parallelize.
+    /// Long-pole part (was open[max ...]) and open-min are preserved in the JSON above.
+    double eff = double(cache_stats->cache_io_us + cache_stats->s3_io_us)
+        / std::max<uint64_t>(cache_stats->cache_open_us_max, 1);
+    /// Hit-rate over all segment reads (cache + peer-steal + S3): the headline number for readers.
+    auto hit_pct = [](size_t hits, size_t total) -> int { return total ? static_cast<int>(hits * 100 / total) : 0; };
+    size_t data_total = cache_stats->cache_hit_segs + cache_stats->steal_segs + cache_stats->s3_fallback_segs;
+    /// Peer-steal group only shown when it happened, to keep the common line short.
+    String data_peer = cache_stats->steal_segs > 0
+        ? fmt::format(" | peer: {} segs", cache_stats->steal_segs)
+        : "";
     cache_desc.name_and_detail.emplace_back("data",
-        fmt::format("data: hit={} miss={} steal={} s3={} cache={:.1f}MB io={:.1f}ms over {} flushes, threads={}, open[max={:.1f}ms{}, min={}] s3={:.1f}MB io={:.1f}ms",
-            cache_stats->cache_hit_segs, cache_stats->cache_miss_segs,
-            cache_stats->steal_segs, cache_stats->s3_fallback_segs,
-            cache_stats->cache_bytes / (1024.0 * 1024.0),
-            cache_stats->cache_io_us / 1000.0, cache_stats->reader_count, cache_stats->read_threads,
-            cache_stats->cache_open_us_max / 1000.0, max_label, min_str,
-            cache_stats->s3_bytes / (1024.0 * 1024.0), cache_stats->s3_io_us / 1000.0));
+        fmt::format("column data — hit-rate {}% | cache: {} segs, {:.1f} MB, {:.1f} ms{} | S3: {} segs, {:.1f} MB, {:.1f} ms | {} threads (avg {:.1f} concurrent), slowest open {:.1f} ms",
+            hit_pct(cache_stats->cache_hit_segs, data_total),
+            cache_stats->cache_hit_segs, cache_stats->cache_bytes / (1024.0 * 1024.0), cache_stats->cache_io_us / 1000.0,
+            data_peer,
+            cache_stats->s3_fallback_segs, cache_stats->s3_bytes / (1024.0 * 1024.0), cache_stats->s3_io_us / 1000.0,
+            cache_stats->read_threads, eff, cache_stats->cache_open_us_max / 1000.0));
+    /// idx ms are per-reader averages (divided by idx_reader_count), not totals — see "index work" for totals.
     double idx_s3_wall_ms = (cache_stats->idx_reader_count > 0
         ? double(cache_stats->idx_s3_read_us) / cache_stats->idx_reader_count
         : double(cache_stats->idx_s3_read_us)) / 1000.0;
     double idx_cache_wall_ms = (cache_stats->idx_reader_count > 0
         ? double(cache_stats->idx_cache_read_us) / cache_stats->idx_reader_count
         : double(cache_stats->idx_cache_read_us)) / 1000.0;
+    size_t idx_total = cache_stats->idx_hit_segs + cache_stats->idx_miss_segs;
     cache_desc.name_and_detail.emplace_back("idx",
-        fmt::format("idx: hit={} miss={} cache={:.1f}MB/{:.1f}ms s3={:.1f}MB/{:.1f}ms",
-            cache_stats->idx_hit_segs, cache_stats->idx_miss_segs,
-            cache_stats->idx_cache_bytes / (1024.0 * 1024.0), idx_cache_wall_ms,
-            cache_stats->idx_s3_bytes / (1024.0 * 1024.0), idx_s3_wall_ms));
+        fmt::format("skip index — hit-rate {}% | cache: {} segs, {:.1f} MB, {:.1f} ms | S3: {} segs, {:.1f} MB, {:.1f} ms",
+            hit_pct(cache_stats->idx_hit_segs, idx_total),
+            cache_stats->idx_hit_segs, cache_stats->idx_cache_bytes / (1024.0 * 1024.0), idx_cache_wall_ms,
+            cache_stats->idx_miss_segs, cache_stats->idx_s3_bytes / (1024.0 * 1024.0), idx_s3_wall_ms));
 
     if (auto * tg = CurrentThread::getGroup().get())
     {
@@ -1944,8 +1952,8 @@ void ReadFromMergeTree::collectCacheStats()
         auto calc_us = tg->performance_counters[ProfileEvents::IndexGranuleCalcTime].load();
         if (seek_us > 0 || read_us > 0 || calc_us > 0)
             cache_desc.name_and_detail.emplace_back("idx_eval",
-                fmt::format("idx_eval: seek={}ms read={}ms calc={}ms",
-                    seek_us / 1000, read_us / 1000, calc_us / 1000));
+                fmt::format("index work — read {} ms, seek {} ms, check {} ms",
+                    read_us / 1000, seek_us / 1000, calc_us / 1000));
     }
 
     attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::CacheStats, std::move(cache_desc));
