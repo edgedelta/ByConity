@@ -324,9 +324,12 @@ String CnchStorageCommonHelper::getCreateQueryForCloudTable(
         engine_type,
         engine_args);
 
-    // perhaps better to enable if_not_exists by default
-    if (engine_type == WorkerEngineType::DICT)
-        create_query.if_not_exists = true;
+    // Cloud tables are named <table>_<txn_id>, so all sub-queries of one
+    // transaction (e.g. multi-step / multi-segment statistics collection)
+    // resolve to the same name with an identical definition. Multiple segments
+    // landing on the same worker would otherwise throw TABLE_ALREADY_EXISTS, so
+    // make the create idempotent for every engine type, not just DICT.
+    create_query.if_not_exists = true;
 
     if (enable_staging_area)
         modifyOrAddSetting(create_query, "cloud_enable_staging_area", Field(UInt64(1)));
