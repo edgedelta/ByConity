@@ -175,12 +175,77 @@ static bool isSamePartition(const RangesInDataPart & lhs, const RangesInDataPart
     return lhs.data_part->partition.value == rhs.data_part->partition.value;
 }
 
+/// Compose the monotonicity sign of a chain of single-argument monotonic functions applied to `arg`.
+/// Returns +1 (nondecreasing), -1 (nonincreasing), or 0 (undetermined / not a simple monotonic chain).
+static int composeMonotonicSign(const ExpressionActions & expr, const String & arg)
+{
+    int sign = 1;
+    String cur = arg;
+    bool saw_function = false;
+    for (const auto & action : expr.getActions())
+    {
+        if (action.node->type != ActionsDAG::ActionType::FUNCTION)
+            continue;
+        if (action.node->children.size() != 1 || action.node->children.at(0)->result_name != cur)
+            return 0;
+        const auto & func = *action.node->function_base;
+        if (!func.hasInformationAboutMonotonicity())
+            return 0;
+        auto m = func.getMonotonicityForRange(*func.getArgumentTypes().at(0), {}, {});
+        if (!m.is_monotonic)
+            return 0;
+        sign *= (m.is_positive ? 1 : -1);
+        cur = action.node->result_name;
+        saw_function = true;
+    }
+    return saw_function ? sign : 0;
+}
+
+/// Inverse topology of the cases handled below: the leading sort column is itself MATERIALIZED from
+/// the partition's base column, e.g. PARTITION BY toDate(ts), ORDER BY ts_neg where
+/// ts_neg MATERIALIZED -toUnixTimestamp64Milli(ts). Partitions are then orderable consistently with the
+/// sort key, but in the opposite direction (the sort key is a *negation* of an increasing function of
+/// the base, while the partition value increases with the base).
+///
+/// Narrow detection for the negation pattern: we don't ask the framework for the inner conversion's
+/// monotonicity (some time conversions like toUnixTimestamp64Milli don't expose it) — the explicit
+/// negate() plus a nondecreasing partition key is sufficient, since ts -> unix-ms is strictly increasing.
+static bool tryDetectNegatedSortKeyOverPartitionBase(
+    const StorageInMemoryMetadata & metadata,
+    const Names & sorting_columns,
+    const String & partition_column,
+    const KeyDescription & partition_key,
+    ContextPtr context)
+{
+    if (sorting_columns.empty())
+        return false;
+
+    const String & lead_sort_col = sorting_columns.front();
+    auto sort_default = metadata.getColumns().getDefault(lead_sort_col);
+    if (!sort_default || sort_default->kind != ColumnDefaultKind::Materialized || !sort_default->expression)
+        return false;
+
+    const auto * neg = sort_default->expression->as<ASTFunction>();
+    if (!neg || neg->name != "negate" || !neg->arguments || neg->arguments->children.size() != 1)
+        return false;
+
+    auto inner = KeyDescription::getKeyFromAST(neg->arguments->children[0], metadata.getColumns(), context);
+    Names inner_required = inner.expression->getRequiredColumns();
+    if (inner_required.size() != 1 || inner_required[0] != partition_column)
+        return false;
+
+    /// Partition value must increase with the base column, so (partition asc) == (sort key desc).
+    return composeMonotonicSign(*partition_key.expression, partition_column) == 1;
+}
+
 static bool canReadInPartitionOrder(
     const StorageInMemoryMetadata & metadata,
     const InputOrderInfo & input_order_info,
     const ASTSelectQuery & select,
-    ContextPtr context)
+    ContextPtr context,
+    bool & reverse_partition_value_order)
 {
+    reverse_partition_value_order = false;
     if (!metadata.isPartitionKeyDefined() || !metadata.isSortingKeyDefined())
         return false;
 
@@ -206,7 +271,16 @@ static bool canReadInPartitionOrder(
     {
         auto col_default = metadata.getColumns().getDefault(partition_column);
         if (!col_default || col_default->kind != ColumnDefaultKind::Materialized || !col_default->expression)
+        {
+            /// Inverse case: the leading sort column is materialized from the partition's base column
+            /// (e.g. ORDER BY ts_neg = -toUnixTimestamp64Milli(ts), PARTITION BY toDate(ts)).
+            if (tryDetectNegatedSortKeyOverPartitionBase(metadata, sorting_columns, partition_column, partition_key, context))
+            {
+                reverse_partition_value_order = true;
+                return true;
+            }
             return false;
+        }
 
         auto mat_key = KeyDescription::getKeyFromAST(col_default->expression, metadata.getColumns(), context);
         Names mat_required = mat_key.expression->getRequiredColumns();
@@ -664,12 +738,17 @@ Pipe ReadFromMergeTree::spreadMarkRangesAmongStreamsWithPartitionOrder(
     const ActionsDAGPtr & sorting_key_prefix_expr,
     ActionsDAGPtr & out_projection,
     const InputOrderInfoPtr & input_order_info,
-    const std::shared_ptr<DelayedSkipIndex> & delayed_index)
+    const std::shared_ptr<DelayedSkipIndex> & delayed_index,
+    bool reverse_partition_value_order)
 {
     chassert(!parts_with_ranges.empty());
 
-    /// sort parts by partition value
-    if (input_order_info->direction > 0)
+    /// Sort parts by partition value, consistent with the sort-key direction.
+    /// reverse_partition_value_order flips it when the sort key is inversely monotonic to the
+    /// partition value (e.g. ORDER BY -toUnixTimestamp64Milli(ts) over PARTITION BY toDate(ts)):
+    /// reading the sort key ascending then means reading partitions newest-first.
+    const bool ascend = (input_order_info->direction > 0) != reverse_partition_value_order;
+    if (ascend)
         std::sort(parts_with_ranges.begin(), parts_with_ranges.end(), PartitionValueComparator<true>{});
     else
         std::sort(parts_with_ranges.begin(), parts_with_ranges.end(), PartitionValueComparator<false>{});
@@ -1502,8 +1581,9 @@ void ReadFromMergeTree::initializePipeline(QueryPipeline & pipeline, const Build
         auto syntax_result = TreeRewriter(context).analyze(order_key_prefix_ast, metadata_for_reading->getColumns().getAllPhysical());
         auto sorting_key_prefix_expr = ExpressionAnalyzer(order_key_prefix_ast, syntax_result, context).getActionsDAG(false);
 
+        bool reverse_partition_value_order = false;
         can_read_in_partition_order = (settings.optimize_read_in_partition_order || settings.force_read_in_partition_order)
-            && canReadInPartitionOrder(*metadata_for_reading, *input_order_info, query_info.query->as<ASTSelectQuery &>(), context);
+            && canReadInPartitionOrder(*metadata_for_reading, *input_order_info, query_info.query->as<ASTSelectQuery &>(), context, reverse_partition_value_order);
 
         if (can_read_in_partition_order && result.selected_partitions > 1)
         {
@@ -1513,7 +1593,8 @@ void ReadFromMergeTree::initializePipeline(QueryPipeline & pipeline, const Build
                 sorting_key_prefix_expr,
                 result_projection,
                 input_order_info,
-                result.delayed_indices);
+                result.delayed_indices,
+                reverse_partition_value_order);
         }
         else
         {

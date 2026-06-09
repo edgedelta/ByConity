@@ -234,7 +234,8 @@ private:
         const ActionsDAGPtr & sorting_key_prefix_expr,
         ActionsDAGPtr & out_projection,
         const InputOrderInfoPtr & input_order_info,
-        const std::shared_ptr<DelayedSkipIndex> & delayed_index);
+        const std::shared_ptr<DelayedSkipIndex> & delayed_index,
+        bool reverse_partition_value_order);
 
     Pipe spreadMarkRangesAmongStreamsFinal(
         RangesInDataParts && parts,

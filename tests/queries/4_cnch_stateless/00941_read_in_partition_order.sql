@@ -47,6 +47,20 @@ select 'last 5',  * from porder4 where c1=5 and c2='a' order by ts desc limit 1;
 select 'last 6',  * from porder4 where c1=6 and c2='a' order by ts desc limit 1;
 drop table porder4;
 
+-- case: leading sort column MATERIALIZED as a negation of a monotonic function of the partition
+--       base column (mirrors ORDER BY ts_neg = -toUnixTimestamp64Milli(ts), PARTITION BY toDate(ts)).
+--       Reading the sort key ascending must yield partitions newest-first; the partition sort
+--       direction is flipped relative to the read direction.
+drop table if exists porder5;
+create table porder5 (ts DateTime64(3), ts_neg Int64 MATERIALIZED -toUnixTimestamp64Milli(ts)) engine = CnchMergeTree partition by toDate(ts) order by ts_neg;
+system stop merges porder5;
+insert into porder5 (ts) values ('2024-06-01 10:00:00.000'), ('2024-06-03 12:00:00.000');
+insert into porder5 (ts) values ('2024-06-02 11:00:00.000');
+select 'porder5 newest-first', toString(ts) from porder5 order by ts_neg;
+select 'porder5 oldest-first', toString(ts) from porder5 order by ts_neg desc;
+select 'porder5 newest limit 1', toString(ts) from porder5 order by ts_neg limit 1;
+drop table porder5;
+
 -- negative case: partition by non-atomic function
 drop table if exists norder1;
 create table norder1 (c1 Int64) engine = CnchMergeTree partition by c1 % 4 order by c1;
