@@ -1,5 +1,6 @@
 #include <Optimizer/Rewriter/AutoPartitionOrder.h>
 
+#include <Optimizer/PartitionOrderGate.h>
 #include <Optimizer/CardinalityEstimate/FilterEstimator.h>
 #include <Optimizer/CardinalityEstimate/TableScanEstimator.h>
 #include <QueryPlan/QueryPlan.h>
