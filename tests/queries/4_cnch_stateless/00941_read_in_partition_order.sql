@@ -93,3 +93,12 @@ insert into norder4 select number, 1 from numbers(5);
 select * from norder4 order by c2; -- { serverError 277 }
 select * from norder4 where c1 < 2 order by c2; -- { serverError 277 }
 drop table norder4;
+
+-- negative case: leading sort column MATERIALIZED from the partition base via a NON-monotonic function.
+-- Detection must NOT infer partition order here (a hash isn't order-preserving, so newest-first can't be
+-- proven and a wrong direction would return the oldest rows) -> force_read_in_partition_order errors.
+drop table if exists norder5;
+create table norder5 (ts DateTime, h Int64 MATERIALIZED -toInt64(cityHash64(ts))) engine = CnchMergeTree partition by toDate(ts) order by h;
+insert into norder5 (ts) values ('2024-06-01 10:00:00'), ('2024-06-02 10:00:00');
+select * from norder5 order by h; -- { serverError 277 }
+drop table norder5;

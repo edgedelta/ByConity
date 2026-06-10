@@ -486,12 +486,6 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
     std::pair<DiskPtr, String> cache_entry = segment_cache->get(segment_key);
     if (cache_entry.first == nullptr)
     {
-        // TEMP instrumentation: log the exact key the read looks up on a local index-segment miss,
-        // so it can be diffed against the IDXKEYPROBE write keys (PartFileDiskCacheSegment::cacheToDisk).
-        if (is_idx)
-            LOG_DEBUG(logger, "IDXKEYPROBE read-miss key={} segment_idx={} cache_segment_size={} part_name={} stream={}",
-                segment_key, segment_idx, cache_segment_size, part_name, stream_name);
-
         if (settings.read_settings.disk_cache_mode == DiskCacheMode::FORCE_DISK_CACHE)
             throw Exception(ErrorCodes::DISK_CACHE_NOT_USED, "Can't find disk cache {} but enable `FORCE_DISK_CACHE`", segment_key);
 

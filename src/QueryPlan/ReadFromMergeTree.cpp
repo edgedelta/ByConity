@@ -203,19 +203,21 @@ static int composeMonotonicSign(const ExpressionActions & expr, const String & a
 
 /// Inverse topology of the cases handled below: the leading sort column is itself MATERIALIZED from
 /// the partition's base column, e.g. PARTITION BY toDate(ts), ORDER BY ts_neg where
-/// ts_neg MATERIALIZED -toUnixTimestamp64Milli(ts). Partitions are then orderable consistently with the
-/// sort key, but in the opposite direction (the sort key is a *negation* of an increasing function of
-/// the base, while the partition value increases with the base).
+/// ts_neg MATERIALIZED -toUnixTimestamp64Milli(ts). Both the sort expression and the partition
+/// expression must be provably monotonic in that shared base column; the partition read direction is
+/// reversed when their monotonicity signs oppose.
 ///
-/// Narrow detection for the negation pattern: we don't ask the framework for the inner conversion's
-/// monotonicity (some time conversions like toUnixTimestamp64Milli don't expose it) — the explicit
-/// negate() plus a nondecreasing partition key is sufficient, since ts -> unix-ms is strictly increasing.
-static bool tryDetectNegatedSortKeyOverPartitionBase(
+/// Monotonicity is verified via composeMonotonicSign for BOTH expressions — it returns 0 when any
+/// function in a chain doesn't expose monotonicity (e.g. a hash), in which case we bail and fall back
+/// to the plain merge. This is what makes a non-monotonic inner safe: it can't be
+/// mistaken for newest-first and produce wrong results.
+static bool tryDetectSortKeyMonotonicOverPartitionBase(
     const StorageInMemoryMetadata & metadata,
     const Names & sorting_columns,
     const String & partition_column,
     const KeyDescription & partition_key,
-    ContextPtr context)
+    ContextPtr context,
+    bool & reverse_partition_value_order)
 {
     if (sorting_columns.empty())
         return false;
@@ -225,17 +227,18 @@ static bool tryDetectNegatedSortKeyOverPartitionBase(
     if (!sort_default || sort_default->kind != ColumnDefaultKind::Materialized || !sort_default->expression)
         return false;
 
-    const auto * neg = sort_default->expression->as<ASTFunction>();
-    if (!neg || neg->name != "negate" || !neg->arguments || neg->arguments->children.size() != 1)
+    auto sort_key = KeyDescription::getKeyFromAST(sort_default->expression, metadata.getColumns(), context);
+    Names sort_required = sort_key.expression->getRequiredColumns();
+    if (sort_required.size() != 1 || sort_required[0] != partition_column)
         return false;
 
-    auto inner = KeyDescription::getKeyFromAST(neg->arguments->children[0], metadata.getColumns(), context);
-    Names inner_required = inner.expression->getRequiredColumns();
-    if (inner_required.size() != 1 || inner_required[0] != partition_column)
+    int sort_sign = composeMonotonicSign(*sort_key.expression, partition_column);
+    int part_sign = composeMonotonicSign(*partition_key.expression, partition_column);
+    if (sort_sign == 0 || part_sign == 0)
         return false;
 
-    /// Partition value must increase with the base column, so (partition asc) == (sort key desc).
-    return composeMonotonicSign(*partition_key.expression, partition_column) == 1;
+    reverse_partition_value_order = (sort_sign * part_sign) < 0;
+    return true;
 }
 
 static bool canReadInPartitionOrder(
@@ -274,11 +277,9 @@ static bool canReadInPartitionOrder(
         {
             /// Inverse case: the leading sort column is materialized from the partition's base column
             /// (e.g. ORDER BY ts_neg = -toUnixTimestamp64Milli(ts), PARTITION BY toDate(ts)).
-            if (tryDetectNegatedSortKeyOverPartitionBase(metadata, sorting_columns, partition_column, partition_key, context))
-            {
-                reverse_partition_value_order = true;
+            if (tryDetectSortKeyMonotonicOverPartitionBase(
+                    metadata, sorting_columns, partition_column, partition_key, context, reverse_partition_value_order))
                 return true;
-            }
             return false;
         }
 
