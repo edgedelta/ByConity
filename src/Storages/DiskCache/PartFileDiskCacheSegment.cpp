@@ -192,6 +192,11 @@ void PartFileDiskCacheSegment::cacheToDisk(IDiskCache & disk_cache, bool throw_e
                 data_file->seek(stream_file_pos.file_offset + cache_data_left_offset);
                 LimitReadBuffer segment_value(*data_file, cache_data_bytes, false);
                 disk_cache.getDataCache()->set(getSegmentName(), segment_value, cache_data_bytes, preload_level > 0, max_time);
+                // TEMP instrumentation: log the exact key written for index segments (preload or query prefetch),
+                // to diff against the IDXKEYPROBE read-miss keys (MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache).
+                if (extension != ".bin")
+                    LOG_DEBUG(log, "IDXKEYPROBE write key={} segment_number={} unique_part={} segment_size={} preload_level={} max_time={}",
+                        getSegmentName(), segment_number, data_part->getUniquePartName(), segment_size, preload_level, max_time);
                 LOG_TRACE(disk_cache.getLogger(), "Cached part{} data file: {}, preload_level: {}", extension, getSegmentName(), preload_level);
             }
 

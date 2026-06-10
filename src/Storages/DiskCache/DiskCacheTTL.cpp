@@ -465,7 +465,13 @@ void DiskCacheTTL::set(const String& seg_name, ReadBuffer& value, size_t weight_
     if (!shouldCache(part_ts))
     {
         if (part_ts == 0)
+        {
             cache_stats.rejected_non_time_partition++;
+            // TEMP instrumentation: which segments get rejected because no partition timestamp could be
+            // determined (max_time<=0 AND parsePartitionTimestamp(seg_name) returned 0). seg_name's 2nd
+            // path component is the part name; the extension (.idx/.bin) shows index vs data.
+            LOG_DEBUG(log, "NONTIMEPROBE reject seg_name={} max_time={} is_preload={}", seg_name, max_time, is_preload);
+        }
         else
             cache_stats.rejected_too_old++;
         LOG_TRACE(log, "Skipping cache for expired partition: {}", seg_name);
