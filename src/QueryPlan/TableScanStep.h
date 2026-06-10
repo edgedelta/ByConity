@@ -141,6 +141,9 @@ public:
     void setReadOrder(SortDescription read_order);
     SortDescription getReadOrder() const;
 
+    /// Set by the auto partition-order optimizer pass; carried in query_info to ReadFromMergeTree.
+    void setAutoPartitionOrderEstimate(const AutoPartitionOrderEstimate & est) { query_info.auto_partition_order_estimate = est; }
+
     void formatOutputStream(ContextPtr context);
 
     bool setLimit(size_t limit, const ContextMutablePtr & context);

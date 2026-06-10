@@ -848,6 +848,9 @@ enum PreloadLevelSettings : UInt64
     M(Bool, optimize_read_in_order, true, "Enable ORDER BY optimization for reading data in corresponding order in MergeTree tables.", 0) \
     M(Bool, optimize_read_in_partition_order, false, "In optimize_read_in_order mode, whether to read parts partition-by-partition if applicable, it will also delay inverted index evaluation till pipeline execution", 0) \
     M(Bool, force_read_in_partition_order, 0, "Similar to optimize_read_in_partition_order, but throw an exception if it cannot be applied to the query, mainly for testing", 0) \
+    M(Bool, enable_auto_partition_order, false, "Let the optimizer decide partition-order reading from statistics (enable when a tight LIMIT exists and the newest partition is estimated to hold >= LIMIT matching rows), instead of relying only on the optimize_read_in_partition_order setting.", 0) \
+    M(Bool, auto_partition_order_fulltext_default, true, "When the auto partition-order gate cannot estimate selectivity (full-text hasToken/GIN predicates with no token statistics), whether to enable partition-order anyway (log-tail bias).", 0) \
+    M(Float, auto_partition_order_safety_factor, 1.0, "Multiplier on LIMIT in the auto partition-order gate; >1 requires a larger estimated newest-partition margin before enabling.", 0) \
     M(Bool, optimize_aggregation_in_order, false, "Enable GROUP BY optimization for aggregating data in corresponding order in MergeTree tables.", 0) \
     M(UInt64, read_in_order_two_level_merge_threshold, 100, "Minimal number of parts to read to run preliminary merge step during multithread reading in order of primary key.", 0) \
     M(Bool, low_cardinality_allow_in_native_format, true, "Use LowCardinality type in Native format. Otherwise, convert LowCardinality columns to ordinary for select query, and convert ordinary columns to required LowCardinality for insert query.", 0) \

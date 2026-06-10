@@ -1246,9 +1246,11 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
         auto interpreter = std::make_shared<InterpreterSelectQuery>(query_info.query, mutable_context, options);
         interpreter->execute(true);
         auto backup_input_order_info = query_info.input_order_info;
+        auto backup_auto_partition_order_estimate = query_info.auto_partition_order_estimate;
         query_info = interpreter->getQueryInfo();
         query_info = fillQueryInfo(build_context.context);
         query_info.input_order_info = backup_input_order_info;
+        query_info.auto_partition_order_estimate = backup_auto_partition_order_estimate;
         if (partition_filter)
             query_info.partition_filter = partition_filter;
     }

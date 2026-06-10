@@ -150,6 +150,8 @@ public:
 
     void fillRuntimeAttributeDescriptions(const ReadFromMergeTree::AnalysisResult & result);
     void collectCacheStats();
+    /// Emit the auto partition-order decision + its inputs as a RuntimeAttributeKeys::PartitionOrder attribute.
+    void describePartitionOrderDecision(bool used, bool auto_decided, UInt64 selected_partitions);
 
     StorageID getStorageID() const { return data.getStorageID(); }
     UInt64 getSelectedParts() const { return selected_parts; }

@@ -42,6 +42,7 @@
 #include <Interpreters/InterpreterSelectQuery.h>
 #include <Interpreters/RewriteDistributedQueryVisitor.h>
 #include <Optimizer/PredicateUtils.h>
+#include <Optimizer/PartitionOrderGate.h>
 #include <Storages/MergeTree/FilterWithRowUtils.h>
 
 namespace ProfileEvents
@@ -1582,9 +1583,23 @@ void ReadFromMergeTree::initializePipeline(QueryPipeline & pipeline, const Build
         auto syntax_result = TreeRewriter(context).analyze(order_key_prefix_ast, metadata_for_reading->getColumns().getAllPhysical());
         auto sorting_key_prefix_expr = ExpressionAnalyzer(order_key_prefix_ast, syntax_result, context).getActionsDAG(false);
 
+        /// Auto partition-order gate: the optimizer supplies selectivity / row-count / limit from stats;
+        /// we apply the decision here with the real pruned partition count as P.
+        bool auto_partition_order = false;
+        if (query_info.auto_partition_order_estimate && result.selected_partitions > 0)
+        {
+            const auto & est = *query_info.auto_partition_order_estimate;
+            auto_partition_order = partitionOrderGate(
+                est.limit, est.selectivity, est.row_count, result.selected_partitions,
+                settings.auto_partition_order_fulltext_default, settings.auto_partition_order_safety_factor);
+        }
+
         bool reverse_partition_value_order = false;
-        can_read_in_partition_order = (settings.optimize_read_in_partition_order || settings.force_read_in_partition_order)
+        can_read_in_partition_order
+            = (settings.optimize_read_in_partition_order || settings.force_read_in_partition_order || auto_partition_order)
             && canReadInPartitionOrder(*metadata_for_reading, *input_order_info, query_info.query->as<ASTSelectQuery &>(), context, reverse_partition_value_order);
+
+        describePartitionOrderDecision(can_read_in_partition_order, auto_partition_order, result.selected_partitions);
 
         if (can_read_in_partition_order && result.selected_partitions > 1)
         {
@@ -1943,6 +1958,40 @@ void ReadFromMergeTree::fillRuntimeAttributeDescriptions(const ReadFromMergeTree
         result.selected_ranges);
     attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::SelectParts, std::move(parts_desc));
 
+}
+
+void ReadFromMergeTree::describePartitionOrderDecision(bool used, bool auto_decided, UInt64 selected_partitions)
+{
+    const auto & settings = context->getSettingsRef();
+    const auto & est_opt = query_info.auto_partition_order_estimate;
+
+    String reason;
+    if (used && auto_decided)
+        reason = "auto cost gate";
+    else if (used && (settings.optimize_read_in_partition_order || settings.force_read_in_partition_order))
+        reason = "forced by setting";
+    else if (!used && est_opt)
+        reason = "rejected by cost gate";
+    else if (!used)
+        reason = "not eligible";
+    else
+        reason = "enabled";
+
+    RuntimeAttributeDescription desc;
+    desc.name_and_detail.emplace_back("decision", fmt::format("used: {} | reason: {}", used ? "yes" : "no", reason));
+    if (est_opt)
+    {
+        const auto & est = *est_opt;
+        const double est_newest = (selected_partitions > 0 && est.selectivity >= 0)
+            ? est.selectivity * static_cast<double>(est.row_count) / static_cast<double>(selected_partitions)
+            : -1;
+        desc.name_and_detail.emplace_back(
+            "inputs",
+            fmt::format(
+                "selectivity: {} (<0 = unknown/full-text) | row_count: {} | partitions: {} | est_newest_rows: {} | limit: {}",
+                est.selectivity, est.row_count, selected_partitions, est_newest, est.limit));
+    }
+    attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::PartitionOrder, std::move(desc));
 }
 
 void ReadFromMergeTree::collectCacheStats()

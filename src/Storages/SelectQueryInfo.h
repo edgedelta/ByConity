@@ -190,6 +190,17 @@ struct ProjectionCandidate
 };
 
 class InterpreterSelectQuery;
+
+/// Optimizer-computed inputs to the auto partition-order gate (see Optimizer/PartitionOrderGate.h).
+/// selectivity and row_count come from statistics on the server; ReadFromMergeTree applies the gate using
+/// these plus the real pruned partition count. selectivity < 0 means "unknown"; limit == 0 means the gate is inactive.
+struct AutoPartitionOrderEstimate
+{
+    double selectivity = -1;
+    UInt64 row_count = 0;
+    UInt64 limit = 0;
+};
+
 /** Query along with some additional data,
   *  that can be used during query processing
   *  inside storage engines.
@@ -215,6 +226,8 @@ struct SelectQueryInfo
     ReadInOrderOptimizerPtr order_optimizer;
     /// Can be modified while reading from storage
     InputOrderInfoPtr input_order_info;
+
+    std::optional<AutoPartitionOrderEstimate> auto_partition_order_estimate;
 
     MergeTreeIndexContextPtr index_context;
 

@@ -41,6 +41,7 @@
 #include <Optimizer/Rewriter/UnifyJoinOutputs.h>
 #include <Optimizer/Rewriter/UnifyNullableType.h>
 #include <Optimizer/Rewriter/UseSortingProperty.h>
+#include <Optimizer/Rewriter/AutoPartitionOrder.h>
 #include <Optimizer/Rule/Rules.h>
 #include <Optimizer/ShortCircuitPlanner.h>
 #include <QueryPlan/GraphvizPrinter.h>
@@ -133,6 +134,7 @@ const Rewriters & PlanOptimizer::getSimpleRewriters()
         std::make_shared<OptimizeTrivialCount>(),
         std::make_shared<UnaliasSymbolReferences>(),
         std::make_shared<IterativeRewriter>(Rules::pushIntoTableScanRules(), "PushIntoTableScan"),
+        std::make_shared<AutoPartitionOrder>(), // after pushdown so filter+limit are on the TableScanStep
         std::make_shared<ShareCommonExpression>(), // this rule depends on enable_optimizer_early_prewhere_push_down
         std::make_shared<IterativeRewriter>(Rules::removeRedundantRules(), "RemoveRedundant"),
         std::make_shared<IterativeRewriter>(Rules::inlineProjectionRules(), "InlineProjection"),
@@ -311,6 +313,7 @@ const Rewriters & PlanOptimizer::getFullRewriters()
         // push predicate into storage
         std::make_shared<UnaliasSymbolReferences>(),
         std::make_shared<IterativeRewriter>(Rules::pushIntoTableScanRules(), "PushIntoTableScan"),
+        std::make_shared<AutoPartitionOrder>(), // after pushdown so filter+limit are on the TableScanStep
         std::make_shared<ShareCommonExpression>(), // this rule depends on enable_optimizer_early_prewhere_push_down
         // TODO cost-based projection push down
         std::make_shared<IterativeRewriter>(Rules::removeRedundantRules(), "RemoveRedundant"),

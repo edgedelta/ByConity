@@ -226,6 +226,17 @@ message SelectQueryInfo {
   optional AST partition_filter = 3;
   optional TableScanCacheInfo cache_info = 4;
   optional InputOrderInfo input_order_info = 5;
+  optional AutoPartitionOrderEstimate auto_partition_order_estimate = 6;
+}
+
+// Optimizer-computed inputs to the auto partition-order gate (selectivity & row count from statistics,
+// plus the LIMIT). Present only when enable_auto_partition_order is on and read-in-order applies.
+// ReadFromMergeTree applies the gate using these plus the real pruned partition count. selectivity < 0
+// means "unknown" (full-text); limit == 0 means inactive.
+message AutoPartitionOrderEstimate {
+  optional double selectivity = 1 [default = -1];
+  optional uint64 row_count = 2 [default = 0];
+  optional uint64 limit = 3 [default = 0];
 }
 
 message NameWithAliasPair {
