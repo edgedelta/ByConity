@@ -724,6 +724,12 @@ String PlanPrinter::TextPrinter::printAttributes(PlanNodeBase & plan, const Text
                 for (const auto & desc : attribute.at(RuntimeAttributeKeys::CacheStats)->name_and_detail)
                     out << intent.detailIntent() << space << "    " << desc.second;
             }
+            if (attribute.contains(RuntimeAttributeKeys::PartitionOrder))
+            {
+                out << intent.detailIntent() << space << "PartitionOrder:";
+                for (const auto & desc : attribute.at(RuntimeAttributeKeys::PartitionOrder)->name_and_detail)
+                    out << intent.detailIntent() << space << "    " << desc.second;
+            }
         }
         return out.str();
     }
