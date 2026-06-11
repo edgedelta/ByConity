@@ -6,49 +6,48 @@
 #include <QueryPlan/QueryPlan.h>
 #include <QueryPlan/SimplePlanVisitor.h>
 #include <QueryPlan/TableScanStep.h>
-#include <Interpreters/evaluateConstantExpression.h>
-#include <Interpreters/convertFieldToType.h>
-#include <DataTypes/DataTypesNumber.h>
-#include <Parsers/ASTSelectQuery.h>
+#include <QueryPlan/SortingStep.h>
+#include <QueryPlan/LimitStep.h>
 
 namespace DB
 {
 
 namespace
 {
-    /// Walks the plan and records the auto partition-order gate inputs on each eligible TableScan.
-    class Visitor : public SimplePlanVisitor<Void>
+    /// Walks the plan carrying the effective LIMIT down from the Sorting/Limit node.
+    /// At each eligible TableScan it records the auto partition-order gate inputs (s, R, limit).
+    /// The traversal context (UInt64) is the applicable limit; 0 = no limit in scope.
+    class Visitor : public SimplePlanVisitor<UInt64>
     {
     public:
-        Visitor(ContextMutablePtr context_, CTEInfo & cte_info) : SimplePlanVisitor<Void>(cte_info), context(context_) { }
+        Visitor(ContextMutablePtr context_, CTEInfo & cte_info) : SimplePlanVisitor<UInt64>(cte_info), context(context_) { }
 
-        Void visitTableScanNode(TableScanNode & node, Void & c) override
+        Void visitLimitNode(LimitNode & node, UInt64 & limit) override
+        {
+            const auto * step = dynamic_cast<const LimitStep *>(node.getStep().get());
+            UInt64 next = (step && !step->hasPreparedParam()) ? step->getLimitForSorting() : limit;
+            for (const auto & child : node.getChildren())
+                VisitorUtil::accept(*child, *this, next);
+            return Void{};
+        }
+
+        Void visitSortingNode(SortingNode & node, UInt64 & limit) override
+        {
+            const auto * step = dynamic_cast<const SortingStep *>(node.getStep().get());
+            UInt64 l = step ? step->getLimitValue() : 0;
+            UInt64 next = l ? l : limit;
+            for (const auto & child : node.getChildren())
+                VisitorUtil::accept(*child, *this, next);
+            return Void{};
+        }
+
+        Void visitTableScanNode(TableScanNode & node, UInt64 & limit) override
         {
             auto step = node.getStep();
 
-            /// Only relevant when read-in-order was chosen for this scan.
-            if (!step->getQueryInfo().input_order_info)
-                return visitPlanNode(node, c);
-
-            /// LIMIT (pushed onto the step by PushLimitIntoTableScan). 0 => no early termination => gate inactive.
-            UInt64 limit = 0;
-            if (const auto * select = step->getQueryInfo().query->as<ASTSelectQuery>())
-            {
-                if (auto limit_length = select->limitLength())
-                {
-                    try
-                    {
-                        auto [field, type] = evaluateConstantExpression(limit_length, context);
-                        limit = convertFieldToType(field, DataTypeUInt64()).safeGet<UInt64>();
-                    }
-                    catch (...)
-                    {
-                        limit = 0;
-                    }
-                }
-            }
-            if (limit == 0)
-                return visitPlanNode(node, c);
+            /// Only relevant when read-in-order was chosen and a LIMIT is in scope.
+            if (!step->getQueryInfo().input_order_info || limit == 0)
+                return visitPlanNode(node, limit);
 
             /// Table row count from statistics (fallback to a fresh estimate, as PushStorageFilter does).
             PlanNodeStatisticsPtr stat;
@@ -57,10 +56,10 @@ namespace
             else
                 stat = TableScanEstimator::estimate(context, static_cast<const TableScanStep &>(*step));
             if (!stat)
-                return visitPlanNode(node, c);
+                return visitPlanNode(node, limit);
 
             /// Selectivity of the pushed-down filter. No filter => everything passes (s = 1).
-            /// estimateFilterSelectivityOpt returns nullopt when it cannot estimate (full-text) => -1 = unknown,
+            /// estimateFilterSelectivityOpt returns nullopt when it cannot estimate (full-text) => unknown,
             /// which ReadFromMergeTree resolves via auto_partition_order_fulltext_default.
             double selectivity = 1.0;
             if (auto filter_step = step->getPushdownFilter())
@@ -78,7 +77,7 @@ namespace
             }
 
             step->setAutoPartitionOrderEstimate(AutoPartitionOrderEstimate{selectivity, stat->getRowCount(), limit});
-            return visitPlanNode(node, c);
+            return visitPlanNode(node, limit);
         }
 
     private:
@@ -88,9 +87,9 @@ namespace
 
 void AutoPartitionOrder::rewrite(QueryPlan & plan, ContextMutablePtr context) const
 {
-    Void c;
+    UInt64 limit = 0;
     Visitor visitor{context, plan.getCTEInfo()};
-    VisitorUtil::accept(plan.getPlanNode(), visitor, c);
+    VisitorUtil::accept(plan.getPlanNode(), visitor, limit);
 }
 
 }
