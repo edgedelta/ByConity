@@ -15,7 +15,7 @@ namespace DB
 namespace
 {
     /// Walks the plan carrying the effective LIMIT down from the Sorting/Limit node.
-    /// At each eligible TableScan it records the auto partition-order gate inputs (s, R, limit).
+    /// At each eligible TableScan it records the auto partition-order gate inputs (selectivity, limit).
     /// The traversal context (UInt64) is the applicable limit; 0 = no limit in scope.
     class Visitor : public SimplePlanVisitor<UInt64>
     {
@@ -49,21 +49,22 @@ namespace
             if (!step->getQueryInfo().input_order_info || limit == 0)
                 return visitPlanNode(node, limit);
 
-            /// Table row count from statistics (fallback to a fresh estimate, as PushStorageFilter does).
-            PlanNodeStatisticsPtr stat;
-            if (node.getStatistics().has_value())
-                stat = node.getStatistics().value();
-            else
-                stat = TableScanEstimator::estimate(context, static_cast<const TableScanStep &>(*step));
-            if (!stat)
-                return visitPlanNode(node, limit);
-
-            /// Selectivity of the pushed-down filter. No filter => everything passes (s = 1).
-            /// estimateFilterSelectivityOpt returns nullopt when it cannot estimate (full-text) => unknown,
-            /// which ReadFromMergeTree resolves via auto_partition_order_fulltext_default.
+            /// Selectivity of the pushed-down filter. No filter => everything passes and the
+            /// newest partition trivially satisfies any LIMIT.
             double selectivity = 1.0;
             if (auto filter_step = step->getPushdownFilter())
             {
+                /// Statistics are needed to estimate the filter.
+                PlanNodeStatisticsPtr stat;
+                if (node.getStatistics().has_value())
+                    stat = node.getStatistics().value();
+                else
+                    stat = TableScanEstimator::estimate(context, static_cast<const TableScanStep &>(*step));
+
+                /// No table statistics at all => we cannot judge the filter => do NOT arm the gate.
+                if (!stat)
+                    return visitPlanNode(node, limit);
+
                 ConstASTPtr predicate = filter_step->getFilter();
                 IdentifierNameSet used_columns;
                 predicate->collectIdentifierNames(used_columns);
@@ -72,11 +73,12 @@ namespace
                 for (const auto & name : used_columns)
                     if (columns_desc.hasPhysical(name))
                         column_types.emplace_back(columns_desc.getPhysical(name));
+                /// Stats exist but the predicate is unestimable => negative sentinel.
                 auto s_opt = FilterEstimator::estimateFilterSelectivityOpt(stat, predicate, column_types, context);
                 selectivity = s_opt.value_or(PARTITION_ORDER_UNKNOWN_SELECTIVITY);
             }
 
-            step->setAutoPartitionOrderEstimate(AutoPartitionOrderEstimate{selectivity, stat->getRowCount(), limit});
+            step->setAutoPartitionOrderEstimate(AutoPartitionOrderEstimate{selectivity, limit});
             return visitPlanNode(node, limit);
         }
 

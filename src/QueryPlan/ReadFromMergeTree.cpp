@@ -732,6 +732,29 @@ struct PartitionValueComparator
             return l > r;
     }
 };
+
+/// Total rows of the partition that the partition-order reader will visit first.
+/// `ascend` must match spreadMarkRangesAmongStreamsWithPartitionOrder's sort direction so we pick the
+/// same first-read partition.
+static UInt64 rowsInFirstReadPartition(const RangesInDataParts & parts, bool ascend)
+{
+    if (parts.empty())
+        return 0;
+
+    auto first_in_read_order = [ascend](const RangesInDataPart & a, const RangesInDataPart & b)
+    {
+        const auto & l = a.data_part->partition.value[0];
+        const auto & r = b.data_part->partition.value[0];
+        return ascend ? (l < r) : (l > r);
+    };
+    const auto & first = *std::min_element(parts.begin(), parts.end(), first_in_read_order);
+
+    UInt64 rows = 0;
+    for (const auto & p : parts)
+        if (p.data_part->partition.value == first.data_part->partition.value)
+            rows += p.data_part->rows_count;
+    return rows;
+}
 } // anonymouse namespace
 
 Pipe ReadFromMergeTree::spreadMarkRangesAmongStreamsWithPartitionOrder(
@@ -1583,23 +1606,34 @@ void ReadFromMergeTree::initializePipeline(QueryPipeline & pipeline, const Build
         auto syntax_result = TreeRewriter(context).analyze(order_key_prefix_ast, metadata_for_reading->getColumns().getAllPhysical());
         auto sorting_key_prefix_expr = ExpressionAnalyzer(order_key_prefix_ast, syntax_result, context).getActionsDAG(false);
 
-        /// Auto partition-order gate: the optimizer supplies selectivity / row-count / limit from stats;
-        /// we apply the decision here with the real pruned partition count as P.
+        /// Structural check first: it tells us whether the sort key is partition-aligned AND the read
+        /// direction, which we need to identify the newest partition.
+        /// Skip it entirely when nothing requests partition-order.
+        const bool wants_partition_order = settings.optimize_read_in_partition_order
+            || settings.force_read_in_partition_order || query_info.auto_partition_order_estimate.has_value();
+        bool reverse_partition_value_order = false;
+        const bool structural_partition_order = wants_partition_order
+            && canReadInPartitionOrder(
+                *metadata_for_reading, *input_order_info, query_info.query->as<ASTSelectQuery &>(), context, reverse_partition_value_order);
+
+        /// Auto partition-order gate: the optimizer supplies selectivity + limit.
         bool auto_partition_order = false;
-        if (query_info.auto_partition_order_estimate && result.selected_partitions > 0)
+        UInt64 rows_newest = 0;
+        if (query_info.auto_partition_order_estimate && structural_partition_order && result.selected_partitions > 0)
         {
             const auto & est = *query_info.auto_partition_order_estimate;
+            const bool ascend = (input_order_info->direction > 0) != reverse_partition_value_order;
+            rows_newest = rowsInFirstReadPartition(result.parts_with_ranges, ascend);
             auto_partition_order = partitionOrderGate(
-                est.limit, est.selectivity, est.row_count, result.selected_partitions,
+                est.limit, est.selectivity, rows_newest,
                 settings.auto_partition_order_fulltext_default, settings.auto_partition_order_safety_factor);
         }
 
-        bool reverse_partition_value_order = false;
         can_read_in_partition_order
             = (settings.optimize_read_in_partition_order || settings.force_read_in_partition_order || auto_partition_order)
-            && canReadInPartitionOrder(*metadata_for_reading, *input_order_info, query_info.query->as<ASTSelectQuery &>(), context, reverse_partition_value_order);
+            && structural_partition_order;
 
-        describePartitionOrderDecision(can_read_in_partition_order, auto_partition_order, result.selected_partitions);
+        describePartitionOrderDecision(can_read_in_partition_order, auto_partition_order, result.selected_partitions, rows_newest);
 
         if (can_read_in_partition_order && result.selected_partitions > 1)
         {
@@ -1960,7 +1994,7 @@ void ReadFromMergeTree::fillRuntimeAttributeDescriptions(const ReadFromMergeTree
 
 }
 
-void ReadFromMergeTree::describePartitionOrderDecision(bool used, bool auto_decided, UInt64 selected_partitions)
+void ReadFromMergeTree::describePartitionOrderDecision(bool used, bool auto_decided, UInt64 selected_partitions, UInt64 rows_newest)
 {
     const auto & settings = context->getSettingsRef();
     const auto & est_opt = query_info.auto_partition_order_estimate;
@@ -1982,14 +2016,14 @@ void ReadFromMergeTree::describePartitionOrderDecision(bool used, bool auto_deci
     if (est_opt)
     {
         const auto & est = *est_opt;
-        const double est_newest = (selected_partitions > 0 && est.selectivity >= 0)
-            ? est.selectivity * static_cast<double>(est.row_count) / static_cast<double>(selected_partitions)
+        const double est_matches_newest = est.selectivity >= 0
+            ? est.selectivity * static_cast<double>(rows_newest)
             : -1;
         desc.name_and_detail.emplace_back(
             "inputs",
             fmt::format(
-                "selectivity: {} (<0 = unknown/full-text) | row_count: {} | partitions: {} | est_newest_rows: {} | limit: {}",
-                est.selectivity, est.row_count, selected_partitions, est_newest, est.limit));
+                "selectivity: {} (<0 = unknown/full-text) | rows_newest_partition: {} | partitions: {} | est_matches_newest: {} | limit: {}",
+                est.selectivity, rows_newest, selected_partitions, est_matches_newest, est.limit));
     }
     attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::PartitionOrder, std::move(desc));
 }

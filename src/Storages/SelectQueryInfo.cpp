@@ -61,7 +61,6 @@ void SelectQueryInfo::toProto(Protos::SelectQueryInfo & proto) const
     {
         auto * est = proto.mutable_auto_partition_order_estimate();
         est->set_selectivity(auto_partition_order_estimate->selectivity);
-        est->set_row_count(auto_partition_order_estimate->row_count);
         est->set_limit(auto_partition_order_estimate->limit);
     }
 }
@@ -76,7 +75,7 @@ void SelectQueryInfo::fillFromProto(const Protos::SelectQueryInfo & proto)
     if (proto.has_auto_partition_order_estimate())
     {
         const auto & est = proto.auto_partition_order_estimate();
-        auto_partition_order_estimate = AutoPartitionOrderEstimate{est.selectivity(), est.row_count(), est.limit()};
+        auto_partition_order_estimate = AutoPartitionOrderEstimate{est.selectivity(), est.limit()};
     }
     else
         auto_partition_order_estimate.reset();

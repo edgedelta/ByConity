@@ -192,12 +192,11 @@ struct ProjectionCandidate
 class InterpreterSelectQuery;
 
 /// Optimizer-computed inputs to the auto partition-order gate (see Optimizer/PartitionOrderGate.h).
-/// selectivity and row_count come from statistics on the server; ReadFromMergeTree applies the gate using
-/// these plus the real pruned partition count. selectivity < 0 means "unknown"; limit == 0 means the gate is inactive.
+/// selectivity comes from FilterEstimator on the server; ReadFromMergeTree applies the gate using it plus
+/// the EXACT rows in the newest pruned partition. selectivity < 0 means "unknown"; limit == 0 means the gate is inactive.
 struct AutoPartitionOrderEstimate
 {
     double selectivity = -1;
-    UInt64 row_count = 0;
     UInt64 limit = 0;
 };
 

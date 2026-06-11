@@ -8,9 +8,9 @@ namespace DB
 /// Auto partition-order optimizer pass.
 ///
 /// For each TableScan that reads in primary-key order and carries a LIMIT, estimate the filter
-/// selectivity and table row count from statistics and stash them (AutoPartitionOrderEstimate) on the
-/// scan's query_info. ReadFromMergeTree later applies the final cost gate (s*R/P >= N) using the real
-/// pruned partition count P = selected_partitions, which the optimizer cannot know.
+/// selectivity from statistics and stash it with the LIMIT (AutoPartitionOrderEstimate) on the scan's
+/// query_info. ReadFromMergeTree later applies the final cost gate (s * rows_newest >= N) using the exact
+/// row count of the newest pruned partition, which the optimizer cannot know.
 ///
 /// Must run AFTER PushIntoTableScan so the filter (pushdown_filter) and the limit are on the
 /// TableScanStep. It only records inputs; it does not change the plan shape.
