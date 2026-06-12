@@ -1948,7 +1948,6 @@ MarkRanges MergeTreeDataSelectExecutor::filterMarksUsingIndex(
 
     if (dynamic_cast<const MergeTreeIndexInverted *>(&*index_helper) != nullptr)
     {
-        context->mustEnableAdditionalService(AdditionalService::FullTextSearch, true);
         std::unique_ptr<IGinDataPartHelper> gin_part_helper = nullptr;
         if (part->getType() == IMergeTreeDataPart::Type::CNCH)
         {
@@ -1962,15 +1961,12 @@ MarkRanges MergeTreeDataSelectExecutor::filterMarksUsingIndex(
         {
             gin_part_helper = std::make_unique<GinDataLocalPartHelper>(*part);
         }
-        cache_in_store.store = context->getGinIndexStoreFactory()->get(index_helper->getFileName(), std::move(gin_part_helper));
+        index_time_watcher.watch(IndexTimeWatcher::Type::READ, [&](){
+            cache_in_store.store = context->getGinIndexStoreFactory()->get(index_helper->getFileName(), std::move(gin_part_helper));
+        });
     }
 
     const auto * gin_filter_condition = dynamic_cast<const MergeTreeConditionInverted *>(&*condition);
-
-    if (gin_filter_condition != nullptr)
-    {
-        context->mustEnableAdditionalService(AdditionalService::FullTextSearch, true);
-    }
 
     for (const auto & range : ranges)
     {
@@ -1978,12 +1974,12 @@ MarkRanges MergeTreeDataSelectExecutor::filterMarksUsingIndex(
                 range.begin / index_granularity,
                 (range.end + index_granularity - 1) / index_granularity);
 
+        total_granules += range.end - range.begin;
+
         index_time_watcher.watch(IndexTimeWatcher::Type::SEEK, [&](){
             if (last_index_mark != index_range.begin || !granule)
                 reader.seek(index_range.begin);
         });
-
-        total_granules += index_range.end - index_range.begin;
 
         for (size_t index_mark = index_range.begin; index_mark < index_range.end; ++index_mark)
         {
@@ -2007,14 +2003,17 @@ MarkRanges MergeTreeDataSelectExecutor::filterMarksUsingIndex(
             else
             {
                 roaring::Roaring filter_result;
-                maybe_true
-                    = cache_in_store.store ? gin_filter_condition->mayBeTrueOnGranuleInPart(granule, cache_in_store, filter_result) : true;
+                index_time_watcher.watch(IndexTimeWatcher::Type::CLAC, [&](){
+                    maybe_true = cache_in_store.store
+                        ? gin_filter_condition->mayBeTrueOnGranuleInPart(granule, cache_in_store, filter_result)
+                        : true;
+                });
                 filter_bitmap |= filter_result;
             }
 
             if (!maybe_true)
             {
-                ++granules_dropped;
+                granules_dropped += data_range.end - data_range.begin;
                 continue;
             }
 

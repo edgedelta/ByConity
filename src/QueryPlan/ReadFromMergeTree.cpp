@@ -32,13 +32,17 @@
 #include <DataTypes/MapHelpers.h>
 #include <Functions/IFunction.h>
 #include <common/logger_useful.h>
+#include <Common/CurrentThread.h>
 #include <Common/JSONBuilder.h>
+#include <IO/WriteBufferFromString.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Common/escapeForFileName.h>
 #include "Storages/MergeTree/MergeTreeIOSettings.h"
 #include <Parsers/queryToString.h>
 #include <Interpreters/InterpreterSelectQuery.h>
 #include <Interpreters/RewriteDistributedQueryVisitor.h>
 #include <Optimizer/PredicateUtils.h>
+#include <Optimizer/PartitionOrderGate.h>
 #include <Storages/MergeTree/FilterWithRowUtils.h>
 
 namespace ProfileEvents
@@ -46,6 +50,9 @@ namespace ProfileEvents
     extern const Event SelectedParts;
     extern const Event SelectedRanges;
     extern const Event SelectedMarks;
+    extern const Event IndexGranuleSeekTime;
+    extern const Event IndexGranuleReadTime;
+    extern const Event IndexGranuleCalcTime;
 }
 
 namespace DB
@@ -169,11 +176,80 @@ static bool isSamePartition(const RangesInDataPart & lhs, const RangesInDataPart
     return lhs.data_part->partition.value == rhs.data_part->partition.value;
 }
 
+/// Compose the monotonicity sign of a chain of single-argument monotonic functions applied to `arg`.
+/// Returns +1 (nondecreasing), -1 (nonincreasing), or 0 (undetermined / not a simple monotonic chain).
+static int composeMonotonicSign(const ExpressionActions & expr, const String & arg)
+{
+    int sign = 1;
+    String cur = arg;
+    bool saw_function = false;
+    for (const auto & action : expr.getActions())
+    {
+        if (action.node->type != ActionsDAG::ActionType::FUNCTION)
+            continue;
+        if (action.node->children.size() != 1 || action.node->children.at(0)->result_name != cur)
+            return 0;
+        const auto & func = *action.node->function_base;
+        if (!func.hasInformationAboutMonotonicity())
+            return 0;
+        auto m = func.getMonotonicityForRange(*func.getArgumentTypes().at(0), {}, {});
+        if (!m.is_monotonic)
+            return 0;
+        sign *= (m.is_positive ? 1 : -1);
+        cur = action.node->result_name;
+        saw_function = true;
+    }
+    return saw_function ? sign : 0;
+}
+
+/// Inverse topology of the cases handled below: the leading sort column is itself MATERIALIZED from
+/// the partition's base column, e.g. PARTITION BY toDate(ts), ORDER BY ts_neg where
+/// ts_neg MATERIALIZED -toUnixTimestamp64Milli(ts). Both the sort expression and the partition
+/// expression must be provably monotonic in that shared base column; the partition read direction is
+/// reversed when their monotonicity signs oppose.
+///
+/// Monotonicity is verified via composeMonotonicSign for BOTH expressions — it returns 0 when any
+/// function in a chain doesn't expose monotonicity (e.g. a hash), in which case we bail and fall back
+/// to the plain merge. This is what makes a non-monotonic inner safe: it can't be
+/// mistaken for newest-first and produce wrong results.
+static bool tryDetectSortKeyMonotonicOverPartitionBase(
+    const StorageInMemoryMetadata & metadata,
+    const Names & sorting_columns,
+    const String & partition_column,
+    const KeyDescription & partition_key,
+    ContextPtr context,
+    bool & reverse_partition_value_order)
+{
+    if (sorting_columns.empty())
+        return false;
+
+    const String & lead_sort_col = sorting_columns.front();
+    auto sort_default = metadata.getColumns().getDefault(lead_sort_col);
+    if (!sort_default || sort_default->kind != ColumnDefaultKind::Materialized || !sort_default->expression)
+        return false;
+
+    auto sort_key = KeyDescription::getKeyFromAST(sort_default->expression, metadata.getColumns(), context);
+    Names sort_required = sort_key.expression->getRequiredColumns();
+    if (sort_required.size() != 1 || sort_required[0] != partition_column)
+        return false;
+
+    int sort_sign = composeMonotonicSign(*sort_key.expression, partition_column);
+    int part_sign = composeMonotonicSign(*partition_key.expression, partition_column);
+    if (sort_sign == 0 || part_sign == 0)
+        return false;
+
+    reverse_partition_value_order = (sort_sign * part_sign) < 0;
+    return true;
+}
+
 static bool canReadInPartitionOrder(
     const StorageInMemoryMetadata & metadata,
     const InputOrderInfo & input_order_info,
-    const ASTSelectQuery & select)
+    const ASTSelectQuery & select,
+    ContextPtr context,
+    bool & reverse_partition_value_order)
 {
+    reverse_partition_value_order = false;
     if (!metadata.isPartitionKeyDefined() || !metadata.isSortingKeyDefined())
         return false;
 
@@ -191,8 +267,34 @@ static bool canReadInPartitionOrder(
 
     /// sorting columns should contain partition column
     auto partition_column_it = std::find(sorting_columns.begin(), sorting_columns.end(), partition_column);
+
+    /// If partition_column is a MATERIALIZED alias (e.g. `date MATERIALIZED toDate(timestamp)`)
+    /// it won't appear directly in sorting columns.  Expand it and retry.
+    ExpressionActionsPtr expanded_expr;
     if (partition_column_it == sorting_columns.end())
-        return false;
+    {
+        auto col_default = metadata.getColumns().getDefault(partition_column);
+        if (!col_default || col_default->kind != ColumnDefaultKind::Materialized || !col_default->expression)
+        {
+            /// Inverse case: the leading sort column is materialized from the partition's base column
+            /// (e.g. ORDER BY ts_neg = -toUnixTimestamp64Milli(ts), PARTITION BY toDate(ts)).
+            if (tryDetectSortKeyMonotonicOverPartitionBase(
+                    metadata, sorting_columns, partition_column, partition_key, context, reverse_partition_value_order))
+                return true;
+            return false;
+        }
+
+        auto mat_key = KeyDescription::getKeyFromAST(col_default->expression, metadata.getColumns(), context);
+        Names mat_required = mat_key.expression->getRequiredColumns();
+        if (mat_required.size() != 1)
+            return false;
+
+        partition_column_it = std::find(sorting_columns.begin(), sorting_columns.end(), mat_required[0]);
+        if (partition_column_it == sorting_columns.end())
+            return false;
+
+        expanded_expr = mat_key.expression;
+    }
 
     /// Allow table "partition by c order by (a, b, c)" for query "where a={} and b={} order by c",
     /// where all sorting columns before partition column match single value,
@@ -227,9 +329,11 @@ static bool canReadInPartitionOrder(
     if (partition_key.column_names.front() == *partition_column_it)
         return true;
 
-    /// Allow "partition by func(x) order by (x)" where func is monotonic nondecreasing
+    /// Allow "partition by func(x) order by (x)" where func is monotonic nondecreasing.
+    /// For MATERIALIZED columns use the expanded expression; otherwise use the partition key expression.
+    const ExpressionActions & expr_for_monotonicity = expanded_expr ? *expanded_expr : *partition_key.expression;
     IFunction::Monotonicity monotonicity;
-    for (const auto & action : partition_key.expression->getActions())
+    for (const auto & action : expr_for_monotonicity.getActions())
     {
         if (action.node->type != ActionsDAG::ActionType::FUNCTION)
         {
@@ -628,6 +732,29 @@ struct PartitionValueComparator
             return l > r;
     }
 };
+
+/// Total rows of the partition that the partition-order reader will visit first.
+/// `ascend` must match spreadMarkRangesAmongStreamsWithPartitionOrder's sort direction so we pick the
+/// same first-read partition.
+static UInt64 rowsInFirstReadPartition(const RangesInDataParts & parts, bool ascend)
+{
+    if (parts.empty())
+        return 0;
+
+    auto first_in_read_order = [ascend](const RangesInDataPart & a, const RangesInDataPart & b)
+    {
+        const auto & l = a.data_part->partition.value[0];
+        const auto & r = b.data_part->partition.value[0];
+        return ascend ? (l < r) : (l > r);
+    };
+    const auto & first = *std::min_element(parts.begin(), parts.end(), first_in_read_order);
+
+    UInt64 rows = 0;
+    for (const auto & p : parts)
+        if (p.data_part->partition.value == first.data_part->partition.value)
+            rows += p.data_part->rows_count;
+    return rows;
+}
 } // anonymouse namespace
 
 Pipe ReadFromMergeTree::spreadMarkRangesAmongStreamsWithPartitionOrder(
@@ -636,12 +763,17 @@ Pipe ReadFromMergeTree::spreadMarkRangesAmongStreamsWithPartitionOrder(
     const ActionsDAGPtr & sorting_key_prefix_expr,
     ActionsDAGPtr & out_projection,
     const InputOrderInfoPtr & input_order_info,
-    const std::shared_ptr<DelayedSkipIndex> & delayed_index)
+    const std::shared_ptr<DelayedSkipIndex> & delayed_index,
+    bool reverse_partition_value_order)
 {
     chassert(!parts_with_ranges.empty());
 
-    /// sort parts by partition value
-    if (input_order_info->direction > 0)
+    /// Sort parts by partition value, consistent with the sort-key direction.
+    /// reverse_partition_value_order flips it when the sort key is inversely monotonic to the
+    /// partition value (e.g. ORDER BY -toUnixTimestamp64Milli(ts) over PARTITION BY toDate(ts)):
+    /// reading the sort key ascending then means reading partitions newest-first.
+    const bool ascend = (input_order_info->direction > 0) != reverse_partition_value_order;
+    if (ascend)
         std::sort(parts_with_ranges.begin(), parts_with_ranges.end(), PartitionValueComparator<true>{});
     else
         std::sort(parts_with_ranges.begin(), parts_with_ranges.end(), PartitionValueComparator<false>{});
@@ -1397,7 +1529,7 @@ void ReadFromMergeTree::initializePipeline(QueryPipeline & pipeline, const Build
         result.selected_marks,
         result.selected_ranges);
 
-    if (context->getSettingsRef().report_segment_profiles)
+    if (context->getSettingsRef().report_segment_profiles || context->getSettingsRef().log_segment_profiles)
         fillRuntimeAttributeDescriptions(result);
 
     ProfileEvents::increment(ProfileEvents::SelectedParts, result.selected_parts);
@@ -1474,8 +1606,34 @@ void ReadFromMergeTree::initializePipeline(QueryPipeline & pipeline, const Build
         auto syntax_result = TreeRewriter(context).analyze(order_key_prefix_ast, metadata_for_reading->getColumns().getAllPhysical());
         auto sorting_key_prefix_expr = ExpressionAnalyzer(order_key_prefix_ast, syntax_result, context).getActionsDAG(false);
 
-        can_read_in_partition_order = (settings.optimize_read_in_partition_order || settings.force_read_in_partition_order)
-            && canReadInPartitionOrder(*metadata_for_reading, *input_order_info, query_info.query->as<ASTSelectQuery &>());
+        /// Structural check first: it tells us whether the sort key is partition-aligned AND the read
+        /// direction, which we need to identify the newest partition.
+        /// Skip it entirely when nothing requests partition-order.
+        const bool wants_partition_order = settings.optimize_read_in_partition_order
+            || settings.force_read_in_partition_order || query_info.auto_partition_order_estimate.has_value();
+        bool reverse_partition_value_order = false;
+        const bool structural_partition_order = wants_partition_order
+            && canReadInPartitionOrder(
+                *metadata_for_reading, *input_order_info, query_info.query->as<ASTSelectQuery &>(), context, reverse_partition_value_order);
+
+        /// Auto partition-order gate: the optimizer supplies selectivity + limit.
+        bool auto_partition_order = false;
+        UInt64 rows_newest = 0;
+        if (query_info.auto_partition_order_estimate && structural_partition_order && result.selected_partitions > 0)
+        {
+            const auto & est = *query_info.auto_partition_order_estimate;
+            const bool ascend = (input_order_info->direction > 0) != reverse_partition_value_order;
+            rows_newest = rowsInFirstReadPartition(result.parts_with_ranges, ascend);
+            auto_partition_order = partitionOrderGate(
+                est.limit, est.selectivity, rows_newest,
+                settings.auto_partition_order_fulltext_default, settings.auto_partition_order_safety_factor);
+        }
+
+        can_read_in_partition_order
+            = (settings.optimize_read_in_partition_order || settings.force_read_in_partition_order || auto_partition_order)
+            && structural_partition_order;
+
+        describePartitionOrderDecision(can_read_in_partition_order, auto_partition_order, result.selected_partitions, rows_newest);
 
         if (can_read_in_partition_order && result.selected_partitions > 1)
         {
@@ -1485,7 +1643,8 @@ void ReadFromMergeTree::initializePipeline(QueryPipeline & pipeline, const Build
                 sorting_key_prefix_expr,
                 result_projection,
                 input_order_info,
-                result.delayed_indices);
+                result.delayed_indices,
+                reverse_partition_value_order);
         }
         else
         {
@@ -1759,54 +1918,210 @@ std::shared_ptr<IQueryPlanStep> ReadFromMergeTree::copy(ContextPtr) const
 
 void ReadFromMergeTree::fillRuntimeAttributeDescriptions(const ReadFromMergeTree::AnalysisResult & result)
 {
-    auto index_stats = result.index_stats;
-    if (!result.index_stats.empty())
+    const auto & index_stats = result.index_stats;
+    if (!index_stats.empty())
     {
         RuntimeAttributeDescription index_desc;
-        for (size_t i = 0; i < index_stats.size(); ++i)
+        auto stages_array = std::make_unique<JSONBuilder::JSONArray>();
+        UInt64 prev_parts = 0;
+        UInt64 prev_granules = 0;
+        bool has_prev = false;
+        for (const auto & stat : index_stats)
         {
-            const auto & stat = index_stats[i];
             if (stat.type == IndexType::None)
                 continue;
-            std::stringstream out;
-            out << "Type: " << indexTypeToString(stat.type) << ";";
+            String entry = fmt::format("Type: {};", indexTypeToString(stat.type));
             if (!stat.name.empty())
-                out << " Name: " << stat.name << ";";
+                entry += fmt::format(" Name: {};", stat.name);
             if (!stat.description.empty())
-                out << " Description: " << stat.description << ";";
+                entry += fmt::format(" Description: {};", stat.description);
             if (!stat.used_keys.empty())
-            {
-                String keys = fmt::format("{}", fmt::join(stat.used_keys, ","));
-                out << " Keys: " << keys << ";";
-            }
+                entry += fmt::format(" Keys: {};", fmt::join(stat.used_keys, ","));
             if (!stat.condition.empty())
-                out << " Condition: " << stat.condition << ";";
-            out << " Parts: " << stat.num_parts_after;
-            if (i)
-                out << '/' << index_stats[i - 1].num_parts_after;
-            out << ";";
-            out << " Granules: " << stat.num_granules_after;
-            if (i)
-                out << '/' << index_stats[i - 1].num_granules_after;
-            out << ";";
-            index_desc.name_and_detail.emplace_back(indexTypeToString(stat.type), out.str());
+                entry += fmt::format(" Condition: {};", stat.condition);
+            if (has_prev)
+                entry += fmt::format(" Parts: {}/{};", stat.num_parts_after, prev_parts);
+            else
+                entry += fmt::format(" Parts: {};", stat.num_parts_after);
+            if (has_prev)
+                entry += fmt::format(" Granules: {}/{};", stat.num_granules_after, prev_granules);
+            else
+                entry += fmt::format(" Granules: {};", stat.num_granules_after);
+            index_desc.name_and_detail.emplace_back(indexTypeToString(stat.type), std::move(entry));
+
+            auto stage = std::make_unique<JSONBuilder::JSONMap>();
+            stage->add("type", indexTypeToString(stat.type));
+            if (!stat.name.empty())
+                stage->add("name", stat.name);
+            if (!stat.condition.empty())
+                stage->add("condition", stat.condition);
+            if (!stat.used_keys.empty())
+                stage->add("keys", fmt::to_string(fmt::join(stat.used_keys, ",")));
+            stage->add("parts_after", stat.num_parts_after);
+            stage->add("granules_after", stat.num_granules_after);
+            stages_array->add(std::move(stage));
+
+            prev_parts = stat.num_parts_after;
+            prev_granules = stat.num_granules_after;
+            has_prev = true;
         }
-        index_desc.description = "Indexes";
-        attribute_descriptions.emplace(index_desc.description, std::move(index_desc));
+
+        auto idx_json = std::make_unique<JSONBuilder::JSONMap>();
+        idx_json->add("total_parts", result.total_parts);
+        idx_json->add("stages", std::move(stages_array));
+        WriteBufferFromOwnString idx_buf;
+        JSONBuilder::FormatSettings idx_fmt{.settings = {}};
+        JSONBuilder::FormatContext idx_ctx{.out = idx_buf};
+        idx_json->format(idx_fmt, idx_ctx);
+        index_desc.additional = idx_buf.str();
+
+        index_desc.description = RuntimeAttributeKeys::Indexes;
+        attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::Indexes, std::move(index_desc));
     }
 
     RuntimeAttributeDescription parts_desc;
-    String selected_parts_info = fmt::format(
-        "Selected {}/{} parts by partition key, {} parts by primary key, {}/{} marks by primary key, {} marks to read from {} ranges",
+    parts_desc.description = fmt::format(
+        "Selected {}/{} parts by partition key ({} partitions), {} parts by primary key, {}/{} marks by primary key, {} marks to read from {} ranges",
         result.parts_before_pk,
         result.total_parts,
+        result.selected_partitions,
         result.selected_parts,
         result.selected_marks_pk,
         result.total_marks_pk,
         result.selected_marks,
         result.selected_ranges);
-    parts_desc.description = selected_parts_info;
-    attribute_descriptions.emplace("SelectParts", std::move(parts_desc));
+    attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::SelectParts, std::move(parts_desc));
+
+}
+
+void ReadFromMergeTree::describePartitionOrderDecision(bool used, bool auto_decided, UInt64 selected_partitions, UInt64 rows_newest)
+{
+    const auto & settings = context->getSettingsRef();
+    const auto & est_opt = query_info.auto_partition_order_estimate;
+
+    String reason;
+    if (used && auto_decided)
+        reason = "auto cost gate";
+    else if (used && (settings.optimize_read_in_partition_order || settings.force_read_in_partition_order))
+        reason = "forced by setting";
+    else if (!used && est_opt)
+        reason = "rejected by cost gate";
+    else if (!used)
+        reason = "not eligible";
+    else
+        reason = "enabled";
+
+    RuntimeAttributeDescription desc;
+    desc.name_and_detail.emplace_back("decision", fmt::format("used: {} | reason: {}", used ? "yes" : "no", reason));
+    if (est_opt)
+    {
+        const auto & est = *est_opt;
+        const double est_matches_newest = est.selectivity >= 0
+            ? est.selectivity * static_cast<double>(rows_newest)
+            : -1;
+        desc.name_and_detail.emplace_back(
+            "inputs",
+            fmt::format(
+                "selectivity: {} (<0 = unknown/full-text) | rows_newest_partition: {} | partitions: {} | est_matches_newest: {} | limit: {}",
+                est.selectivity, rows_newest, selected_partitions, est_matches_newest, est.limit));
+    }
+    attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::PartitionOrder, std::move(desc));
+}
+
+void ReadFromMergeTree::collectCacheStats()
+{
+    auto query_id = CurrentThread::getQueryId().toString();
+    LOG_DEBUG(log, "collectCacheStats: query_id={}", query_id);
+    if (query_id.empty())
+        return;
+    auto cache_stats = DiskCacheFactory::instance().consumeQueryCacheStats(query_id);
+    if (!cache_stats)
+    {
+        LOG_DEBUG(log, "collectCacheStats: no stats found for query_id={}", query_id);
+        return;
+    }
+    LOG_DEBUG(log, "collectCacheStats: data hit={} miss={} steal={} s3_fallback={} cache_bytes={} s3_bytes={} idx hit={} miss={} idx_cache_bytes={} idx_s3_bytes={}",
+        cache_stats->cache_hit_segs, cache_stats->cache_miss_segs,
+        cache_stats->steal_segs, cache_stats->s3_fallback_segs,
+        cache_stats->cache_bytes, cache_stats->s3_bytes,
+        cache_stats->idx_hit_segs, cache_stats->idx_miss_segs,
+        cache_stats->idx_cache_bytes, cache_stats->idx_s3_bytes);
+    JSONBuilder::JSONMap cache_map;
+    cache_map.add("cache_hit_segs",   cache_stats->cache_hit_segs);
+    cache_map.add("cache_miss_segs",  cache_stats->cache_miss_segs);
+    cache_map.add("steal_segs",       cache_stats->steal_segs);
+    cache_map.add("s3_fallback_segs", cache_stats->s3_fallback_segs);
+    cache_map.add("cache_bytes",      cache_stats->cache_bytes);
+    cache_map.add("s3_bytes",         cache_stats->s3_bytes);
+    /// Internally tracked in microseconds, JSON keys stay in ms for downstream compatibility.
+    /// read_ms = pure IO+decompress time; open_ms = segment-open wall time. open finds long-pole streams, io measures actual work.
+    cache_map.add("cache_read_ms",     cache_stats->cache_io_us / 1000);
+    cache_map.add("s3_read_ms",        cache_stats->s3_io_us / 1000);
+    cache_map.add("cache_open_ms",     cache_stats->cache_open_us / 1000);
+    cache_map.add("cache_open_ms_max", cache_stats->cache_open_us_max / 1000);
+    cache_map.add("cache_open_ms_min", cache_stats->cache_open_us_min == UINT64_MAX ? 0 : cache_stats->cache_open_us_min / 1000);
+    cache_map.add("s3_open_ms",        cache_stats->s3_open_us / 1000);
+    cache_map.add("read_threads",      cache_stats->read_threads);
+    cache_map.add("eff_par_x10",       (cache_stats->cache_io_us + cache_stats->s3_io_us) * 10
+                                           / std::max<uint64_t>(cache_stats->cache_open_us_max, 1));
+    cache_map.add("idx_hit_segs",     cache_stats->idx_hit_segs);
+    cache_map.add("idx_miss_segs",    cache_stats->idx_miss_segs);
+    cache_map.add("idx_cache_bytes",  cache_stats->idx_cache_bytes);
+    cache_map.add("idx_s3_bytes",     cache_stats->idx_s3_bytes);
+    cache_map.add("idx_cache_read_ms", cache_stats->idx_cache_read_us / 1000);
+    cache_map.add("idx_s3_read_ms",   cache_stats->idx_s3_read_us / 1000);
+    cache_map.add("slowest_open_part", cache_stats->max_reader_label);
+    WriteBufferFromOwnString buf;
+    JSONBuilder::FormatSettings json_fmt{.settings = {}};
+    JSONBuilder::FormatContext fmt_ctx{.out = buf};
+    cache_map.format(json_fmt, fmt_ctx);
+    RuntimeAttributeDescription cache_desc;
+    cache_desc.description = buf.str();
+    /// eff = total refill time / longest stream lifetime: the average number of streams doing useful
+    /// IO concurrently. ~1-2 = a serial long pole dominates; rises toward lane count as reads parallelize.
+    /// Long-pole part (was open[max ...]) and open-min are preserved in the JSON above.
+    double eff = double(cache_stats->cache_io_us + cache_stats->s3_io_us)
+        / std::max<uint64_t>(cache_stats->cache_open_us_max, 1);
+    /// Hit-rate over all segment reads (cache + peer-steal + S3): the headline number for readers.
+    auto hit_pct = [](size_t hits, size_t total) -> int { return total ? static_cast<int>(hits * 100 / total) : 0; };
+    size_t data_total = cache_stats->cache_hit_segs + cache_stats->steal_segs + cache_stats->s3_fallback_segs;
+    /// Peer-steal group only shown when it happened, to keep the common line short.
+    String data_peer = cache_stats->steal_segs > 0
+        ? fmt::format(" | peer: {} segs", cache_stats->steal_segs)
+        : "";
+    cache_desc.name_and_detail.emplace_back("data",
+        fmt::format("column data — hit-rate {}% | cache: {} segs, {:.1f} MB, {:.1f} ms{} | S3: {} segs, {:.1f} MB, {:.1f} ms | {} threads (avg {:.1f} concurrent), slowest open {:.1f} ms",
+            hit_pct(cache_stats->cache_hit_segs, data_total),
+            cache_stats->cache_hit_segs, cache_stats->cache_bytes / (1024.0 * 1024.0), cache_stats->cache_io_us / 1000.0,
+            data_peer,
+            cache_stats->s3_fallback_segs, cache_stats->s3_bytes / (1024.0 * 1024.0), cache_stats->s3_io_us / 1000.0,
+            cache_stats->read_threads, eff, cache_stats->cache_open_us_max / 1000.0));
+    /// idx ms are per-reader averages (divided by idx_reader_count), not totals — see "index work" for totals.
+    double idx_s3_wall_ms = (cache_stats->idx_reader_count > 0
+        ? double(cache_stats->idx_s3_read_us) / cache_stats->idx_reader_count
+        : double(cache_stats->idx_s3_read_us)) / 1000.0;
+    double idx_cache_wall_ms = (cache_stats->idx_reader_count > 0
+        ? double(cache_stats->idx_cache_read_us) / cache_stats->idx_reader_count
+        : double(cache_stats->idx_cache_read_us)) / 1000.0;
+    size_t idx_total = cache_stats->idx_hit_segs + cache_stats->idx_miss_segs;
+    cache_desc.name_and_detail.emplace_back("idx",
+        fmt::format("skip index — hit-rate {}% | cache: {} segs, {:.1f} MB, {:.1f} ms | S3: {} segs, {:.1f} MB, {:.1f} ms",
+            hit_pct(cache_stats->idx_hit_segs, idx_total),
+            cache_stats->idx_hit_segs, cache_stats->idx_cache_bytes / (1024.0 * 1024.0), idx_cache_wall_ms,
+            cache_stats->idx_miss_segs, cache_stats->idx_s3_bytes / (1024.0 * 1024.0), idx_s3_wall_ms));
+
+    if (auto * tg = CurrentThread::getGroup().get())
+    {
+        auto seek_us = tg->performance_counters[ProfileEvents::IndexGranuleSeekTime].load();
+        auto read_us = tg->performance_counters[ProfileEvents::IndexGranuleReadTime].load();
+        auto calc_us = tg->performance_counters[ProfileEvents::IndexGranuleCalcTime].load();
+        if (seek_us > 0 || read_us > 0 || calc_us > 0)
+            cache_desc.name_and_detail.emplace_back("idx_eval",
+                fmt::format("index work — read {} ms, seek {} ms, check {} ms",
+                    read_us / 1000, seek_us / 1000, calc_us / 1000));
+    }
+
+    attribute_descriptions.insert_or_assign(RuntimeAttributeKeys::CacheStats, std::move(cache_desc));
 }
 
 bool MergeTreeDataSelectAnalysisResult::error() const

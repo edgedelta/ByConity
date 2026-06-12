@@ -67,6 +67,24 @@ public:
         Protos::GetManipulationTasksStatusResp * response,
         google::protobuf::Closure * done) override;
 
+    void getTTLCacheStats(
+        google::protobuf::RpcController * cntl,
+        const Protos::GetTTLCacheStatsReq * request,
+        Protos::GetTTLCacheStatsResp * response,
+        google::protobuf::Closure * done) override;
+
+    void getTTLCachePartitionStats(
+        google::protobuf::RpcController * cntl,
+        const Protos::GetTTLCachePartitionStatsReq * request,
+        Protos::GetTTLCachePartitionStatsResp * response,
+        google::protobuf::Closure * done) override;
+
+    void getPreloadStats(
+        google::protobuf::RpcController * cntl,
+        const Protos::GetPreloadStatsReq * request,
+        Protos::GetPreloadStatsResp * response,
+        google::protobuf::Closure * done) override;
+
     void GetPreallocatedStatus(
         google::protobuf::RpcController *,
         const Protos::GetPreallocatedStatusReq * request,

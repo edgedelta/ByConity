@@ -130,6 +130,15 @@ struct RuntimeAttributeDescription
     void toProto(Protos::RuntimeAttributeDescription & proto) const;
 };
 
+namespace RuntimeAttributeKeys
+{
+    static constexpr const char * Indexes = "Indexes";
+    static constexpr const char * SelectParts = "SelectParts";
+    static constexpr const char * TableScanDescription = "TableScanDescription";
+    static constexpr const char * CacheStats = "CacheStats";
+    static constexpr const char * PartitionOrder = "PartitionOrder";
+}
+
 
 /// Single step of query plan.
 class IQueryPlanStep

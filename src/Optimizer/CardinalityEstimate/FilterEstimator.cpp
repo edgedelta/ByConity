@@ -141,6 +141,21 @@ double FilterEstimator::estimateFilterSelectivity(
     return estimateFilter(*child_stats, predicate, estimator_context).first.value_or(estimator_context.default_selectivity);
 }
 
+std::optional<double> FilterEstimator::estimateFilterSelectivityOpt(
+    PlanNodeStatisticsPtr & child_stats, const ConstASTPtr & predicate, const NamesAndTypes & column_types, ContextPtr context)
+{
+    NameToType name_to_type;
+    for (const auto & item : column_types)
+        name_to_type.emplace(item.name, item.type);
+    auto interpreter = ExpressionInterpreter::basicInterpreter(name_to_type, context);
+    FilterEstimatorContext estimator_context{
+        .context = context,
+        .interpreter = interpreter,
+        .default_selectivity = context->getSettingsRef().stats_estimator_unknown_filter_selectivity,
+        .like_selectivity = context->getSettingsRef().stats_estimator_like_selectivity};
+    return estimateFilter(*child_stats, predicate, estimator_context).first;
+}
+
 ConstASTPtr tryGetIdentifier(ConstASTPtr node)
 {
     if (const auto * cast_func = node->as<ASTFunction>())

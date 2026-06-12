@@ -7,7 +7,10 @@
 #include <Server/ServerPrometheusMetricsWriter.h>
 #include <ServiceDiscovery/IServiceDiscovery.h>
 #include <Storages/StorageCnchMergeTree.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
+#include <Storages/DiskCache/DiskCacheTTL.h>
 #include <Common/HistogramMetrics.h>
+#include <Common/HostWithPorts.h>
 #include <Common/LabelledMetrics.h>
 #include <Common/RpcClientPool.h>
 #include <Common/StringUtils/StringUtils.h>
@@ -16,6 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <unordered_set>
 
 namespace DB
 {
@@ -570,6 +574,80 @@ void ServerPrometheusMetricsWriter::writePartMetrics(WriteBuffer & wb)
 
 }
 
+void ServerPrometheusMetricsWriter::writeTTLCacheMetrics(WriteBuffer & wb)
+{
+    auto caches = DiskCacheFactory::instance().getAllTableTTLCaches();
+    if (caches.empty())
+        return;
+
+    const String worker_id = getWorkerID(context);
+
+    static constexpr auto PREFIX = "byconity_ttl_cache_";
+
+    // Emit one gauge or counter line. TYPE/HELP are written once per metric name across all
+    // tables, so we track which names we've already emitted the header for.
+    std::unordered_set<String> headers_written;
+
+    auto emit = [&](const char * name, const char * type, const char * help,
+                    const MetricLabels & labels, size_t value)
+    {
+        String key{PREFIX};
+        key += name;
+        if (headers_written.insert(key).second)
+        {
+            writeOutLine(wb, "# HELP", key, help);
+            writeOutLine(wb, "# TYPE", key, type);
+        }
+        writeOutLine(wb, key + getLabel(labels), value);
+    };
+
+    for (auto & [uuid, cache_ptr] : caches)
+    {
+        auto * ttl = dynamic_cast<DiskCacheTTL *>(cache_ptr.get());
+        if (!ttl)
+            continue;
+
+        auto s = ttl->getStats();
+        const String table_name = cache_ptr->getName();
+        // Include table_uuid: caches are keyed by UUID, so table_name alone can't collide.
+        MetricLabels base{{"table_name", table_name}, {"table_uuid", s.table_uuid}, {"worker_id", worker_id}};
+
+        // gauges — current state, can go up or down
+        emit("entries",        GAUGE_TYPE, "Segments currently cached on disk",               base, s.total_entries);
+        emit("bytes",          GAUGE_TYPE, "Bytes currently cached on disk",                  base, s.total_bytes);
+        emit("ttl_minutes",    GAUGE_TYPE, "Configured TTL window in minutes",                base, ttl->getTTLMinutes());
+        emit("max_size_bytes", GAUGE_TYPE, "Per-table size cap in bytes (0 = unlimited)",     base, ttl->getMaxSizeBytes());
+
+        // counters — monotonically increasing, use rate() in Prometheus
+        auto base_q = base; base_q.insert({"write_type", "query"});
+        auto base_p = base; base_p.insert({"write_type", "preload"});
+        emit("segments_written_total", COUNTER_TYPE, "Segments written to TTL cache",         base_q, s.cached_from_query);
+        emit("segments_written_total", COUNTER_TYPE, "",                                      base_p, s.cached_from_preload);
+        emit("bytes_written_total",    COUNTER_TYPE, "Bytes written to TTL cache",            base_q, s.cached_bytes_query);
+        emit("bytes_written_total",    COUNTER_TYPE, "",                                      base_p, s.cached_bytes_preload);
+
+        auto base_exp  = base; base_exp.insert({"eviction_type",  "expired"});
+        auto base_size = base; base_size.insert({"eviction_type", "size_limit"});
+        emit("evictions_total", COUNTER_TYPE, "Segments evicted from TTL cache",              base_exp,  s.evicted_expired);
+        emit("evictions_total", COUNTER_TYPE, "",                                             base_size, s.evicted_size_limit);
+
+        emit("async_evictions_triggered_total", COUNTER_TYPE, "Async eviction trigger count", base, s.async_eviction_triggered);
+
+        auto base_old    = base; base_old.insert({"reason",    "too_old"});
+        auto base_ntime  = base; base_ntime.insert({"reason",  "non_time_partition"});
+        emit("rejections_total", COUNTER_TYPE, "Segments rejected from TTL cache",            base_old,   s.rejected_too_old);
+        emit("rejections_total", COUNTER_TYPE, "",                                            base_ntime, s.rejected_non_time_partition);
+
+        emit("hits_total",   COUNTER_TYPE, "Cache segment read hits",   base, s.total_hits);
+        emit("misses_total", COUNTER_TYPE, "Cache segment read misses", base, s.total_misses);
+    }
+
+    // global gauges — no table label
+    MetricLabels wlabel{{"worker_id", worker_id}};
+    emit("global_bytes",       GAUGE_TYPE, "Total bytes across all TTL caches on this worker", wlabel, DiskCacheFactory::instance().getGlobalTTLUsage());
+    emit("global_limit_bytes", GAUGE_TYPE, "Global TTL cache limit on this worker",            wlabel, DiskCacheFactory::instance().getGlobalTTLLimit());
+}
+
 void ServerPrometheusMetricsWriter::write(WriteBuffer & wb)
 {
     writeConfigMetrics(wb);
@@ -590,5 +668,7 @@ void ServerPrometheusMetricsWriter::write(WriteBuffer & wb)
 
     /// Export the parts related metrics, the values are consistent with the system.cnch_parts
     writePartMetrics(wb);
+
+    writeTTLCacheMetrics(wb);
 }
 }

@@ -149,6 +149,9 @@ public:
     std::shared_ptr<IQueryPlanStep> copy(ContextPtr ptr) const override;
 
     void fillRuntimeAttributeDescriptions(const ReadFromMergeTree::AnalysisResult & result);
+    void collectCacheStats();
+    /// Emit the auto partition-order decision + its inputs as a RuntimeAttributeKeys::PartitionOrder attribute.
+    void describePartitionOrderDecision(bool used, bool auto_decided, UInt64 selected_partitions, UInt64 rows_newest);
 
     StorageID getStorageID() const { return data.getStorageID(); }
     UInt64 getSelectedParts() const { return selected_parts; }
@@ -233,7 +236,8 @@ private:
         const ActionsDAGPtr & sorting_key_prefix_expr,
         ActionsDAGPtr & out_projection,
         const InputOrderInfoPtr & input_order_info,
-        const std::shared_ptr<DelayedSkipIndex> & delayed_index);
+        const std::shared_ptr<DelayedSkipIndex> & delayed_index,
+        bool reverse_partition_value_order);
 
     Pipe spreadMarkRangesAmongStreamsFinal(
         RangesInDataParts && parts,

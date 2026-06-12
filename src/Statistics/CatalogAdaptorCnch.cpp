@@ -90,8 +90,9 @@ UInt64 CatalogAdaptorCnch::fetchAddUdiCount(const StatsTableIdentifier & table, 
     UInt64 old_count = 0;
     if (stats_collection.count(tag))
     {
-        auto ptr = stats_collection.at(tag);
-        old_count = std::dynamic_pointer_cast<StatsUdiCounter>(ptr)->getUdiCount();
+        auto ptr = std::dynamic_pointer_cast<StatsUdiCounter>(stats_collection.at(tag));
+        if (ptr)
+            old_count = ptr->getUdiCount();
     }
 
     if (count == 0)

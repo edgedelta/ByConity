@@ -96,6 +96,8 @@
 #include <DataTypes/ObjectUtils.h>
 #include <Storages/StorageSnapshot.h>
 #include <Transaction/TxnTimestamp.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
+#include <Storages/DiskCache/IDiskCache.h>
 
 
 namespace ProfileEvents
@@ -259,13 +261,6 @@ QueryProcessingStage::Enum StorageCnchMergeTree::getQueryProcessingStage(
     }
 }
 
-void StorageCnchMergeTree::startup()
-{
-}
-
-void StorageCnchMergeTree::shutdown()
-{
-}
 
 Pipe StorageCnchMergeTree::read(
     const Names & column_names,
@@ -1483,7 +1478,9 @@ void StorageCnchMergeTree::sendPreloadTasks(ContextPtr local_context, ServerData
         std::vector<brpc::CallId> ids;
         for (const auto & resource : resources)
         {
-            if (resource.server_parts.empty())
+            /// Big parts split by hybrid allocation arrive as virtual_parts, not server_parts
+            /// skipping when only virtual parts are present would silently drop them from preload
+            if (resource.server_parts.empty() && resource.virtual_parts.empty())
                 continue;
 
             brpc::CallId id = client->preloadDataParts(
@@ -1492,6 +1489,7 @@ void StorageCnchMergeTree::sendPreloadTasks(ContextPtr local_context, ServerData
                 *this,
                 create_table_query,
                 resource.server_parts,
+                resource.virtual_parts,
                 handler,
                 enable_parts_sync_preload,
                 parts_preload_level,
@@ -1499,8 +1497,9 @@ void StorageCnchMergeTree::sendPreloadTasks(ContextPtr local_context, ServerData
             ids.emplace_back(id);
             LOG_TRACE(
                 log,
-                "send preload data parts size = {}, enable_parts_sync_preload = {}, parts_preload_level = {}, submit_ts = {}, time_ms = {}",
+                "send preload data parts size = {}, virtual parts size = {}, enable_parts_sync_preload = {}, parts_preload_level = {}, submit_ts = {}, time_ms = {}",
                 resource.server_parts.size(),
+                resource.virtual_parts.size(),
                 enable_parts_sync_preload,
                 parts_preload_level,
                 ts,

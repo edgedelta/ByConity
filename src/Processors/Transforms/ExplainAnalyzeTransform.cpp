@@ -1,4 +1,6 @@
 #include <set>
+#include <thread>
+#include <common/logger_useful.h>
 #include <DataTypes/DataTypeString.h>
 #include <Interpreters/InterpreterExplainQuery.h>
 #include <Interpreters/SegmentScheduler.h>
@@ -50,6 +52,44 @@ void ExplainAnalyzeTransform::transform(Chunk & chunk)
         UInt64 elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - time_start).count();
         if (elapsed >= time_out)
             break;
+        // Don't busy-spin a core while waiting for remote segment status to arrive.
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    // Wait for segment profiles to arrive. Profiles are sent before status over separate RPCs,
+    // but a worker that finishes late sends its (large) profile after the coordinator pipeline
+    // has drained, so a tight cap silently drops it and the EXPLAIN looks like fewer workers ran.
+    // EXPLAIN ANALYZE is a manual/debug query, so wait generously; warn (don't lie) on timeout.
+    constexpr Int64 profile_wait_ms = 5000;
+    if (context->getSettingsRef().report_segment_profiles || context->getSettingsRef().log_segment_profiles)
+    {
+        size_t expected_profiles = 0;
+        for (auto & desc : segment_descriptions)
+            if (desc->segment_id != 0)
+                expected_profiles += desc->parallel;
+
+        size_t received = 0;
+        auto profile_wait_start = std::chrono::steady_clock::now();
+        while (expected_profiles > 0)
+        {
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - profile_wait_start).count() >= profile_wait_ms)
+            {
+                LOG_WARNING(
+                    &Poco::Logger::get("ExplainAnalyzeTransform"),
+                    "Profile collection timed out: {}/{} segment profiles arrived in {}ms; worker sections may be "
+                    "missing from EXPLAIN ANALYZE (query results are unaffected)",
+                    received, expected_profiles, profile_wait_ms);
+                break;
+            }
+            auto current_map = scheduler->getSegmentsProfile(context->getCurrentQueryId());
+            received = 0;
+            for (auto & [seg_id, seg_profiles] : current_map)
+                received += seg_profiles.size();
+            if (received >= expected_profiles)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
     }
 
     auto profiles_map = scheduler->getSegmentsProfile(context->getCurrentQueryId());

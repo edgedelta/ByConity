@@ -1,6 +1,7 @@
 #include <DaemonManager/DaemonJobAutoStatistics.h>
 #include <Databases/IDatabase.h>
 #include <Interpreters/Context.h>
+#include <Transaction/TransactionCoordinatorRcCnch.h>
 #include <CloudServices/CnchServerClientPool.h>
 #include <Statistics/AutoStatisticsHelper.h>
 #include <Statistics/AutoStatisticsManager.h>
@@ -10,6 +11,7 @@
 #include <Statistics/CollectTarget.h>
 #include <Statistics/StatisticsCollector.h>
 #include <Statistics/SubqueryHelper.h>
+#include <MergeTreeCommon/MergeTreeMetaBase.h>
 #include <Storages/StorageDistributed.h>
 #include <Storages/StorageMergeTree.h>
 #include <boost/algorithm/string.hpp>
@@ -280,6 +282,15 @@ void AutoStatisticsManager::updateUdiInfo()
             continue;
         }
         auto table = table_opt.value();
+
+        auto storage = catalog->tryGetStorageByUUID(uuid);
+        auto * mt = storage ? dynamic_cast<MergeTreeMetaBase *>(storage.get()) : nullptr;
+        if (!mt || !mt->getSettings()->enable_auto_statistics)
+        {
+            LOG_DEBUG(logger, "auto stats skipped for {}: enable_auto_statistics not set", table.getNameForLogs());
+            continue;
+        }
+
         // TODO: refactor this with batch api to reduce impact on catalog
         auto old_udi = catalog->fetchAddUdiCount(table, delta_udi);
         auto new_udi = old_udi + delta_udi;
@@ -334,8 +345,17 @@ bool AutoStatisticsManager::executeOneTask(const std::shared_ptr<TaskInfo> & cho
             settings.fromJsonStr(chosen_task->getSettingsJson());
         }
 
-        CollectTarget target(context, table, settings, columns_name);
-        auto row_count_opt = collectStatsOnTarget(context, target);
+        auto task_context = Context::createCopy(context);
+        task_context->makeQueryContext();
+        auto [interserver_user, interserver_password] = const_cast<const Context &>(*task_context).getCnchInterserverCredentials();
+        task_context->setUser(interserver_user, interserver_password, Poco::Net::SocketAddress{});
+        auto txn = task_context->getCnchTransactionCoordinator().createTransaction(
+            CreateTransactionOption().setContext(task_context).setReadOnly(true));
+        task_context->setCurrentTransaction(txn);
+        SCOPE_EXIT({ task_context->getCnchTransactionCoordinator().finishTransaction(txn); });
+
+        CollectTarget target(task_context, table, settings, columns_name);
+        auto row_count_opt = collectStatsOnTarget(task_context, target);
 
         if (row_count_opt.has_value())
         {
@@ -416,6 +436,7 @@ void AutoStatisticsManager::initialize(ContextPtr context_, const Poco::Util::Ab
 
     LOG_INFO(the_instance->logger, "Create Thread Pool with Setting (1, 0, 1)");
     the_instance->thread_pool = std::make_unique<ThreadPool>(1, 0, 1);
+    the_instance->udi_thread_pool = std::make_unique<ThreadPool>(1, 0, 1);
     AutoStatisticsManager::is_initialized = true; // ready for instance
 }
 
@@ -508,6 +529,20 @@ void AutoStatisticsManager::scheduleDistributeUdiCount()
         auto server_cli = context->getCnchServerClientPool().get(host_with_ports);
         server_cli->redirectUdiCounter(record);
     }
+    LOG_INFO(logger, "scheduleDistributeUdiCount: done, local={} remote_targets={}", local_record.size(), remote_records.size());
+}
+
+void AutoStatisticsManager::scheduleDistributeUdiCountAsync()
+{
+    if (udi_thread_pool->active() > 0)
+    {
+        LOG_INFO(logger, "udi distribution already in progress, skip");
+        return;
+    }
+    udi_thread_pool->scheduleOrThrowOnError([this]() {
+        try { this->scheduleDistributeUdiCount(); }
+        catch (...) { tryLogCurrentException(logger, __PRETTY_FUNCTION__); }
+    });
 }
 
 void AutoStatisticsManager::scheduleCollect()

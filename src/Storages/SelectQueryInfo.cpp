@@ -57,6 +57,12 @@ void SelectQueryInfo::toProto(Protos::SelectQueryInfo & proto) const
     cache_info.toProto(*proto.mutable_cache_info());
     if (input_order_info)
         input_order_info->toProto(*proto.mutable_input_order_info());
+    if (auto_partition_order_estimate)
+    {
+        auto * est = proto.mutable_auto_partition_order_estimate();
+        est->set_selectivity(auto_partition_order_estimate->selectivity);
+        est->set_limit(auto_partition_order_estimate->limit);
+    }
 }
 
 void SelectQueryInfo::fillFromProto(const Protos::SelectQueryInfo & proto)
@@ -66,6 +72,13 @@ void SelectQueryInfo::fillFromProto(const Protos::SelectQueryInfo & proto)
     partition_filter = deserializeASTFromProto(proto.partition_filter());
     input_order_info = proto.has_input_order_info() ? InputOrderInfo::fromProto(proto.input_order_info()) : nullptr;
     cache_info.fillFromProto(proto.cache_info());
+    if (proto.has_auto_partition_order_estimate())
+    {
+        const auto & est = proto.auto_partition_order_estimate();
+        auto_partition_order_estimate = AutoPartitionOrderEstimate{est.selectivity(), est.limit()};
+    }
+    else
+        auto_partition_order_estimate.reset();
 }
 
 ASTPtr getFilterFromQueryInfo(const SelectQueryInfo & query_info, bool clone)

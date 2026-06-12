@@ -26,6 +26,19 @@
 #include "IO/BufferWithOwnMemory.h"
 
 #include <utility>
+#include <Common/Stopwatch.h>
+#include <Common/ProfileEvents.h>
+#include <common/logger_useful.h>
+
+namespace ProfileEvents
+{
+    extern const Event DiskCacheDecompressMicroseconds;
+    extern const Event DiskCacheDiskReadMicroseconds;
+    extern const Event DiskCacheUncompressedHit;
+    extern const Event DiskCacheUncompressedMiss;
+}
+
+static Poco::Logger * getLog() { return &Poco::Logger::get("CachedCompressedReadBuffer"); }
 
 
 namespace DB
@@ -69,9 +82,13 @@ bool CachedCompressedReadBuffer::nextImpl()
     /// Let's check for the presence of a decompressed block in the cache, grab the ownership of this block, if it exists.
     UInt128 key = cache->hash(path, file_pos);
 
+    bool cache_miss = false;
     owned_cell = cache->getOrSet(key, [&]()
     {
+        cache_miss = true;
         initInput();
+
+        Stopwatch io_sw;
         file_in->seek(file_pos, SEEK_SET);
 
         auto cell = std::make_shared<UncompressedCacheCell>();
@@ -79,20 +96,33 @@ bool CachedCompressedReadBuffer::nextImpl()
         size_t size_decompressed;
         size_t size_compressed_without_checksum;
         cell->compressed_size = readCompressedData(size_decompressed, size_compressed_without_checksum, false);
+        const auto io_us = io_sw.elapsedMicroseconds();
+        ProfileEvents::increment(ProfileEvents::DiskCacheDiskReadMicroseconds, io_us);
 
         if (cell->compressed_size)
         {
-            // * a little bit hack here for reducing memory copy
-            // * allocate 12 more bytes to store {size_decompressed} and {size_decompressed}, padding at the end of the data
             cell->additional_bytes = codec->getAdditionalSizeAtTheEndOfBuffer();
             auto buffer = HybridCache::Buffer{size_decompressed + cell->additional_bytes + sizeof(cell->compressed_size) + sizeof(cell->additional_bytes)};
             cell->data = std::move(buffer);
             cell->data.shrink(size_decompressed + cell->additional_bytes);
+
+            Stopwatch decompress_sw;
             decompressTo(reinterpret_cast<char *>(cell->data.data()), size_decompressed, size_compressed_without_checksum);
+            const auto decompress_us = decompress_sw.elapsedMicroseconds();
+            ProfileEvents::increment(ProfileEvents::DiskCacheDecompressMicroseconds, decompress_us);
+
+            if (log_cache_perf_)
+                LOG_DEBUG(getLog(), "[cache-perf] col={} path={} compressed={}B decompressed={}B disk_read={}us decompress={}us",
+                    column_name_, path, cell->compressed_size, size_decompressed, io_us, decompress_us);
         }
 
         return cell;
     });
+
+    if (cache_miss)
+        ProfileEvents::increment(ProfileEvents::DiskCacheUncompressedMiss);
+    else
+        ProfileEvents::increment(ProfileEvents::DiskCacheUncompressedHit);
 
     if (owned_cell->data.size() == 0)
         return false;

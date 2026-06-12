@@ -129,6 +129,8 @@ void GroupedProcessorProfile::add(ProcessorId processor_id, const ProcessorProfi
         step_id = profile->step_id;
     processor_ids.emplace(processor_id);
     parallel_size += 1;
+    if (profile->elapsed_us > 0 || profile->input_rows > 0 || profile->output_rows > 0)
+        active_parallel_size += 1;
     sum_grouped_elapsed_us += profile->elapsed_us;
     sum_grouped_input_wait_elapsed_us += profile->input_wait_elapsed_us;
     sum_grouped_output_wait_elapsed_us += profile->output_wait_elapsed_us;
@@ -242,6 +244,7 @@ void GroupedProcessorProfile::addProfileRecursively(GroupedProcessorProfilePtr &
         return;
 
     parallel_size += profile->parallel_size;
+    active_parallel_size += profile->active_parallel_size;
     worker_cnt++;
     sum_grouped_elapsed_us += profile->sum_grouped_elapsed_us;
     max_grouped_elapsed_us = std::max(max_grouped_elapsed_us, profile->max_grouped_elapsed_us);
@@ -308,6 +311,7 @@ GroupedProcessorProfile::getProfileMetricsFromOutputRoot(GroupedProcessorProfile
         profile->id = node->id;
         profile->name = node->processor_name;
         profile->parallel_size = node->parallel_size;
+        profile->active_parallel_size = node->active_parallel_size;
         for (auto & child : node->children)
         {
             profile->children_ids.emplace_back(child->id);
@@ -347,6 +351,7 @@ GroupedProcessorProfile::getGroupedProfileFromMetrics(std::unordered_map<UInt64,
     node->id = root_id;
     node->processor_name = profile->name;
     node->parallel_size = profile->parallel_size;
+    node->active_parallel_size = profile->active_parallel_size;
     node->grouped_output_rows = profile->output_rows;
     node->grouped_output_bytes = profile->output_bytes;
     node->sum_grouped_elapsed_us = profile->sum_elapsed_us;
@@ -476,7 +481,13 @@ StepProfiles GroupedProcessorProfile::aggregateOperatorProfileToStepLevel(Groupe
         for (auto & [_, level_profiles] : profiles_list.profiles_at_each_level)
         {
             for (auto & profile : level_profiles)
+            {
                 step_profile->sum_elapsed_us += profile->max_grouped_elapsed_us;
+                // Step "width" = the widest processor group of the step: lanes allocated vs lanes
+                // that actually did work. Lets EXPLAIN ANALYZE show real thread participation.
+                step_profile->parallel_size = std::max<UInt32>(step_profile->parallel_size, profile->parallel_size);
+                step_profile->active_parallel_size = std::max<UInt32>(step_profile->active_parallel_size, profile->active_parallel_size);
+            }
         }
         step_profile->id = step_id;
         res[step_id] = step_profile;

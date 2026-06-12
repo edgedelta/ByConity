@@ -20,7 +20,6 @@
  */
 
 #include <Storages/MergeTree/MergeTreeIndexReader.h>
-#include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/PartFileDiskCacheSegment.h>
 #include <Storages/DiskCache/IDiskCache.h>
 #include <Storages/DiskCache/IDiskCacheStrategy.h>
@@ -84,7 +83,7 @@ MergeTreeIndexReader::MergeTreeIndexReader(
             MergeTreeDataPartPtr source_data_part = part_->getMvccDataPart(index_name + INDEX_FILE_EXTENSION);
             if (source_data_part->enableDiskCache())
             {
-                auto disk_cache = DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
+                auto disk_cache = source_data_part->storage.getDiskCache();
 
                 segment_cache_strategy = disk_cache->getStrategy();
                 segment_cache = disk_cache;

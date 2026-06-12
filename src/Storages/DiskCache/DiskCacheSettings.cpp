@@ -24,6 +24,7 @@ void DiskCacheSettings::loadFromConfig(const Poco::Util::AbstractConfiguration &
 {
     std::string config_prefix = fmt::format("{}.{}", root, disk_cache_name); // {root}.MergeTree
     disk_policy = config.getString(config_prefix + ".disk_policy", "default");
+    ttl_disk_policy = config.getString(config_prefix + ".ttl_disk_policy", disk_policy);  // Fallback to disk_policy
     lru_max_nums = config.getUInt64(config_prefix + ".lru_max_object_num", std::numeric_limits<size_t>::max());
     // Todo: process the case which disk not have 2 TB free space
     lru_max_size = config.getUInt64(config_prefix + ".lru_max_size", static_cast<uint64_t>(2) * 1024 * 1024 * 1024 * 1024);
@@ -50,16 +51,23 @@ void DiskCacheSettings::loadFromConfig(const Poco::Util::AbstractConfiguration &
     stealing_max_retry_times = config.getUInt(config_prefix + ".stealing_max_retry_times", 3);
     stealing_retry_sleep_ms = config.getUInt(config_prefix + ".stealing_retry_sleep_ms", 100);
     stealing_max_queue_count = config.getUInt(config_prefix + ".stealing_max_queue_count", 10000);
+
+    // TTL cache settings
+    ttl_cache_max_size = config.getUInt64(config_prefix + ".ttl_cache_max_size", 0);
+    ttl_cache_max_percent = config.getDouble(config_prefix + ".ttl_cache_max_percent", 80.0);
 }
 
 std::string DiskCacheSettings::toString() const
-    {
+{
     return fmt::format(
         R"({{
-            "disk_policy": {},
+            "disk_policy": "{}",
+            "ttl_disk_policy": "{}",
             "lru_max_percent": {},
             "lru_max_size": {},
             "lru_max_nums": {},
+            "ttl_cache_max_size": {},
+            "ttl_cache_max_percent": {},
             "random_drop_threshold": {},
             "mapping_bucket_size": {},
             "lru_update_interval": {},
@@ -74,13 +82,22 @@ std::string DiskCacheSettings::toString() const
             "stats_bucket_size": {},
             "previous_disk_cache_dir": "{}",
             "latest_disk_cache_dir": "{}",
-            "meta_cache_size_ratio": "{}",
-            "meta_cache_nums_ratio": "{}"
+            "meta_cache_size_ratio": {},
+            "meta_cache_nums_ratio": {},
+            "stealing_max_request_rate": {},
+            "stealing_connection_timeout_ms": {},
+            "stealing_read_timeout_ms": {},
+            "stealing_max_retry_times": {},
+            "stealing_retry_sleep_ms": {},
+            "stealing_max_queue_count": {}
         }})",
         disk_policy,
+        ttl_disk_policy,
         lru_max_percent,
         lru_max_size,
         lru_max_nums,
+        ttl_cache_max_size,
+        ttl_cache_max_percent,
         random_drop_threshold,
         mapping_bucket_size,
         lru_update_interval,
@@ -96,6 +113,12 @@ std::string DiskCacheSettings::toString() const
         previous_disk_cache_dir,
         latest_disk_cache_dir,
         meta_cache_size_ratio,
-        meta_cache_nums_ratio);
-    }
+        meta_cache_nums_ratio,
+        stealing_max_request_rate,
+        stealing_connection_timeout_ms,
+        stealing_read_timeout_ms,
+        stealing_max_retry_times,
+        stealing_retry_sleep_ms,
+        stealing_max_queue_count);
+}
 }

@@ -505,6 +505,9 @@ enum StealingCacheMode : UInt64
     M(Bool, enable_parts_sync_preload, 0, "Enable sync preload parts", 0) \
     M(Bool, enable_gc_evict_disk_cache, false, "Enable gc evict disk cache", 0)      \
     M(UInt64, disk_cache_stealing_mode, 0, "Read/write remote vw local disk cache if cur local disk cache empty, 0: close; 1: read 2: write 3: read&write", 0) \
+    M(UInt64, disk_cache_ttl_hours, 0, "Per-table TTL cache: cache parts with max_timestamp within this age. 0 = disabled (use global LRU). >0 = enable per-table TTL cache.", 0) \
+    M(UInt64, disk_cache_max_size_bytes, 0, "Per-table cache size limit in bytes. 0 = unlimited (constrained by global limit). Only applies when disk_cache_ttl_hours > 0.", 0) \
+    M(Bool, enable_auto_statistics, false, "Enable automatic statistics collection for this table. When enabled, stats are collected after sufficient data changes (controlled by server-level update_ratio_threshold).", 0) \
     \
     /* Renamed settings - cannot be ignored */\
     M(Bool, enable_nullable_sorting_key, false, "Alias of `allow_nullable_key`", 0) \

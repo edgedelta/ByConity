@@ -175,6 +175,66 @@ std::vector<ManipulationInfo> CnchWorkerClient::getManipulationTasksStatus()
     return res;
 }
 
+std::vector<Protos::TTLCacheTableStats> CnchWorkerClient::getTTLCacheStats()
+{
+    brpc::Controller cntl;
+    Protos::GetTTLCacheStatsReq request;
+    Protos::GetTTLCacheStatsResp response;
+
+    // Cap the per-worker wait so a slow/dead worker can't stall the whole fan-out.
+    cntl.set_timeout_ms(5000);
+    stub->getTTLCacheStats(&cntl, &request, &response, nullptr);
+
+    assertController(cntl);
+    RPCHelpers::checkResponse(response);
+
+    std::vector<Protos::TTLCacheTableStats> res;
+    res.reserve(response.tables_size());
+    for (const auto & t : response.tables())
+        res.push_back(t);
+    return res;
+}
+
+std::vector<Protos::TTLCachePartitionStats> CnchWorkerClient::getTTLCachePartitionStats()
+{
+    brpc::Controller cntl;
+    Protos::GetTTLCachePartitionStatsReq request;
+    Protos::GetTTLCachePartitionStatsResp response;
+
+    // Cap the per-worker wait so a slow/dead worker can't stall the whole fan-out.
+    cntl.set_timeout_ms(5000);
+    stub->getTTLCachePartitionStats(&cntl, &request, &response, nullptr);
+
+    assertController(cntl);
+    RPCHelpers::checkResponse(response);
+
+    std::vector<Protos::TTLCachePartitionStats> res;
+    res.reserve(response.partitions_size());
+    for (const auto & p : response.partitions())
+        res.push_back(p);
+    return res;
+}
+
+std::vector<Protos::PreloadPartitionStats> CnchWorkerClient::getPreloadStats()
+{
+    brpc::Controller cntl;
+    Protos::GetPreloadStatsReq request;
+    Protos::GetPreloadStatsResp response;
+
+    // Cap the per-worker wait so a slow/dead worker can't stall the whole fan-out.
+    cntl.set_timeout_ms(5000);
+    stub->getPreloadStats(&cntl, &request, &response, nullptr);
+
+    assertController(cntl);
+    RPCHelpers::checkResponse(response);
+
+    std::vector<Protos::PreloadPartitionStats> res;
+    res.reserve(response.partitions_size());
+    for (const auto & p : response.partitions())
+        res.push_back(p);
+    return res;
+}
+
 void CnchWorkerClient::submitMvRefreshTask(
     const StorageMaterializedView & , const ManipulationTaskParams & params, TxnTimestamp txn_id)
 {
@@ -268,6 +328,7 @@ brpc::CallId CnchWorkerClient::preloadDataParts(
     const IStorage & storage,
     const String & create_local_table_query,
     const ServerDataPartsVector & parts,
+    const ServerVirtualPartVector & virtual_parts,
     const ExceptionHandlerPtr & handler,
     bool enable_parts_sync_preload,
     UInt64 parts_preload_level,
@@ -281,6 +342,9 @@ brpc::CallId CnchWorkerClient::preloadDataParts(
     request.set_preload_level(parts_preload_level);
     request.set_submit_ts(submit_ts);
     fillPartsModelForSend(storage, parts, *request.mutable_parts());
+    /// Hybrid allocation slices big parts into virtual parts; send them so the worker preloads
+    /// the same mark ranges it will read at query time.
+    fillPartsModelForSend(storage, virtual_parts, *request.mutable_virtual_parts());
 
     auto * cntl = new brpc::Controller();
     auto * response = new Protos::PreloadDataPartsResp();

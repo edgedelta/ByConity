@@ -183,6 +183,85 @@ message GetManipulationTasksStatusResp
   repeated ManipulationTask tasks = 2;
 }
 
+message TTLCacheTableStats
+{
+  optional string table_name = 1;
+  optional string table_uuid = 2;
+  optional uint64 ttl_minutes = 3;
+  optional uint64 max_size_bytes = 4;
+  optional uint64 last_eviction_run = 5;
+  optional uint64 evicted_expired = 6;
+  optional uint64 evicted_size_limit = 7;
+  optional uint64 async_triggered_evicted = 8;
+  optional uint64 async_skipped_rate_limit_evicted = 9;
+  optional uint64 rejected_non_time_partition = 12;
+  optional uint64 rejected_too_old = 13;
+  optional uint64 count_preload = 14;
+  optional uint64 count_query = 15;
+  optional uint64 bytes_preload = 16;
+  optional uint64 bytes_query = 17;
+  optional uint64 count_restored = 18;
+  optional uint64 bytes_restored = 19;
+  optional uint64 idx_count_preload = 20;
+  optional uint64 idx_bytes_preload = 21;
+  optional uint64 idx_count_query = 22;
+  optional uint64 idx_bytes_query = 23;
+  optional uint64 data_hits = 24;
+  optional uint64 data_misses = 25;
+  optional uint64 idx_hits = 26;
+  optional uint64 idx_misses = 27;
+}
+
+message GetTTLCacheStatsReq
+{
+}
+
+message GetTTLCacheStatsResp
+{
+  optional string exception = 1;
+  repeated TTLCacheTableStats tables = 2;
+}
+
+message TTLCachePartitionStats
+{
+  optional string table_name = 1;
+  optional string table_uuid = 2;
+  optional string partition = 3;
+  optional uint64 entry_count = 4;
+  optional uint64 bytes = 5;
+}
+
+message GetTTLCachePartitionStatsReq
+{
+}
+
+message GetTTLCachePartitionStatsResp
+{
+  optional string exception = 1;
+  repeated TTLCachePartitionStats partitions = 2;
+}
+
+message PreloadPartitionStats
+{
+  optional string table_name = 1;
+  optional string table_uuid = 2;
+  optional string partition_id = 3;
+  optional uint64 parts_in_flight = 4;
+  optional uint64 parts_submitted = 5;
+  optional uint64 elapsed_ms = 6;
+  optional uint64 preload_level = 7;
+}
+
+message GetPreloadStatsReq
+{
+}
+
+message GetPreloadStatsResp
+{
+  optional string exception = 1;
+  repeated PreloadPartitionStats partitions = 2;
+}
+
 message GetPreallocatedStatusReq
 {
   required UUID storage_id = 1;
@@ -218,6 +297,9 @@ message PreloadDataPartsReq
   optional uint64 preload_level = 5;
   optional uint64 submit_ts = 6;
   optional int64 read_injection = 7;
+  /// Big parts split by hybrid allocation are sent as virtual parts (whole part + assigned mark ranges)
+  /// so each worker preloads exactly the slices it will read at query time, matching query-time assignment.
+  repeated DataModelVirtualPart virtual_parts = 8;
 }
 
 message PreloadDataPartsResp
@@ -616,4 +698,8 @@ service CnchWorkerService
   rpc dropPartDiskCache(DropPartDiskCacheReq) returns (DropPartDiskCacheResp);
 
   rpc executeDedupTask(ExecuteDedupTaskReq) returns (ExecuteDedupTaskResp);
+
+  rpc getTTLCacheStats(GetTTLCacheStatsReq) returns (GetTTLCacheStatsResp);
+  rpc getTTLCachePartitionStats(GetTTLCachePartitionStatsReq) returns (GetTTLCachePartitionStatsResp);
+  rpc getPreloadStats(GetPreloadStatsReq) returns (GetPreloadStatsResp);
 }

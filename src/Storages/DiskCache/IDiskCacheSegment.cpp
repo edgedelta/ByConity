@@ -15,6 +15,7 @@
 
 #include "IDiskCacheSegment.h"
 
+#include <Core/Settings.h>
 #include <IO/WriteBufferFromString.h>
 #include <IO/WriteHelpers.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
@@ -33,6 +34,24 @@ std::unordered_map<SegmentType, String> SegmentTypeToString = {
     {META_INFO, "META_INFO"},
     {GEO_INDEX, "GEO_INDEX"}
 };
+
+bool IDiskCacheSegment::shouldCacheData(UInt64 preload_level, SegmentType seg_type)
+{
+    if (!preload_level)
+        return true;
+    if ((preload_level & PreloadLevelSettings::DataPreload) == PreloadLevelSettings::DataPreload)
+        return true;
+    /// Secondary index data is pruning metadata: cache it whenever meta is preloaded.
+    if (seg_type == SegmentType::SENCONDARY_INDEX
+        && (preload_level & PreloadLevelSettings::MetaPreload) == PreloadLevelSettings::MetaPreload)
+        return true;
+    return false;
+}
+
+bool IDiskCacheSegment::shouldCacheMarks(UInt64 preload_level)
+{
+    return !preload_level || (preload_level & PreloadLevelSettings::MetaPreload) == PreloadLevelSettings::MetaPreload;
+}
 
 String IDiskCacheSegment::formatSegmentName(
     const String & uuid, const String & part_name, const String & column_name, UInt32 segment_number, const String & extension)

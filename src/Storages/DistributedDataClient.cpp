@@ -222,6 +222,8 @@ bool DistributedDataClient::write(const String & disk_name, const std::vector<Wr
             file->set_path(write_file.path);
             file->set_offset(write_file.offset);
             file->set_length(write_file.length);
+            if (write_file.max_time > 0)
+                file->set_max_time(write_file.max_time);
         }
 
         stub.writeRemoteFile(&cntl, &request, &response, nullptr);

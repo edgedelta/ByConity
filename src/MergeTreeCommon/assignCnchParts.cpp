@@ -397,6 +397,18 @@ size_t computeVirtualPartSize(size_t min_rows_per_vp, size_t index_granularity)
     return min_rows_per_vp % index_granularity ? min_rows_per_vp / index_granularity + 1 : min_rows_per_vp / index_granularity;
 }
 
+size_t deriveHybridAlignedSegmentSize(bool enable_hybrid_allocation, size_t min_rows_per_virtual_part, size_t index_granularity)
+{
+    /// Only relevant when parts are sliced into virtual parts; otherwise keep the global default.
+    if (!enable_hybrid_allocation || min_rows_per_virtual_part == 0 || index_granularity == 0)
+        return 0;
+    /// Must return the SAME value the allocator uses for the virtual-part size, so slice
+    /// boundaries land exactly on cache-segment boundaries. Both go through computeVirtualPartSize()
+    /// keep that the single source of truth 
+    /// see assignCnchHybridParts callers in CnchServerResource.
+    return computeVirtualPartSize(min_rows_per_virtual_part, index_granularity);
+}
+
 static std::pair<ServerAssignmentMap, VirtualPartAssignmentMap> assignCnchHybridPartsWithMod(
     Poco::Logger * log, const WorkerGroupHandle & worker_group, const ServerDataPartsVector & parts, size_t virtual_part_size /* unit = num marks */)
 {
@@ -768,6 +780,52 @@ ServerVirtualPartVector getVirtualPartVector(const ServerDataPartsVector & parts
     return res;
 }
 
+static std::pair<ServerAssignmentMap, VirtualPartAssignmentMap> assignCnchHybridPartsWithJump(
+    Poco::Logger * log, const WorkerGroupHandle & worker_group, const ServerDataPartsVector & parts, size_t virtual_part_size /* unit = num marks */)
+{
+    std::pair<ServerAssignmentMap, VirtualPartAssignmentMap> res;
+    auto & physical_assignment = res.first;
+    auto & virtual_assignment = res.second;
+    const auto & shard_infos = worker_group->getShardsInfo();
+    auto num_workers = static_cast<int>(shard_infos.size());
+
+    {
+        std::vector<String> worker_ids;
+        worker_ids.reserve(num_workers);
+        for (const auto & s : shard_infos)
+            worker_ids.push_back(s.worker_id);
+        LOG_DEBUG(log, "assignCnchHybridPartsWithJump: num_workers={} workers=[{}] parts={} virtual_part_size={}",
+            num_workers, fmt::join(worker_ids, ","), parts.size(), virtual_part_size);
+    }
+
+    std::vector<HybridPart> hybrid_parts;
+    splitHybridParts(parts, virtual_part_size, hybrid_parts);
+
+    for (const auto & hybrid_part : hybrid_parts)
+    {
+        auto hash_val = fio_crc64(reinterpret_cast<const unsigned char *>(hybrid_part.key.c_str()), hybrid_part.key.length());
+        auto index = JumpConsistentHash(hash_val, num_workers);
+        const String & hostname = shard_infos[index].worker_id;
+
+        if (hybrid_part.is_virtual)
+        {
+            LOG_TRACE(log, "assignCnchHybridPartsWithJump: virtual part key {} assign to worker {}", hybrid_part.key, hostname);
+            auto insert_entry = virtual_assignment.try_emplace(hostname).first;
+            auto & mark_ranges = insert_entry->second[hybrid_part.index];
+            if (mark_ranges == nullptr)
+                mark_ranges = std::make_unique<MarkRanges>();
+            mark_ranges->emplace_back(hybrid_part.begin, hybrid_part.end);
+        }
+        else
+        {
+            physical_assignment[hostname].emplace_back(parts[hybrid_part.index]);
+        }
+    }
+
+    mergeConsecutiveRanges(virtual_assignment);
+    return res;
+}
+
 std::pair<ServerAssignmentMap, VirtualPartAssignmentMap> assignCnchHybridParts(
     const WorkerGroupHandle & worker_group, const ServerDataPartsVector & parts, size_t virtual_part_size /* unit = num marks */, const ContextPtr & query_context)
 {
@@ -804,6 +862,11 @@ std::pair<ServerAssignmentMap, VirtualPartAssignmentMap> assignCnchHybridParts(
         case Context::HybridPartAllocator::HYBRID_STRICT_RING_CONSISTENT_HASH_ONE_STAGE: {
             auto res = assignCnchHybridPartsWithStrictBoundedHash(log, worker_group, parts, virtual_part_size, true);
             reportHybridAllocStats(log, res.first, res.second, "Hybrid Allocation (Strict One Stage Bounded Consistent Hashing)");
+            return res;
+        }
+        case Context::HybridPartAllocator::HYBRID_JUMP_CONSISTENT_HASH: {
+            auto res = assignCnchHybridPartsWithJump(log, worker_group, parts, virtual_part_size);
+            reportHybridAllocStats(log, res.first, res.second, "Hybrid Allocation (Jump Consistent Hashing)");
             return res;
         }
         default: {

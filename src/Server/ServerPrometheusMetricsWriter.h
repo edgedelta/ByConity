@@ -507,50 +507,40 @@ namespace ProfileEvents
     // extern const Event DropAccessPolicyFailed;
     extern const Event IsHostServerSuccess;
     extern const Event IsHostServerFailed;
-    // extern const Event S3GETMicroseconds;
-    // extern const Event S3GETBytes;
-    // extern const Event S3GETRequestsCount;
-    // extern const Event S3GETRequestsErrors;
-    // extern const Event S3GETRequestsThrottling;
-    // extern const Event S3GETRequestsRedirects;
-    // extern const Event S3HEADMicroseconds;
-    // extern const Event S3HEADBytes;
-    // extern const Event S3HEADRequestsCount;
-    // extern const Event S3HEADRequestsErrors;
-    // extern const Event S3HEADRequestsThrottling;
-    // extern const Event S3HEADRequestsRedirects;
-    // extern const Event S3POSTMicroseconds;
-    // extern const Event S3POSTBytes;
-    // extern const Event S3POSTRequestsCount;
-    // extern const Event S3POSTRequestsErrors;
-    // extern const Event S3POSTRequestsThrottling;
-    // extern const Event S3POSTRequestsRedirects;
-    // extern const Event S3DELETEMicroseconds;
-    // extern const Event S3DELETEBytes;
-    // extern const Event S3DELETERequestsCount;
-    // extern const Event S3DELETERequestsErrors;
-    // extern const Event S3DELETERequestsThrottling;
-    // extern const Event S3DELETERequestsRedirects;
-    // extern const Event S3PATCHMicroseconds;
-    // extern const Event S3PATCHBytes;
-    // extern const Event S3PATCHRequestsCount;
-    // extern const Event S3PATCHRequestsErrors;
-    // extern const Event S3PATCHRequestsThrottling;
-    // extern const Event S3PATCHRequestsRedirects;
-    // extern const Event S3PUTMicroseconds;
-    // extern const Event S3PUTBytes;
-    // extern const Event S3PUTRequestsCount;
-    // extern const Event S3PUTRequestsErrors;
-    // extern const Event S3PUTRequestsThrottling;
-    // extern const Event S3PUTRequestsRedirects;
-    // extern const Event WriteBufferFromS3WriteMicroseconds;
-    // extern const Event WriteBufferFromS3WriteBytes;
-    // extern const Event WriteBufferFromS3WriteErrors;
-    // extern const Event ReadFromS3BufferCount;
-    // extern const Event ReadBufferFromS3ReadFailed;
-    // extern const Event ReadBufferFromS3ReadBytes;
-    // extern const Event ReadBufferFromS3ReadMicroseconds;
-    // extern const Event S3ReadAheadReaderRead;
+    extern const Event UncompressedCacheHits;
+    extern const Event UncompressedCacheMisses;
+    extern const Event MarkCacheHits;
+    extern const Event MarkCacheMisses;
+    extern const Event DiskCacheDataHits;
+    extern const Event DiskCacheDataMisses;
+    extern const Event DiskCacheIdxHits;
+    extern const Event DiskCacheIdxMisses;
+    extern const Event DiskCacheUncompressedHit;
+    extern const Event DiskCacheUncompressedMiss;
+    extern const Event DiskCacheDecompressMicroseconds;
+    extern const Event DiskCacheDiskReadMicroseconds;
+    extern const Event IndexGranuleSeekTime;
+    extern const Event IndexGranuleReadTime;
+    extern const Event IndexGranuleCalcTime;
+    extern const Event NetworkReceiveElapsedMicroseconds;
+    extern const Event NetworkReceiveBytes;
+    extern const Event NetworkSendBytes;
+    extern const Event S3ReadMicroseconds;
+    extern const Event S3ReadRequestsThrottling;
+    extern const Event ReadBufferFromS3ReadCount;
+    extern const Event PrewhereSelectedMarks;
+    extern const Event PocoHTTPS3GetCount;
+    extern const Event S3ReadRequestsCount;
+    extern const Event S3ReadRequestsErrors;
+    extern const Event ReadBufferFromS3ReadBytes;
+    extern const Event ReadBufferFromS3ReadMicroseconds;
+    extern const Event PFRAWSReadBufferReadCount;
+    extern const Event PFRAWSReadBufferPrefetchCount;
+    extern const Event PFRAWSReadBufferPrefetchUtilCount;
+    extern const Event PFRAWSReadBufferPrefetchWaitMicro;
+    extern const Event PFRAWSReadBufferRemoteReadCount;
+    extern const Event PFRAWSReadBufferRemoteReadBytes;
+    extern const Event PFRAWSReadBufferReadMicro;
     extern const Event QueryMemoryLimitExceeded;
     extern const Event InsertQuery;
     extern const Event Merge;
@@ -716,6 +706,7 @@ private:
     void writeHistogramMetrics(WriteBuffer & wb);
     void writeInternalMetrics(WriteBuffer & wb);
     void writePartMetrics(WriteBuffer & wb);
+    void writeTTLCacheMetrics(WriteBuffer & wb);
 
     static constexpr auto MAX_CONCURRENT_DEFAULT_QUERIES_KEY = "max_concurrent_default_queries";
     static constexpr auto MAX_CONCURRENT_INSERT_QUERIES_KEY = "max_concurrent_insert_queries";
@@ -1209,51 +1200,46 @@ private:
         ProfileEvents::UniqueKeyIndexMetaCacheMiss,
         ProfileEvents::UniqueKeyIndexBlockCacheHit,
         ProfileEvents::UniqueKeyIndexBlockCacheMiss,
+        /// About uncompressed/mark cache
+        ProfileEvents::UncompressedCacheHits,
+        ProfileEvents::UncompressedCacheMisses,
+        ProfileEvents::MarkCacheHits,
+        ProfileEvents::MarkCacheMisses,
+        /// About TTL disk cache hit/miss
+        ProfileEvents::DiskCacheDataHits,
+        ProfileEvents::DiskCacheDataMisses,
+        ProfileEvents::DiskCacheIdxHits,
+        ProfileEvents::DiskCacheIdxMisses,
+        ProfileEvents::DiskCacheUncompressedHit,
+        ProfileEvents::DiskCacheUncompressedMiss,
+        ProfileEvents::DiskCacheDecompressMicroseconds,
+        ProfileEvents::DiskCacheDiskReadMicroseconds,
+        /// About index granule
+        ProfileEvents::IndexGranuleSeekTime,
+        ProfileEvents::IndexGranuleReadTime,
+        ProfileEvents::IndexGranuleCalcTime,
+        /// About network
+        ProfileEvents::NetworkReceiveElapsedMicroseconds,
+        ProfileEvents::NetworkReceiveBytes,
+        ProfileEvents::NetworkSendBytes,
         /// About s3
-        // ProfileEvents::S3GETMicroseconds,
-        // ProfileEvents::S3GETBytes,
-        // ProfileEvents::S3GETRequestsCount,
-        // ProfileEvents::S3GETRequestsErrors,
-        // ProfileEvents::S3GETRequestsThrottling,
-        // ProfileEvents::S3GETRequestsRedirects,
-        // ProfileEvents::S3HEADMicroseconds,
-        // ProfileEvents::S3HEADBytes,
-        // ProfileEvents::S3HEADRequestsCount,
-        // ProfileEvents::S3HEADRequestsErrors,
-        // ProfileEvents::S3HEADRequestsThrottling,
-        // ProfileEvents::S3HEADRequestsRedirects,
-        // ProfileEvents::S3POSTMicroseconds,
-        // ProfileEvents::S3POSTBytes,
-        // ProfileEvents::S3POSTRequestsCount,
-        // ProfileEvents::S3POSTRequestsErrors,
-        // ProfileEvents::S3POSTRequestsThrottling,
-        // ProfileEvents::S3POSTRequestsRedirects,
-        // ProfileEvents::S3DELETEMicroseconds,
-        // ProfileEvents::S3DELETEBytes,
-        // ProfileEvents::S3DELETERequestsCount,
-        // ProfileEvents::S3DELETERequestsErrors,
-        // ProfileEvents::S3DELETERequestsThrottling,
-        // ProfileEvents::S3DELETERequestsRedirects,
-        // ProfileEvents::S3PATCHMicroseconds,
-        // ProfileEvents::S3PATCHBytes,
-        // ProfileEvents::S3PATCHRequestsCount,
-        // ProfileEvents::S3PATCHRequestsErrors,
-        // ProfileEvents::S3PATCHRequestsThrottling,
-        // ProfileEvents::S3PATCHRequestsRedirects,
-        // ProfileEvents::S3PUTMicroseconds,
-        // ProfileEvents::S3PUTBytes,
-        // ProfileEvents::S3PUTRequestsCount,
-        // ProfileEvents::S3PUTRequestsErrors,
-        // ProfileEvents::S3PUTRequestsThrottling,
-        // ProfileEvents::S3PUTRequestsRedirects,
-        // ProfileEvents::WriteBufferFromS3WriteMicroseconds,
-        // ProfileEvents::WriteBufferFromS3WriteBytes,
-        // ProfileEvents::WriteBufferFromS3WriteErrors,
-        // ProfileEvents::ReadBufferFromS3Read,
-        // ProfileEvents::ReadBufferFromS3ReadFailed,
-        // ProfileEvents::ReadBufferFromS3ReadBytes,
-        // ProfileEvents::ReadBufferFromS3ReadMicroseconds,
-        // ProfileEvents::S3ReadAheadReaderRead,
+        ProfileEvents::S3ReadMicroseconds,
+        ProfileEvents::S3ReadRequestsCount,
+        ProfileEvents::S3ReadRequestsErrors,
+        ProfileEvents::S3ReadRequestsThrottling,
+        ProfileEvents::ReadBufferFromS3ReadBytes,
+        ProfileEvents::ReadBufferFromS3ReadMicroseconds,
+        ProfileEvents::ReadBufferFromS3ReadCount,
+        ProfileEvents::PrewhereSelectedMarks,
+        ProfileEvents::PocoHTTPS3GetCount,
+        /// About PFRA (active path when enable_io_pfra=true)
+        ProfileEvents::PFRAWSReadBufferReadCount,
+        ProfileEvents::PFRAWSReadBufferPrefetchCount,
+        ProfileEvents::PFRAWSReadBufferPrefetchUtilCount,
+        ProfileEvents::PFRAWSReadBufferPrefetchWaitMicro,
+        ProfileEvents::PFRAWSReadBufferRemoteReadCount,
+        ProfileEvents::PFRAWSReadBufferRemoteReadBytes,
+        ProfileEvents::PFRAWSReadBufferReadMicro,
         ProfileEvents::QueryMemoryLimitExceeded,
         ProfileEvents::InsertQuery,
         ProfileEvents::Merge,

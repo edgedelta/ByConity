@@ -34,7 +34,8 @@ struct ProfileMetric
     UInt64 id;
     String name; // only use for pipeline profile
     std::vector<UInt64> children_ids;
-    UInt32 parallel_size; // only use for pipeline profile
+    UInt32 parallel_size; // pipeline profile: instances in the group; lanes allocated
+    UInt32 active_parallel_size = 0; // lanes that actually did work (elapsed/rows > 0)
     UInt32 worker_cnt = 0;
 
     UInt64 sum_elapsed_us;

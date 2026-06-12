@@ -31,6 +31,8 @@ namespace DB
 
 struct PrepareContextResult;
 class ASTSystemQuery;
+class IDiskCache;
+using IDiskCachePtr = std::shared_ptr<IDiskCache>;
 
 class StorageCnchMergeTree final : public shared_ptr_helper<StorageCnchMergeTree>, public MergeTreeMetaBase, public CnchStorageCommonHelper
 {
@@ -69,8 +71,7 @@ public:
     QueryProcessingStage::Enum
     getQueryProcessingStage(ContextPtr, QueryProcessingStage::Enum, const StorageSnapshotPtr &, SelectQueryInfo &) const override;
 
-    void startup() override;
-    void shutdown() override;
+    void startup() override {}
 
     Pipe read(
         const Names & /*column_names*/,
@@ -221,6 +222,7 @@ public:
     /// drop the memody_dict_cache of cnch table
     void dropMemoryDictCache(ContextMutablePtr & local_context);
 
+
 protected:
     StorageCnchMergeTree(
         const StorageID & table_id_,
@@ -299,6 +301,8 @@ private:
     void checkAlterInCnchServer(const AlterCommands & commands, ContextPtr local_context) const;
 
     std::unique_ptr<MergeTreeSettings> getDefaultSettings() const override;
+
+private:
 };
 
 using StorageCnchMergeTreePtr = std::shared_ptr<StorageCnchMergeTree>;

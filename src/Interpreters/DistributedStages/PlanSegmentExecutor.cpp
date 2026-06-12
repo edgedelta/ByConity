@@ -64,13 +64,16 @@
 #include <QueryPlan/Optimizations/QueryPlanOptimizationSettings.h>
 #include <QueryPlan/PlanPrinter.h>
 #include <QueryPlan/QueryPlan.h>
+#include <QueryPlan/TableScanStep.h>
 #include <brpc/callback.h>
 #include <fmt/core.h>
 #include <incubator-brpc/src/brpc/controller.h>
 #include <Poco/Logger.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Common/Brpc/BrpcChannelPoolOptions.h>
 #include <Common/CurrentThread.h>
 #include <Common/Exception.h>
+#include <Common/HostWithPorts.h>
 #include <Common/ThreadStatus.h>
 #include <Common/time.h>
 #include <common/defines.h>
@@ -296,8 +299,7 @@ void fillPlanSegmentProfile(
     ContextPtr context,
     PlanSegment * plan_segment)
 {
-    AddressInfo current_address = getLocalAddress(*context);
-    segment_profile->worker_address = extractExchangeHostPort(current_address);
+    segment_profile->worker_address = getWorkerID(context);
     if (query_status)
     {
         auto query_status_info = query_status->getInfo(true, context->getSettingsRef().log_profile_events);
@@ -324,18 +326,6 @@ void fillPlanSegmentProfile(
         auto step_profile = GroupedProcessorProfile::aggregateOperatorProfileToStepLevel(grouped_profiles);
         for (auto & [step_id, profile] : step_profile)
             segment_profile->profiles.emplace(step_id, profile);
-        auto & plan = plan_segment->getQueryPlan();
-        for (auto & node : plan.getNodes())
-        {
-            if (!node.step->getAttributeDescriptions().empty() && segment_profile->profiles.contains(node.id))
-            {
-                for (auto & att : node.step->getAttributeDescriptions())
-                {
-                    auto attribute_ptr = std::make_shared<RuntimeAttributeDescription>(att.second);
-                    segment_profile->profiles.at(node.id)->attributes.emplace(att.first, attribute_ptr);
-                }
-            }
-        }
     }
 }
 
@@ -371,6 +361,19 @@ void PlanSegmentExecutor::doExecute()
         throw;
     }
     context->setPlanSegmentProcessListEntry(process_plan_segment_entry);
+
+    // Reap this segment's per-query disk-cache stats on every exit path. The normal consume
+    // happens below in collectPostExecutionAttributes(), but it is skipped when the query is
+    // cancelled/fails or when profiling is off. Without this, the readers' mergeQueryCacheStats()
+    // entry would leak forever.
+    //
+    // INVARIANT: this SCOPE_EXIT must be declared BEFORE `pipeline` below. Scope-exit guards run
+    // in reverse declaration order; meaning a reader that flushes its remaining stats from its destructor is still reaped here.
+    String cache_stats_query_id = CurrentThread::getQueryId().toString();
+    SCOPE_EXIT({
+        if (!cache_stats_query_id.empty())
+            DiskCacheFactory::instance().discardQueryCacheStats(cache_stats_query_id);
+    });
 
     if (context->getSettingsRef().bsp_mode)
     {
@@ -491,7 +494,7 @@ void PlanSegmentExecutor::doExecute()
             PlanSegmentDescription::getPlanSegmentDescription(plan_segment_instance->plan_segment, true)
                 ->jsonPlanSegmentDescriptionAsString(collectStepRuntimeProfiles(pipeline)));
     }
-    if (context->getSettingsRef().report_segment_profiles && plan_segment)
+    if ((context->getSettingsRef().report_segment_profiles || context->getSettingsRef().log_segment_profiles) && plan_segment)
     {
         segment_profile = std::make_shared<PlanSegmentProfile>(query_log_element->client_info.initial_query_id, plan_segment->getPlanSegmentId());
         fillPlanSegmentProfile(
@@ -501,14 +504,41 @@ void PlanSegmentExecutor::doExecute()
     if (context->getSettingsRef().log_processors_profiles)
     {
         auto processors_profile_log = context->getProcessorsProfileLog();
+        if (processors_profile_log)
+            processors_profile_log->addLogs(pipeline.get(),
+                                            context->getClientInfo().initial_query_id,
+                                            std::chrono::system_clock::now(),
+                                            plan_segment->getPlanSegmentId());
+    }
 
-        if (!processors_profile_log)
-            return;
-
-        processors_profile_log->addLogs(pipeline.get(),
-                                        context->getClientInfo().initial_query_id,
-                                        std::chrono::system_clock::now(),
-                                        plan_segment->getPlanSegmentId());
+    // Collect post-execution attributes (e.g. CacheStats from TTL disk cache) into
+    // attribute_descriptions on TableScanStep, then propagate all attribute_descriptions
+    // from every plan node into the segment profile.
+    if (segment_profile && plan_segment)
+    {
+        auto & plan = plan_segment->getQueryPlan();
+        for (auto & node : plan.getNodes())
+        {
+            if (auto * ts = dynamic_cast<TableScanStep *>(node.step.get()))
+            {
+                LOG_DEBUG(logger, "Collecting post-execution attributes for TableScanStep node {}", node.id);
+                ts->collectPostExecutionAttributes();
+            }
+            auto & descs = node.step->getAttributeDescriptions();
+            if (descs.empty())
+                continue;
+            LOG_DEBUG(logger, "Propagating {} attribute(s) from node {} ({}) into segment profile",
+                descs.size(), node.id, node.step->getName());
+            if (!segment_profile->profiles.contains(node.id))
+            {
+                auto m = std::make_shared<ProfileMetric>();
+                m->id = node.id;
+                segment_profile->profiles.emplace(node.id, m);
+            }
+            for (auto & [k, v] : descs)
+                segment_profile->profiles.at(node.id)->attributes.insert_or_assign(
+                    k, std::make_shared<RuntimeAttributeDescription>(v));
+        }
     }
 }
 

@@ -149,8 +149,8 @@ void InsertAction::checkAndSetDedupMode(CnchDedupHelper::DedupMode dedup_mode_)
             throw Exception(
                 ErrorCodes::LOGICAL_ERROR,
                 "Dedup mode is {}, but staged parts are not empty for table {}, it's a bug!",
-                table->getCnchStorageID().getNameForLogs(),
-                typeToString(dedup_mode_));
+                typeToString(dedup_mode_),
+                table->getCnchStorageID().getNameForLogs());
 
         LOG_TRACE(log, "Table {} is in {} mode.", table->getCnchStorageID().getNameForLogs(), typeToString(dedup_mode_));
     }

@@ -142,47 +142,119 @@ bool hasEmptyPostingsList(const GinPostingsCache & postings_cache)
     return false;
 }
 
+/// Sentinel cardinality used to sort CONTAINS_ALL bitmaps last in multi-term AND.
+/// A real bitmap can never reach UINT64_MAX cardinality (roaring max elements = 2^32).
+static constexpr UInt64 CONTAINS_ALL_CARDINALITY = std::numeric_limits<UInt64>::max();
+
 /// Helper method to check if the postings list cache has intersection with given row ID range
 bool matchInRange(const GinPostingsCache & postings_cache, UInt32 segment_id, UInt32 range_start, UInt32 range_end, roaring::Roaring & filter_result)
 {
-    /// Check for each term
-    GinIndexPostingsList intersection_result;
-    bool intersection_result_init = false;
+    /// Single-term fast path: skips SegEntry allocation and sort entirely.
+    if (postings_cache.size() == 1)
+    {
+        const auto & term_postings = *postings_cache.begin();
+        const auto container_it = term_postings.second.find(segment_id);
+        if (container_it == term_postings.second.cend())
+            return false;
+
+        const auto & bitmap = container_it->second;
+        if (bitmap->cardinality() == 1 && bitmap->minimum() == UINT32_MAX)
+        {
+            filter_result.addRange(range_start, range_end + 1);
+            return true;
+        }
+        if (range_start > bitmap->maximum() || bitmap->minimum() > range_end)
+            return false;
+        GinIndexPostingsList intersection_result;
+        intersection_result.addRange(range_start, range_end + 1);
+        intersection_result &= *bitmap;
+        if (intersection_result.cardinality() == 0)
+            return false;
+        filter_result = std::move(intersection_result);
+        return true;
+    }
+
+    /// Multi-term AND: sort by ascending cardinality so the rarest term intersects first,
+    /// collapsing to zero sooner. CONTAINS_ALL sentinels sort last (never prune).
+    struct SegEntry
+    {
+        GinSegmentedPostingsListContainer::const_iterator it;
+        UInt64 cardinality;
+    };
+    /// Stack storage avoids heap allocation for typical 2–4 term queries.
+    SegEntry stack_buf[8];
+    std::vector<SegEntry> heap_buf;
+    SegEntry * entries;
+    size_t n = 0;
+
+    if (postings_cache.size() <= 8)
+        entries = stack_buf;
+    else
+    {
+        heap_buf.reserve(postings_cache.size());
+        entries = nullptr;
+    }
 
     for (const auto & term_postings : postings_cache)
     {
-        /// Check if it is in the same segment by searching for segment_id
-        const GinSegmentedPostingsListContainer & container = term_postings.second;
-        auto container_it = container.find(segment_id);
-        if (container_it == container.cend())
+        const auto container_it = term_postings.second.find(segment_id);
+        if (container_it == term_postings.second.cend())
             return false;
-        auto min_in_container = container_it->second->minimum();
-        auto max_in_container = container_it->second->maximum();
+        UInt64 card = container_it->second->cardinality();
+        if (card == 1 && container_it->second->minimum() == UINT32_MAX)
+            card = CONTAINS_ALL_CARDINALITY;
+        if (entries)
+            entries[n++] = {container_it, card};
+        else
+            heap_buf.push_back({container_it, card});
+    }
 
-        //check if the postings list has always match flag
-        if (container_it->second->cardinality() == 1 && UINT32_MAX == min_in_container)
-            continue; //always match
+    if (!entries)
+    {
+        entries = heap_buf.data();
+        n = heap_buf.size();
+    }
 
-        if (range_start > max_in_container ||  min_in_container > range_end)
+    std::sort(entries, entries + n, [](const SegEntry & a, const SegEntry & b) {
+        return a.cardinality < b.cardinality;
+    });
+
+    GinIndexPostingsList intersection_result;
+    bool intersection_result_init = false;
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const auto & entry = entries[i];
+        if (entry.cardinality == CONTAINS_ALL_CARDINALITY)
+            continue;
+
+        auto min_in_container = entry.it->second->minimum();
+        auto max_in_container = entry.it->second->maximum();
+
+        if (range_start > max_in_container || min_in_container > range_end)
             return false;
 
-        /// Delay initialization as late as possible
         if (!intersection_result_init)
         {
             intersection_result_init = true;
-            intersection_result.addRange(range_start, range_end+1);
+            intersection_result.addRange(range_start, range_end + 1);
         }
 
-        intersection_result &= *container_it->second;
+        intersection_result &= *entry.it->second;
 
         if (intersection_result.cardinality() == 0)
             return false;
     }
 
-    // we assume there only one term in full text search
-    // so we just get filter result here
-    filter_result = std::move(intersection_result);
+    // All terms were CONTAINS_ALL — no real intersection was built.
+    // Populate the full range so callers get the correct row IDs.
+    if (!intersection_result_init)
+    {
+        filter_result.addRange(range_start, range_end + 1);
+        return true;
+    }
 
+    filter_result = std::move(intersection_result);
     return true;
 }
 

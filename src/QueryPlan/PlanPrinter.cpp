@@ -626,6 +626,9 @@ String PlanPrinter::TextPrinter::printStepProfiles(PlanNodeBase & plan, const Te
         out << intent.detailIntent() << "Act. WallTime: " << prettySeconds(profile->sum_elapsed_us/profile->worker_cnt);
         if (profile->worker_cnt > 1)
             out << "[max= " << prettySeconds(profile->max_elapsed_us) << ", min=" << prettySeconds(profile->min_elapsed_us) << "]";
+        // Lanes that actually did work vs lanes allocated, summed across workers.
+        if (profile->parallel_size > 0)
+            out << ", Threads: " << profile->active_parallel_size << "/" << profile->parallel_size << " active";
         out << intent.detailIntent() << "     Output: " << prettyNum(profile->output_rows, settings.pretty_num) << " rows("
             << prettyBytes(profile->output_bytes) << ")";
         out << ", WaitTime: " << prettySeconds(profile->output_wait_sum_elapsed_us / profile->worker_cnt);
@@ -686,33 +689,46 @@ String PlanPrinter::TextPrinter::printAttributes(PlanNodeBase & plan, const Text
     size_t step_id = plan.getId();
     if (!profiles.contains(step_id) || profiles.at(step_id)->address_to_attributes.empty())
         return "";
-    if (!settings.query_plan_options.indexes && !settings.selected_parts)
+    const auto & address_to_attributes = profiles.at(step_id)->address_to_attributes;
+    bool has_priority_attrs = std::any_of(address_to_attributes.begin(), address_to_attributes.end(),
+        [](const auto & p) {
+            return p.second.count(RuntimeAttributeKeys::CacheStats)
+                || p.second.count(RuntimeAttributeKeys::Indexes);
+        });
+    if (!settings.query_plan_options.indexes && !settings.selected_parts && !has_priority_attrs)
         return "";
     std::stringstream out;
-    const auto & address_to_attributes = profiles.at(step_id)->address_to_attributes;
     if (plan.getStep()->getType() == IQueryPlanStep::Type::TableScan)
     {
-        String space;
         for (const auto & [address, attribute] : address_to_attributes)
         {
-            if (address_to_attributes.size() > 1)
-            {
-                out << intent.detailIntent() << address;
-                space = "    ";
-            }
-            if (settings.query_plan_options.indexes && attribute.contains("Indexes"))
+            String space = "    ";
+            out << intent.detailIntent() << address;
+            if (settings.query_plan_options.indexes && attribute.contains(RuntimeAttributeKeys::Indexes))
             {
                 out << intent.detailIntent() << space << "Indexes:";
-                auto index_desc = attribute.at("Indexes");
+                auto index_desc = attribute.at(RuntimeAttributeKeys::Indexes);
                 for (const auto & desc : index_desc->name_and_detail)
                     out << intent.detailIntent() << space << "    " << desc.second;
             }
             if (settings.selected_parts)
             {
-                if (attribute.contains("SelectParts"))
-                    out << intent.detailIntent() << space << attribute.at("SelectParts")->description;
-                if (attribute.contains("TableScanDescription"))
-                    out << intent.detailIntent() << space << attribute.at("TableScanDescription")->description;
+                if (attribute.contains(RuntimeAttributeKeys::SelectParts))
+                    out << intent.detailIntent() << space << attribute.at(RuntimeAttributeKeys::SelectParts)->description;
+                if (attribute.contains(RuntimeAttributeKeys::TableScanDescription))
+                    out << intent.detailIntent() << space << attribute.at(RuntimeAttributeKeys::TableScanDescription)->description;
+            }
+            if (attribute.contains(RuntimeAttributeKeys::CacheStats))
+            {
+                out << intent.detailIntent() << space << "CacheStats:";
+                for (const auto & desc : attribute.at(RuntimeAttributeKeys::CacheStats)->name_and_detail)
+                    out << intent.detailIntent() << space << "    " << desc.second;
+            }
+            if (attribute.contains(RuntimeAttributeKeys::PartitionOrder))
+            {
+                out << intent.detailIntent() << space << "PartitionOrder:";
+                for (const auto & desc : attribute.at(RuntimeAttributeKeys::PartitionOrder)->name_and_detail)
+                    out << intent.detailIntent() << space << "    " << desc.second;
             }
         }
         return out.str();

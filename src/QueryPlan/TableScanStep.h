@@ -87,6 +87,7 @@ public:
     Type getType() const override { return Type::TableScan; }
 
     void initializePipeline(QueryPipeline & pipeline, const BuildQueryPipelineSettings &) override;
+    void collectPostExecutionAttributes();
     void toProto(Protos::TableScanStep & proto, bool for_hash_equals = false) const;
     static std::shared_ptr<TableScanStep> fromProto(const Protos::TableScanStep & proto, ContextPtr context);
 
@@ -139,6 +140,9 @@ public:
 
     void setReadOrder(SortDescription read_order);
     SortDescription getReadOrder() const;
+
+    /// Set by the auto partition-order optimizer pass; carried in query_info to ReadFromMergeTree.
+    void setAutoPartitionOrderEstimate(const AutoPartitionOrderEstimate & est) { query_info.auto_partition_order_estimate = est; }
 
     void formatOutputStream(ContextPtr context);
 
@@ -219,6 +223,9 @@ private:
 
     // Only for worker.
     bool is_null_source{false};
+    // Kept alive after initializePipeline to allow collectPostExecutionAttributes
+    // to harvest CacheStats after pipeline execution.
+    std::shared_ptr<IQueryPlanStep> read_step;
 
     // Optimises the where clauses for a bucket table by rewriting the IN clause and hence reducing the IN set size
     void rewriteInForBucketTable(ContextPtr context) const;

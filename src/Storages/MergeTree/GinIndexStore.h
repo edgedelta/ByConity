@@ -347,7 +347,7 @@ public:
     using GinIndexStores = std::unordered_map<std::string, GinIndexStorePtr>;
 
 private:
-    ShardCache<String, std::hash<String>, 
+    ShardCache<String, std::hash<String>,
         BucketLRUCache<String, GinIndexStore, std::hash<String>, GinIndexStoreWeightFunction>> stores_lru_cache;
 };
 

@@ -17,14 +17,22 @@
 #include <cstddef>
 #include <memory>
 
+#include <Catalog/Catalog.h>
+#include <Common/HostWithPorts.h>
+#include <Core/UUID.h>
 #include <Disks/IStoragePolicy.h>
 #include <Interpreters/Context.h>
 #include <Storages/DiskCache/DiskCacheLRU.h>
+#include <Storages/DiskCache/DiskCacheTTL.h>
 #include <Storages/DiskCache/DiskCacheSettings.h>
 #include <Storages/DiskCache/DiskCacheSimpleStrategy.h>
+#include <Storages/DiskCache/TTLCacheFDBIndex.h>
+#include <common/getThreadId.h>
 #include <common/logger_useful.h>
 #include <Disks/SingleDiskVolume.h>
 #include <Storages/DiskCache/IDiskCache.h>
+#include <ResourceManagement/CommonData.h>
+#include <ResourceManagement/ResourceManagerClient.h>
 
 namespace DB
 {
@@ -108,6 +116,163 @@ void DiskCacheFactory::shutdown()
     IDiskCache::close();
 }
 
+size_t DiskCacheFactory::getGlobalTTLLimit() const
+{
+    auto it = caches.find(DiskCacheType::MergeTree);
+    if (it != caches.end() && it->second)
+        return it->second->getSettings().ttl_cache_max_size;
+    return 0;
+}
+
+IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
+    const String & table_name,
+    const UUID & table_uuid,
+    Context & context,
+    const ThrottlerPtr & throttler,
+    UInt64 ttl_minutes,
+    size_t max_size_bytes,
+    size_t segment_size_override)
+{
+    Poco::Logger * log = &Poco::Logger::get("DiskCacheFactory");
+    DiskCacheSettings cache_settings;
+    {
+        auto it = caches.find(DiskCacheType::MergeTree);
+        if (it != caches.end() && it->second)
+            cache_settings = it->second->getSettings();
+    }
+
+    // Resolve effective limit before any comparison: 0 means "use global limit".
+    // Multiple tables should each have an explicit per-table limit; the global limit
+    // is the single-table default.
+    size_t effective_max_size = max_size_bytes > 0 ? max_size_bytes : cache_settings.ttl_cache_max_size;
+
+    // Align the cache segment size with the table's hybrid-allocation virtual-part size so a big part
+    // sliced across workers is cached without cross-worker duplication. 0 = keep the global default.
+    // cache_settings.segment_size is the single source of truth from here on (the strategy reads it).
+    if (segment_size_override > 0)
+        cache_settings.segment_size = segment_size_override;
+
+    // Compare against effective_max_size so callers passing 0
+    // don't trigger recreation of a cache that was already created with the global limit.
+    // updateSettings may schedule eviction on the evict pool, and doing that while holding
+    // ttl_cache_registry_mutex would serialize all per-table cache creation/lookup behind a pool enqueue.
+    IDiskCachePtr existing_cache;
+    {
+        std::lock_guard<std::mutex> lock(ttl_cache_registry_mutex);
+        auto reg_it = per_table_ttl_caches.find(table_uuid);
+        if (reg_it != per_table_ttl_caches.end())
+            existing_cache = reg_it->second;
+    }
+    if (existing_cache)
+    {
+        auto existing = static_pointer_cast<DiskCacheTTL>(existing_cache);
+
+        // segment_size is fixed for a cache's lifetime. It lives in the strategy and re-keys every cached
+        // segment, so changing it on a live, UUID-shared cache would orphan all existing files and race
+        // with concurrent readers. It is therefore set once at creation; a later change is applied on the next worker restart or an explicit DROP DISK CACHE.
+        // ttl/max_size remain mutable in place below.
+        if (existing->getStrategy()->getSegmentSize() != cache_settings.segment_size)
+            LOG_WARNING(
+                log,
+                "TTL cache segment_size for {} (UUID: {}) differs from the table's current hybrid alignment "
+                "({} vs {} marks); keeping the existing cache. Restart the workers or DROP DISK CACHE to apply.",
+                table_name, UUIDHelpers::UUIDToString(table_uuid),
+                existing->getStrategy()->getSegmentSize(), cache_settings.segment_size);
+
+        if (existing->getTTLMinutes() == ttl_minutes && existing->getMaxSizeBytes() == effective_max_size)
+        {
+            LOG_TRACE(log, "Reusing existing TTL cache for {} (UUID: {})", table_name, UUIDHelpers::UUIDToString(table_uuid));
+            return existing_cache;
+        }
+
+        LOG_INFO(log, "TTL cache settings changed for {} (UUID: {}), updating in place (ttl: {}->{}min, max_size: {}->{}bytes)",
+            table_name, UUIDHelpers::UUIDToString(table_uuid),
+            existing->getTTLMinutes(), ttl_minutes,
+            existing->getMaxSizeBytes(), effective_max_size);
+        existing->updateSettings(ttl_minutes, effective_max_size);
+        return existing_cache;
+    }
+
+    // Get volume from ttl_disk_policy, degrade gracefully to the shared global MergeTree cache instead of failing every query on this table.
+    VolumePtr volume;
+    try
+    {
+        volume = context.getStoragePolicy(cache_settings.ttl_disk_policy)->getVolumeByName("local", true);
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, fmt::format(
+            "Failed to resolve ttl_disk_policy '{}' for {}; falling back to the global MergeTree disk cache",
+            cache_settings.ttl_disk_policy, table_name));
+        return get(DiskCacheType::MergeTree);
+    }
+
+    // Per-table cache is always TTL-based
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(cache_settings);
+    auto cache = std::make_shared<DiskCacheTTL>(
+        table_name, UUIDHelpers::UUIDToString(table_uuid), volume, throttler, cache_settings, strategy, ttl_minutes, effective_max_size);
+
+    LOG_INFO(log, "Created per-table TTL cache for {} (UUID: {}, TTL: {} minutes, max_size: {}GB, policy: {})",
+        table_name, UUIDHelpers::UUIDToString(table_uuid), ttl_minutes, effective_max_size / (1024*1024*1024), cache_settings.ttl_disk_policy);
+
+    if (auto catalog = context.getCnchCatalog())
+    {
+        try
+        {
+            auto metastore = catalog->getMetastore();
+            String ns = context.getCnchConfigRef().getString("catalog.name_space", "default");
+            String worker_id = getWorkerID(context.shared_from_this());
+            String uuid_str = UUIDHelpers::UUIDToString(table_uuid);
+            // Pass worker_id as own identity — stable across pod restarts.
+            // Each DCIREV_ reverse-index entry stores "<worker_id>:<register_time>"; findPeerOwner
+            // validates the register_time epoch and resolves worker_id → {endpoint, register_time} at
+            // runtime via DiskCacheFactory::resolvePeer / resolveWorkerEndpoint.
+            auto fdb_idx = std::make_shared<TTLCacheFDBIndex>(metastore, ns, uuid_str, worker_id);
+            static_pointer_cast<DiskCacheTTL>(cache)->setFDBIndex(std::move(fdb_idx));
+
+            // Set up worker endpoint resolver on first use (captures rm_client shared_ptr).
+            if (!worker_endpoint_resolver)
+            {
+                auto rm = context.getResourceManagerClient();
+                worker_endpoint_resolver = [rm]() -> std::unordered_map<String, WorkerPeerInfo> {
+                    std::unordered_map<String, WorkerPeerInfo> result;
+                    if (!rm)
+                        return result;
+                    std::vector<WorkerNodeResourceData> workers;
+                    try { rm->getAllWorkers(workers); }
+                    catch (...) { return result; }
+                    for (const auto & w : workers)
+                        if (!w.id.empty())
+                            result[w.id] = WorkerPeerInfo{w.host_ports.getRPCAddress(), w.register_time};
+                    return result;
+                };
+            }
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log, "Failed to create TTLCacheFDBIndex, cache will use disk scan on restart");
+        }
+    }
+
+    // Insert into registry with re-check: if another thread won the race, discard ours.
+    // load() is called only on the winner so only one disk scan runs per table UUID.
+    {
+        std::lock_guard<std::mutex> lock(ttl_cache_registry_mutex);
+        auto [it, inserted] = per_table_ttl_caches.emplace(table_uuid, cache);
+        if (!inserted)
+        {
+            LOG_TRACE(log, "Reusing TTL cache created concurrently for {} (UUID: {})", table_name, UUIDHelpers::UUIDToString(table_uuid));
+            return it->second;
+        }
+    }
+
+    // Schedule disk scan only for the winning cache object.
+    auto & thread_pool = IDiskCache::getThreadPool();
+    thread_pool.scheduleOrThrowOnError([cache] { cache->load(); });
+
+    return cache;
+}
+
 void DiskCacheFactory::addNewCache(Context & context, const std::string & cache_name, bool create_default)
 {
     Poco::Logger * log{&Poco::Logger::get("DiskCacheFactory")};
@@ -144,6 +309,27 @@ void DiskCacheFactory::addNewCache(Context & context, const std::string & cache_
                 cache_settings.lru_max_nums));
     }
 
+    // Resolve global TTL cache limit from the ttl_disk_policy's local volume.
+    // fall back to the global disk space rather than aborting server startup.
+    auto ttl_total_space_unlimited = total_space_unlimited;
+    try
+    {
+        ttl_total_space_unlimited = context.getStoragePolicy(cache_settings.ttl_disk_policy)->getVolumeByName("local", true)->getTotalSpace(true);
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, fmt::format(
+            "Failed to resolve ttl_disk_policy '{}' for global TTL limit; using global disk space",
+            cache_settings.ttl_disk_policy));
+    }
+    cache_settings.ttl_cache_max_size = (cache_settings.ttl_cache_max_size > 0)
+        ? cache_settings.ttl_cache_max_size
+        : static_cast<size_t>(ttl_total_space_unlimited.bytes * (cache_settings.ttl_cache_max_percent / 100.0));
+
+    LOG_INFO(log, "{} cache: TTL global limit {}GB",
+             cache_name, cache_settings.ttl_cache_max_size / (1024*1024*1024));
+
+    // Global cache always uses LRU (TTL cache is per-table only)
     if (!cache_settings.meta_cache_size_ratio)
     {
         auto disk_cache = std::make_shared<DiskCacheLRU>(
@@ -165,6 +351,132 @@ void DiskCacheFactory::addNewCache(Context & context, const std::string & cache_
                 cache_name, disk_cache_volume, throttler, cache_settings, strategy, meta_disk_cache, data_disk_cache));
         LOG_DEBUG(log, fmt::format("Registered `{}` multi disk cache", cache_name));
     }
+}
+
+void DiskCacheFactory::mergeQueryCacheStats(const String & query_id, const QueryCacheStatsSnapshot & local, const String & reader_label)
+{
+    if (local.empty())
+        return;
+
+    std::shared_ptr<QueryCacheStats> entry;
+    {
+        std::shared_lock rl(query_cache_stats_mutex);
+        auto it = query_cache_stats_map.find(query_id);
+        if (it != query_cache_stats_map.end())
+            entry = it->second;
+    }
+    if (!entry)
+    {
+        std::unique_lock wl(query_cache_stats_mutex);
+        auto [it, inserted] = query_cache_stats_map.emplace(query_id, std::make_shared<QueryCacheStats>());
+        entry = it->second;
+    }
+    // Lock-free updates after entry is visible
+    entry->cache_hit_segs.fetch_add(local.cache_hit_segs, std::memory_order_relaxed);
+    entry->cache_miss_segs.fetch_add(local.cache_miss_segs, std::memory_order_relaxed);
+    entry->steal_segs.fetch_add(local.steal_segs, std::memory_order_relaxed);
+    entry->s3_fallback_segs.fetch_add(local.s3_fallback_segs, std::memory_order_relaxed);
+    entry->cache_bytes.fetch_add(local.cache_bytes, std::memory_order_relaxed);
+    entry->s3_bytes.fetch_add(local.s3_bytes, std::memory_order_relaxed);
+    entry->cache_open_us.fetch_add(local.cache_open_us, std::memory_order_relaxed);
+    entry->cache_io_us.fetch_add(local.cache_io_us, std::memory_order_relaxed);
+    entry->s3_io_us.fetch_add(local.s3_io_us, std::memory_order_relaxed);
+    entry->s3_open_us.fetch_add(local.s3_open_us, std::memory_order_relaxed);
+    entry->reader_count.fetch_add(1, std::memory_order_relaxed);
+    for (auto cur = entry->cache_open_us_max.load(std::memory_order_relaxed);
+         local.cache_open_us > cur && !entry->cache_open_us_max.compare_exchange_weak(cur, local.cache_open_us, std::memory_order_relaxed);)
+        ;
+    for (auto cur = entry->cache_open_us_min.load(std::memory_order_relaxed);
+         local.cache_open_us < cur && !entry->cache_open_us_min.compare_exchange_weak(cur, local.cache_open_us, std::memory_order_relaxed);)
+        ;
+    // Long-pole diagnostics: name the part whose flush won the max, and track distinct read threads.
+    {
+        std::lock_guard<std::mutex> aux_lock(entry->aux_mutex);
+        if (!reader_label.empty() && local.cache_open_us > 0
+            && entry->cache_open_us_max.load(std::memory_order_relaxed) == local.cache_open_us)
+            entry->max_reader_label = reader_label;
+        if (local.cache_open_us > 0 || local.s3_open_us > 0 || local.cache_hit_segs > 0 || local.s3_fallback_segs > 0)
+            entry->read_thread_ids.insert(getThreadId());
+    }
+    entry->idx_hit_segs.fetch_add(local.idx_hit_segs, std::memory_order_relaxed);
+    entry->idx_miss_segs.fetch_add(local.idx_miss_segs, std::memory_order_relaxed);
+    entry->idx_cache_bytes.fetch_add(local.idx_cache_bytes, std::memory_order_relaxed);
+    entry->idx_s3_bytes.fetch_add(local.idx_s3_bytes, std::memory_order_relaxed);
+    entry->idx_cache_read_us.fetch_add(local.idx_cache_read_us, std::memory_order_relaxed);
+    entry->idx_s3_read_us.fetch_add(local.idx_s3_read_us, std::memory_order_relaxed);
+    if (local.idx_hit_segs > 0 || local.idx_miss_segs > 0 || local.idx_cache_bytes > 0 || local.idx_s3_bytes > 0)
+        entry->idx_reader_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::optional<QueryCacheStatsSnapshot> DiskCacheFactory::consumeQueryCacheStats(const String & query_id)
+{
+    std::unique_lock wl(query_cache_stats_mutex);
+    auto it = query_cache_stats_map.find(query_id);
+    if (it == query_cache_stats_map.end())
+        return std::nullopt;
+
+    const auto & e = *it->second;
+    QueryCacheStatsSnapshot snap;
+    snap.cache_hit_segs   = e.cache_hit_segs.load(std::memory_order_relaxed);
+    snap.cache_miss_segs  = e.cache_miss_segs.load(std::memory_order_relaxed);
+    snap.steal_segs       = e.steal_segs.load(std::memory_order_relaxed);
+    snap.s3_fallback_segs = e.s3_fallback_segs.load(std::memory_order_relaxed);
+    snap.cache_bytes      = e.cache_bytes.load(std::memory_order_relaxed);
+    snap.s3_bytes         = e.s3_bytes.load(std::memory_order_relaxed);
+    snap.cache_open_us     = e.cache_open_us.load(std::memory_order_relaxed);
+    snap.cache_open_us_max = e.cache_open_us_max.load(std::memory_order_relaxed);
+    auto raw_min           = e.cache_open_us_min.load(std::memory_order_relaxed);
+    snap.cache_open_us_min = raw_min; // UINT64_MAX = no flush recorded, formatter prints "-"
+    snap.s3_open_us        = e.s3_open_us.load(std::memory_order_relaxed);
+    snap.cache_io_us       = e.cache_io_us.load(std::memory_order_relaxed);
+    snap.s3_io_us          = e.s3_io_us.load(std::memory_order_relaxed);
+    snap.reader_count      = e.reader_count.load(std::memory_order_relaxed);
+    snap.idx_hit_segs     = e.idx_hit_segs.load(std::memory_order_relaxed);
+    snap.idx_miss_segs    = e.idx_miss_segs.load(std::memory_order_relaxed);
+    snap.idx_cache_bytes  = e.idx_cache_bytes.load(std::memory_order_relaxed);
+    snap.idx_s3_bytes     = e.idx_s3_bytes.load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> aux_lock(it->second->aux_mutex);
+        snap.max_reader_label = it->second->max_reader_label;
+        snap.read_threads = it->second->read_thread_ids.size();
+    }
+    snap.idx_cache_read_us = e.idx_cache_read_us.load(std::memory_order_relaxed);
+    snap.idx_s3_read_us   = e.idx_s3_read_us.load(std::memory_order_relaxed);
+    snap.idx_reader_count  = e.idx_reader_count.load(std::memory_order_relaxed);
+    query_cache_stats_map.erase(it);
+    return snap;
+}
+
+void DiskCacheFactory::discardQueryCacheStats(const String & query_id)
+{
+    std::unique_lock wl(query_cache_stats_mutex);
+    query_cache_stats_map.erase(query_id);
+}
+
+
+std::optional<WorkerPeerInfo> DiskCacheFactory::resolvePeer(const String & worker_id)
+{
+    if (!worker_endpoint_resolver)
+        return std::nullopt;
+
+    std::lock_guard lk(worker_endpoint_cache_mutex);
+    time_t now = time(nullptr);
+    if (now - worker_endpoint_cache_refresh_time >= WORKER_ENDPOINT_CACHE_TTL_SEC)
+    {
+        worker_endpoint_cache = worker_endpoint_resolver();
+        worker_endpoint_cache_refresh_time = now;
+    }
+    auto it = worker_endpoint_cache.find(worker_id);
+    if (it != worker_endpoint_cache.end())
+        return it->second;
+    return std::nullopt;
+}
+
+std::optional<String> DiskCacheFactory::resolveWorkerEndpoint(const String & worker_id)
+{
+    if (auto peer = resolvePeer(worker_id))
+        return peer->endpoint;
+    return std::nullopt;
 }
 
 }

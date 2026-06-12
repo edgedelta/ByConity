@@ -220,6 +220,7 @@ enum PreloadLevelSettings : UInt64
     M(UInt64, background_gc_schedule_pool_size, 16, "Number of threads performing data removing related background tasks.", 0) \
     M(UInt64, local_disk_cache_thread_pool_size, 16, "Number of threads perforrming background tasks from cache segments from cloud storage to local disk. Only has meaning at server startup.", 0) \
     M(UInt64, local_disk_cache_evict_thread_pool_size, 16, "Number of threads perforrming asynchronous remove disk cache file.", 0) \
+    M(UInt64, local_disk_cache_preload_thread_pool_size, 16, "Number of threads for preloading parts into local disk cache. Only has meaning at server startup.", 0) \
     M(UInt64, \
       max_bandwidth_for_disk_cache, \
       0, \
@@ -847,6 +848,9 @@ enum PreloadLevelSettings : UInt64
     M(Bool, optimize_read_in_order, true, "Enable ORDER BY optimization for reading data in corresponding order in MergeTree tables.", 0) \
     M(Bool, optimize_read_in_partition_order, false, "In optimize_read_in_order mode, whether to read parts partition-by-partition if applicable, it will also delay inverted index evaluation till pipeline execution", 0) \
     M(Bool, force_read_in_partition_order, 0, "Similar to optimize_read_in_partition_order, but throw an exception if it cannot be applied to the query, mainly for testing", 0) \
+    M(Bool, enable_auto_partition_order, false, "Let the optimizer decide partition-order reading from statistics (enable when a tight LIMIT exists and the newest partition is estimated to hold >= LIMIT matching rows), instead of relying only on the optimize_read_in_partition_order setting.", 0) \
+    M(Bool, auto_partition_order_fulltext_default, true, "When the auto partition-order gate cannot estimate selectivity (full-text hasToken/GIN predicates with no token statistics), whether to enable partition-order anyway (log-tail bias).", 0) \
+    M(Float, auto_partition_order_safety_factor, 1.0, "Multiplier on LIMIT in the auto partition-order gate; >1 requires a larger estimated newest-partition margin before enabling.", 0) \
     M(Bool, optimize_aggregation_in_order, false, "Enable GROUP BY optimization for aggregating data in corresponding order in MergeTree tables.", 0) \
     M(UInt64, read_in_order_two_level_merge_threshold, 100, "Minimal number of parts to read to run preliminary merge step during multithread reading in order of primary key.", 0) \
     M(Bool, low_cardinality_allow_in_native_format, true, "Use LowCardinality type in Native format. Otherwise, convert LowCardinality columns to ordinary for select query, and convert ordinary columns to required LowCardinality for insert query.", 0) \
@@ -2061,7 +2065,7 @@ enum PreloadLevelSettings : UInt64
     /** Hybrid allocation related settings */ \
     M(Bool, enable_hybrid_allocation, false, "Enalbe hybrid physical parts - virutal parts allocation", 0) \
     M(UInt64, min_rows_per_virtual_part, 0, "Minimum size of a virtual part", 0) \
-    M(UInt64, cnch_hybrid_part_allocation_algorithm, 2, "Hybrid Part allocation algorithm, 0: modulo hashing, 1: ring consistent hash, 2: bounded load consistent hashing, 3: bounded consistent hashing in one stage, 4: strict bounded consistent hashing in one stage.", 0) \
+    M(UInt64, cnch_hybrid_part_allocation_algorithm, 2, "Hybrid Part allocation algorithm, 0: modulo hashing, 1: ring consistent hash, 2: bounded load consistent hashing, 3: bounded consistent hashing in one stage, 4: strict bounded consistent hashing in one stage, 5: jump consistent hash (size-aware, cache-stable).", 0) \
     \
     /** BitEngine related settings */ \
     M(Bool, use_encoded_bitmap, true, "Whether to read the encoded bitmap column", 0) \

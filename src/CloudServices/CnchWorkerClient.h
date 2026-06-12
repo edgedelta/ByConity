@@ -43,6 +43,9 @@ namespace DB
 namespace Protos
 {
     class CnchWorkerService_Stub;
+    class TTLCacheTableStats;
+    class TTLCachePartitionStats;
+    class PreloadPartitionStats;
 }
 
 namespace IngestColumnCnch
@@ -81,6 +84,9 @@ public:
     void shutdownManipulationTasks(const UUID & table_uuid, const Strings & task_ids = Strings{});
     std::unordered_set<String> touchManipulationTasks(const UUID & table_uuid, const Strings & tasks_id);
     std::vector<ManipulationInfo> getManipulationTasksStatus();
+    std::vector<Protos::TTLCacheTableStats> getTTLCacheStats();
+    std::vector<Protos::TTLCachePartitionStats> getTTLCachePartitionStats();
+    std::vector<Protos::PreloadPartitionStats> getPreloadStats();
 
     void submitMvRefreshTask(
         const StorageMaterializedView & storage, const ManipulationTaskParams & params, TxnTimestamp txn_id);
@@ -101,6 +107,7 @@ public:
         const IStorage & storage,
         const String & create_local_table_query,
         const ServerDataPartsVector & parts,
+        const ServerVirtualPartVector & virtual_parts,
         const ExceptionHandlerPtr & handler,
         bool enable_parts_sync_preload,
         UInt64 parts_preload_level,

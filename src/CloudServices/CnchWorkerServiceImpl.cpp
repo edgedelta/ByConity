@@ -34,6 +34,9 @@
 #include <Protos/DataModelHelpers.h>
 #include <Protos/RPCHelpers.h>
 #include <Storages/DiskCache/IDiskCache.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
+#include <Storages/DiskCache/DiskCacheTTL.h>
+#include <Storages/DiskCache/PreloadRegistry.h>
 #include <Storages/MergeTree/CnchMergeTreeMutationEntry.h>
 #include <Storages/MergeTree/IMergeTreeDataPart_fwd.h>
 #include <Storages/MergeTree/MergeTreeDataPartCNCH.h>
@@ -562,6 +565,13 @@ void CnchWorkerServiceImpl::preloadDataParts(
         StoragePtr storage = createStorageFromQuery(request->create_table_query(), rpc_context);
         auto & cloud_merge_tree = dynamic_cast<StorageCloudMergeTree &>(*storage);
         auto data_parts = createPartVectorFromModelsForSend<MutableMergeTreeDataPartCNCHPtr>(cloud_merge_tree, request->parts());
+        /// Virtual parts are mark ranges of big parts assigned by hybrid allocation. They carry
+        /// mark_ranges_for_virtual_part, so preload() caches only those ranges; matching query-time reads.
+        auto virtual_data_parts = createPartVectorFromModelsForSend<MutableMergeTreeDataPartCNCHPtr>(cloud_merge_tree, request->virtual_parts());
+        data_parts.insert(
+            data_parts.end(),
+            std::make_move_iterator(virtual_data_parts.begin()),
+            std::make_move_iterator(virtual_data_parts.end()));
 
         LOG_TRACE(
             log,
@@ -605,10 +615,19 @@ void CnchWorkerServiceImpl::preloadDataParts(
         }
         else
         {
+            auto & registry = PreloadRegistry::instance();
+            String table_name = cloud_merge_tree.getStorageID().getFullNameNotQuoted();
+            String table_uuid_str = toString(cloud_merge_tree.getStorageUUID());
+
             ThreadPool * preload_thread_pool = &(IDiskCache::getPreloadPool());
             for (const auto & part : data_parts)
             {
-                preload_thread_pool->scheduleOrThrowOnError([part, preload_level, submit_ts, read_injection, storage] {
+                // RAII: registerPart counts this part now; the handle decrements when the task
+                // lambda is destroyed on completion, exception, OR failure to schedule.
+                // This makes the in-flight count impossible to strand.
+                auto handle = std::make_shared<PreloadHandle>(
+                    registry.registerPart(table_name, table_uuid_str, part->info.partition_id, preload_level));
+                preload_thread_pool->scheduleOrThrowOnError([part, preload_level, submit_ts, read_injection, storage, handle]() mutable {
                     part->remote_fs_read_failed_injection = read_injection;
                     part->disk_cache_mode = DiskCacheMode::SKIP_DISK_CACHE;// avoid getCheckum & getIndex re-cache
                     part->preload(preload_level, submit_ts);
@@ -1315,6 +1334,104 @@ void CnchWorkerServiceImpl::getCloudMergeTreeStatus(
     Protos::GetCloudMergeTreeStatusResp * response,
     google::protobuf::Closure * done)
 {
+}
+
+void CnchWorkerServiceImpl::getTTLCacheStats(
+    google::protobuf::RpcController *,
+    const Protos::GetTTLCacheStatsReq *,
+    Protos::GetTTLCacheStatsResp * response,
+    google::protobuf::Closure * done)
+{
+    SUBMIT_THREADPOOL({
+        auto ttl_caches = DiskCacheFactory::instance().getAllTableTTLCaches();
+        LOG_INFO(log, "getTTLCacheStats: {} TTL cache(s) in registry", ttl_caches.size());
+        for (const auto & [uuid, cache_ptr] : ttl_caches)
+        {
+            auto * ttl_cache = dynamic_cast<DiskCacheTTL *>(cache_ptr.get());
+            if (!ttl_cache)
+                continue;
+
+            auto stats = ttl_cache->getStats();
+            LOG_INFO(log, "getTTLCacheStats: returning stats for table={} uuid={}", ttl_cache->getName(), stats.table_uuid);
+            auto * t = response->add_tables();
+            t->set_table_name(ttl_cache->getName());
+            t->set_table_uuid(stats.table_uuid);
+            t->set_ttl_minutes(ttl_cache->getTTLMinutes());
+            t->set_max_size_bytes(ttl_cache->getMaxSizeBytes());
+            t->set_last_eviction_run(stats.last_eviction_run);
+            t->set_evicted_expired(stats.evicted_expired);
+            t->set_evicted_size_limit(stats.evicted_size_limit);
+            t->set_async_triggered_evicted(stats.async_eviction_triggered);
+            t->set_async_skipped_rate_limit_evicted(stats.async_eviction_skipped_rate_limit);
+            t->set_rejected_non_time_partition(stats.rejected_non_time_partition);
+            t->set_rejected_too_old(stats.rejected_too_old);
+            t->set_count_preload(stats.cached_from_preload);
+            t->set_count_query(stats.cached_from_query);
+            t->set_bytes_preload(stats.cached_bytes_preload);
+            t->set_bytes_query(stats.cached_bytes_query);
+            t->set_count_restored(stats.cached_from_restored);
+            t->set_bytes_restored(stats.cached_bytes_restored);
+            t->set_idx_count_preload(stats.cached_idx_from_preload);
+            t->set_idx_bytes_preload(stats.cached_idx_bytes_preload);
+            t->set_idx_count_query(stats.cached_idx_from_query);
+            t->set_idx_bytes_query(stats.cached_idx_bytes_query);
+            t->set_data_hits(stats.data_hits);
+            t->set_data_misses(stats.data_misses);
+            t->set_idx_hits(stats.idx_hits);
+            t->set_idx_misses(stats.idx_misses);
+        }
+    })
+}
+
+void CnchWorkerServiceImpl::getTTLCachePartitionStats(
+    google::protobuf::RpcController *,
+    const Protos::GetTTLCachePartitionStatsReq *,
+    Protos::GetTTLCachePartitionStatsResp * response,
+    google::protobuf::Closure * done)
+{
+    SUBMIT_THREADPOOL({
+        auto ttl_caches = DiskCacheFactory::instance().getAllTableTTLCaches();
+        LOG_DEBUG(log, "getTTLCachePartitionStats: {} TTL cache(s) in registry", ttl_caches.size());
+        for (const auto & [uuid, cache_ptr] : ttl_caches)
+        {
+            auto * ttl_cache = dynamic_cast<DiskCacheTTL *>(cache_ptr.get());
+            if (!ttl_cache)
+                continue;
+
+            auto table_stats = ttl_cache->getStats();
+            LOG_DEBUG(log, "getTTLCachePartitionStats: returning partition stats for table={} uuid={}", ttl_cache->getName(), table_stats.table_uuid);
+            for (const auto & ps : ttl_cache->getPartitionStats())
+            {
+                auto * p = response->add_partitions();
+                p->set_table_name(ttl_cache->getName());
+                p->set_table_uuid(table_stats.table_uuid);
+                p->set_partition(ps.partition_id);
+                p->set_entry_count(ps.entry_count);
+                p->set_bytes(ps.total_bytes);
+            }
+        }
+    })
+}
+
+void CnchWorkerServiceImpl::getPreloadStats(
+    google::protobuf::RpcController *,
+    const Protos::GetPreloadStatsReq *,
+    Protos::GetPreloadStatsResp * response,
+    google::protobuf::Closure * done)
+{
+    SUBMIT_THREADPOOL({
+        for (const auto & snap : PreloadRegistry::instance().getSnapshot())
+        {
+            auto * p = response->add_partitions();
+            p->set_table_name(snap.table_name);
+            p->set_table_uuid(snap.table_uuid);
+            p->set_partition_id(snap.partition_id);
+            p->set_parts_in_flight(snap.parts_in_flight);
+            p->set_parts_submitted(snap.parts_submitted);
+            p->set_elapsed_ms(snap.elapsed_ms);
+            p->set_preload_level(snap.preload_level);
+        }
+    })
 }
 
 #if defined(__clang__)

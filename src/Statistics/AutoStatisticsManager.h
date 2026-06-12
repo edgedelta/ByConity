@@ -33,6 +33,9 @@ public:
     // send them back to corresponding server, by hash of table_uuid
     void scheduleDistributeUdiCount();
 
+    // async wrapper: posts scheduleDistributeUdiCount to udi_thread_pool so the RPC handler returns immediately
+    void scheduleDistributeUdiCountAsync();
+
     // schedule auto stats collect tasks
     void scheduleCollect();
 
@@ -65,6 +68,7 @@ private:
     std::mutex manager_mtx;
 
     std::unique_ptr<ThreadPool> thread_pool;
+    std::unique_ptr<ThreadPool> udi_thread_pool;
 
     ContextPtr context;
     // BackgroundSchedulePoolTaskHolder task_handle;

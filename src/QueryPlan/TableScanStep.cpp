@@ -17,6 +17,7 @@
 #include <optional>
 #include <QueryPlan/TableScanStep.h>
 #include <QueryPlan/ExecutePlanElement.h>
+#include <QueryPlan/ReadFromMergeTree.h>
 
 #include <Analyzers/TypeAnalyzer.h>
 #include <Formats/FormatSettings.h>
@@ -1245,9 +1246,11 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
         auto interpreter = std::make_shared<InterpreterSelectQuery>(query_info.query, mutable_context, options);
         interpreter->execute(true);
         auto backup_input_order_info = query_info.input_order_info;
+        auto backup_auto_partition_order_estimate = query_info.auto_partition_order_estimate;
         query_info = interpreter->getQueryInfo();
         query_info = fillQueryInfo(build_context.context);
         query_info.input_order_info = backup_input_order_info;
+        query_info.auto_partition_order_estimate = backup_auto_partition_order_estimate;
         if (partition_filter)
             query_info.partition_filter = partition_filter;
     }
@@ -1341,17 +1344,22 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
             QueryPlanOptimizationSettings::fromContext(build_context.context),
             BuildQueryPipelineSettings::fromContext(build_context.context));
 
+        // Only retain read_step when segment profiling is on, it's consumed solely by
+        // collectPostExecutionAttributes(), which runs under the same flags. Retaining it
+        // otherwise would pin ReadFromMergeTree for the whole query.
+        const bool keep_read_step = build_context.context->getSettingsRef().report_segment_profiles
+            || build_context.context->getSettingsRef().log_segment_profiles;
+        for (auto & node : storage_plan.getNodes())
         {
-            for (auto & node : storage_plan.getNodes())
+            if (keep_read_step && !read_step && dynamic_cast<ReadFromMergeTree *>(node.step.get()))
+                read_step = node.step;
+            auto & att_descs = node.step->getAttributeDescriptions();
+            if (att_descs.empty())
+                continue;
+            for (auto & desc : att_descs)
             {
-                auto & att_descs = node.step->getAttributeDescriptions();
-                if (att_descs.empty())
-                    continue;
-                for (auto & desc : att_descs)
-                {
-                    if (!attribute_descriptions.contains(desc.first))
-                        attribute_descriptions.emplace(desc.first, desc.second);
-                }
+                if (!attribute_descriptions.contains(desc.first))
+                    attribute_descriptions.emplace(desc.first, desc.second);
             }
         }
 
@@ -1645,7 +1653,7 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
     setStepDescription(step_desc.str());
     RuntimeAttributeDescription tablescan_desc;
     tablescan_desc.description = step_desc.str();
-    attribute_descriptions.emplace("TableScanDescription", tablescan_desc);
+    attribute_descriptions.emplace(RuntimeAttributeKeys::TableScanDescription, tablescan_desc);
 
     LOG_DEBUG(log, "init pipeline total run time: {} ms, table scan descriptiion: {}", total_watch.elapsedMillisecondsAsDouble(), step_desc.str());
 }
@@ -2084,6 +2092,20 @@ void TableScanStep::fillQueryInfoV2(ContextPtr context)
 
     /// 4. build index context
     query_info.index_context = std::make_shared<MergeTreeIndexContext>();
+}
+
+void TableScanStep::collectPostExecutionAttributes()
+{
+    auto * rmt = dynamic_cast<ReadFromMergeTree *>(read_step.get());
+    if (!rmt)
+        return;
+    rmt->collectCacheStats();
+    auto & rmt_descs = rmt->getAttributeDescriptions();
+    LOG_DEBUG(log, "collectPostExecutionAttributes: collected {} attribute(s) from ReadFromMergeTree, has_cache_stats={}",
+        rmt_descs.size(), rmt_descs.contains(RuntimeAttributeKeys::CacheStats));
+    for (auto & [k, v] : rmt_descs)
+        attribute_descriptions.insert_or_assign(k, v);
+    read_step.reset();
 }
 
 }

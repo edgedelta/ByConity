@@ -60,6 +60,16 @@ public:
     bool isSuitableForShortCircuitArgumentsExecution(const DataTypesWithConstInfo & /*arguments*/) const override { return false; }
     bool useDefaultImplementationForConstants() const override { return true; }
 
+    /// DateTime64 -> Int64 is a pure scale conversion
+    /// Exposing this lets the partition-order / KeyCondition machinery reason about sort keys derived
+    /// from it (e.g. ORDER BY -toUnixTimestamp64Milli(ts)).
+    bool hasInformationAboutMonotonicity() const override { return true; }
+
+    Monotonicity getMonotonicityForRange(const IDataType &, const Field &, const Field &) const override
+    {
+        return { true /*is_monotonic*/, true /*is_positive*/, true /*is_always_monotonic*/ };
+    }
+
     DataTypePtr getReturnTypeImpl(const ColumnsWithTypeAndName & arguments) const override
     {
         if (!isDateTime64(arguments[0].type))

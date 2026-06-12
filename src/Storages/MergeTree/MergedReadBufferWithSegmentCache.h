@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <ctime>
 #include <memory>
+#include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Compression/CachedCompressedReadBuffer.h>
 #include <Compression/CompressedReadBufferFromFile.h>
 #include <Interpreters/StorageID.h>
@@ -48,6 +49,8 @@ public:
         const ProgressCallback & internal_progress_cb_ = {},
         clockid_t clock_type_ = CLOCK_MONOTONIC_COARSE,
         String stream_extension_ = DATA_FILE_EXTENSION);
+
+    ~MergedReadBufferWithSegmentCache() override;
 
     virtual size_t readBig(char* to, size_t n) override;
     virtual bool nextImpl() override;
@@ -124,7 +127,8 @@ private:
     void seekToPosition(size_t segment_idx, const MarkInCompressedFile& mark_pos);
     bool seekToMarkInSegmentCache(size_t segment_idx, const MarkInCompressedFile& mark_pos);
     void initialize();
-    bool seekToMarkInRemoteSegmentCache(size_t segment_idx, const MarkInCompressedFile& mark_pos, const String & segment_key);
+    // endpoint: FDB-found peer address; empty = fall back to part_host.disk_cache_host_port
+    bool seekToMarkInRemoteSegmentCache(size_t segment_idx, const MarkInCompressedFile& mark_pos, const String & segment_key, const String & endpoint = {});
     void initCacheBufferIfNeeded(const DiskPtr & disk, const String & path, std::unique_ptr<ReadBufferFromRpcStreamFile> remote_cache = nullptr);
     void initSourceBufferIfNeeded();
 
@@ -169,10 +173,21 @@ private:
     PartHostInfo part_host;
 
     String stream_extension;
+    bool is_idx{false};  // true when stream_extension == ".idx" (skip-index segment)
 
     Poco::Logger* logger;
 
     off_t read_until_position = 0;
+
+    // Per-stream cache stats flushed to DiskCacheFactory registry at segment boundaries and in destructor.
+    // Only populated when segment_cache is a DiskCacheTTL instance AND query requested segment profiles.
+    bool collect_cache_stats{false};
+    String cached_query_id;
+    QueryCacheStatsSnapshot local_cache_stats;
+    uint64_t active_segment_start_us{0};  // wall-clock us when current segment read started
+    bool active_is_cache{false};          // true = cache_buffer active, false = source_buffer
+
+    void flushLocalCacheStats();
 };
 
 }

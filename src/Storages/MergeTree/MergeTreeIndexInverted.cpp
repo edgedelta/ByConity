@@ -841,5 +841,4 @@ void ginIndexValidator(const IndexDescription & index, bool /*attach*/)
     }
 }
 
-
 }

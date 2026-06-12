@@ -976,9 +976,13 @@ namespace Catalog
             }
 
             StoragePtr storage;
-            if (auto query_context = CurrentThread::getGroup()->query_context.lock())
-                storage = tryGetTableByUUID(*query_context, UUIDHelpers::UUIDToString(uuid), TxnTimestamp::maxTS());
-            else
+            auto thread_group = CurrentThread::getGroup();
+            if (thread_group)
+            {
+                if (auto query_context = thread_group->query_context.lock())
+                    storage = tryGetTableByUUID(*query_context, UUIDHelpers::UUIDToString(uuid), TxnTimestamp::maxTS());
+            }
+            if (!storage)
                 storage = tryGetTableByUUID(context, UUIDHelpers::UUIDToString(uuid), TxnTimestamp::maxTS());
 
             if (auto pcm = context.getPartCacheManager(); pcm && storage)
@@ -4262,7 +4266,7 @@ namespace Catalog
                             return;
 
                         start_key.clear();
-                        auto it = meta_proxy->getAllTransactionRecord(name_space, start_key, max_result_number);
+                        it = meta_proxy->getAllTransactionRecord(name_space, start_key, max_result_number);
                         if (!it->next())
                             return;
                     }

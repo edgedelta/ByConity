@@ -7,7 +7,7 @@
 namespace DB
 {
 
-bool aeolusCheck(const Context & context, const String & full_table_name)
+inline bool aeolusCheck(const Context & context, const String & full_table_name)
 {
     String access_table_names = context.getSettingsRef().access_table_names;
 

@@ -1034,7 +1034,10 @@ brpc::CallId CnchServerClient::submitPreloadTask(const MergeTreeMetaBase & stora
     auto * cntl = new brpc::Controller();
     auto call_id = cntl->call_id();
     if (parts.empty())
+    {
+        delete cntl;
         return call_id;
+    }
 
     Protos::SubmitPreloadTaskReq request;
     request.set_ts(time(nullptr));

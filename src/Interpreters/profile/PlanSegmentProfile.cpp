@@ -37,6 +37,8 @@ ProfileMetricPtr ProfileMetric::fromProto(const Protos::ProfileMetric & proto)
             profile->children_ids.emplace_back(id);
     }
     profile->parallel_size = proto.parallel_size();
+    if (proto.has_active_parallel_size())
+        profile->active_parallel_size = proto.active_parallel_size();
     profile->min_elapsed_us = proto.min_elapsed_us();
     profile->sum_elapsed_us = proto.sum_elapsed_us();
     profile->max_elapsed_us = proto.max_elapsed_us();
@@ -69,6 +71,7 @@ void ProfileMetric::toProto(Protos::ProfileMetric & proto)
     for (auto & child_id : children_ids)
         proto.add_children_ids(child_id);
     proto.set_parallel_size(parallel_size);
+    proto.set_active_parallel_size(active_parallel_size);
 
     proto.set_sum_elapsed_us(sum_elapsed_us);
     proto.set_min_elapsed_us(min_elapsed_us);
@@ -100,6 +103,11 @@ StepProfiles ProfileMetric::aggregateStepProfileBetweenWorkers(AddressToStepProf
             if (!res.contains(step_id))
             {
                 step_profile->worker_cnt = 1;
+                // Fold the first worker's own time into min/max. Without this, min compares against the
+                // zero-initialized field and always reads 0 ("min=0.0us"), and max never sees the first
+                // worker's value (symptom: displayed avg > max in EXPLAIN ANALYZE).
+                step_profile->max_elapsed_us = step_profile->sum_elapsed_us;
+                step_profile->min_elapsed_us = step_profile->sum_elapsed_us;
                 if (!step_profile->attributes.empty())
                     step_profile->address_to_attributes[address] = step_profile->attributes;
                 res[step_id] = step_profile;
@@ -111,6 +119,8 @@ StepProfiles ProfileMetric::aggregateStepProfileBetweenWorkers(AddressToStepProf
                 profile_ptr->min_elapsed_us = std::min(profile_ptr->min_elapsed_us, step_profile->sum_elapsed_us);
                 profile_ptr->sum_elapsed_us += step_profile->sum_elapsed_us;
                 profile_ptr->worker_cnt++;
+                profile_ptr->parallel_size += step_profile->parallel_size;
+                profile_ptr->active_parallel_size += step_profile->active_parallel_size;
                 profile_ptr->output_wait_max_elapsed_us
                     = std::max(profile_ptr->output_wait_max_elapsed_us, step_profile->output_wait_max_elapsed_us);
                 profile_ptr->output_wait_min_elapsed_us

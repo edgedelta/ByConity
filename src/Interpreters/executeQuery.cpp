@@ -19,7 +19,9 @@
  * All Bytedance's Modifications are Copyright (2023) Bytedance Ltd. and/or its affiliates.
  */
 
+#include <chrono>
 #include <memory>
+#include <thread>
 #include <Client/Connection.h>
 #include <Interpreters/executeQueryHelper.h>
 #include <Common/HistogramMetrics.h>
@@ -91,6 +93,11 @@
 #include <Interpreters/ProcessorsProfileLog.h>
 #include <Interpreters/QueryLog.h>
 #include <Interpreters/QueueManager.h>
+#include <Interpreters/SegmentScheduler.h>
+#include <QueryPlan/IQueryPlanStep.h>
+#include <Common/JSONBuilder.h>
+#include <IO/WriteBufferFromString.h>
+#include <Poco/JSON/Parser.h>
 #include <Interpreters/ReplaceQueryParameterVisitor.h>
 #include <Interpreters/SelectIntersectExceptQueryVisitor.h>
 #include <Interpreters/SelectQueryOptions.h>
@@ -792,6 +799,161 @@ void interpretSettings(ASTPtr query, ContextMutablePtr context)
         if (insert_query->settings_ast)
             InterpreterSetQuery(insert_query->settings_ast, context).executeForCurrentContext();
     }
+}
+
+static String buildRuntimeStatsJSON(const std::unordered_map<size_t, PlanSegmentProfiles> & profiles_map)
+{
+    struct StageAgg
+    {
+        String type, name, condition, keys;
+        UInt64 parts_after = 0, granules_after = 0;
+    };
+    struct StepAgg
+    {
+        UInt64 total_parts = 0;
+        std::vector<StageAgg> stages;
+    };
+
+    bool has_cache = false;
+    UInt64 cache_hit_segs = 0, cache_miss_segs = 0, steal_segs = 0, s3_fallback_segs = 0;
+    UInt64 cache_bytes = 0, s3_bytes = 0, cache_read_ms = 0, s3_read_ms = 0;
+    UInt64 idx_hit_segs = 0, idx_miss_segs = 0, idx_cache_bytes = 0, idx_s3_bytes = 0;
+    UInt64 idx_cache_read_ms = 0, idx_s3_read_ms = 0;
+    std::map<UInt64, StepAgg> index_by_step;
+
+    for (const auto & [seg_id, seg_profiles] : profiles_map)
+    {
+        for (const auto & profile : seg_profiles)
+        {
+            for (const auto & [step_id, metric] : profile->profiles)
+            {
+                if (metric->attributes.count(RuntimeAttributeKeys::CacheStats))
+                {
+                    try
+                    {
+                        Poco::JSON::Parser parser;
+                        auto obj = parser.parse(metric->attributes.at(RuntimeAttributeKeys::CacheStats)->description)
+                                       .extract<Poco::JSON::Object::Ptr>();
+                        has_cache = true;
+                        cache_hit_segs    += obj->getValue<UInt64>("cache_hit_segs");
+                        cache_miss_segs   += obj->getValue<UInt64>("cache_miss_segs");
+                        steal_segs        += obj->getValue<UInt64>("steal_segs");
+                        s3_fallback_segs  += obj->getValue<UInt64>("s3_fallback_segs");
+                        cache_bytes       += obj->getValue<UInt64>("cache_bytes");
+                        s3_bytes          += obj->getValue<UInt64>("s3_bytes");
+                        cache_read_ms     += obj->getValue<UInt64>("cache_read_ms");
+                        s3_read_ms        += obj->getValue<UInt64>("s3_read_ms");
+                        idx_hit_segs      += obj->getValue<UInt64>("idx_hit_segs");
+                        idx_miss_segs     += obj->getValue<UInt64>("idx_miss_segs");
+                        idx_cache_bytes   += obj->getValue<UInt64>("idx_cache_bytes");
+                        idx_s3_bytes      += obj->getValue<UInt64>("idx_s3_bytes");
+                        idx_cache_read_ms += obj->getValue<UInt64>("idx_cache_read_ms");
+                        idx_s3_read_ms    += obj->getValue<UInt64>("idx_s3_read_ms");
+                    }
+                    catch (...) {}
+                }
+
+                if (metric->attributes.count(RuntimeAttributeKeys::Indexes))
+                {
+                    const auto & additional = metric->attributes.at(RuntimeAttributeKeys::Indexes)->additional;
+                    if (additional.empty())
+                        continue;
+                    try
+                    {
+                        Poco::JSON::Parser parser;
+                        auto obj = parser.parse(additional).extract<Poco::JSON::Object::Ptr>();
+                        auto & step_agg = index_by_step[step_id];
+                        step_agg.total_parts += obj->getValue<UInt64>("total_parts");
+                        auto stages = obj->getArray("stages");
+                        if (step_agg.stages.empty())
+                        {
+                            for (size_t i = 0; i < stages->size(); ++i)
+                            {
+                                auto s = stages->getObject(i);
+                                StageAgg agg;
+                                agg.type        = s->getValue<String>("type");
+                                if (s->has("name"))      agg.name      = s->getValue<String>("name");
+                                if (s->has("condition")) agg.condition = s->getValue<String>("condition");
+                                if (s->has("keys"))      agg.keys      = s->getValue<String>("keys");
+                                agg.parts_after    = s->getValue<UInt64>("parts_after");
+                                agg.granules_after = s->getValue<UInt64>("granules_after");
+                                step_agg.stages.push_back(std::move(agg));
+                            }
+                        }
+                        else
+                        {
+                            for (size_t i = 0; i < std::min(stages->size(), step_agg.stages.size()); ++i)
+                            {
+                                auto s = stages->getObject(i);
+                                step_agg.stages[i].parts_after    += s->getValue<UInt64>("parts_after");
+                                step_agg.stages[i].granules_after += s->getValue<UInt64>("granules_after");
+                            }
+                        }
+                    }
+                    catch (...) {}
+                }
+            }
+        }
+    }
+
+    if (!has_cache && index_by_step.empty())
+        return "";
+
+    auto runtime_stats = std::make_unique<JSONBuilder::JSONMap>();
+
+    if (has_cache)
+    {
+        auto cache_obj = std::make_unique<JSONBuilder::JSONMap>();
+        cache_obj->add("cache_hit_segs",   cache_hit_segs);
+        cache_obj->add("cache_miss_segs",  cache_miss_segs);
+        cache_obj->add("steal_segs",       steal_segs);
+        cache_obj->add("s3_fallback_segs", s3_fallback_segs);
+        cache_obj->add("cache_bytes",      cache_bytes);
+        cache_obj->add("s3_bytes",         s3_bytes);
+        cache_obj->add("cache_read_ms",    cache_read_ms);
+        cache_obj->add("s3_read_ms",       s3_read_ms);
+        cache_obj->add("idx_hit_segs",     idx_hit_segs);
+        cache_obj->add("idx_miss_segs",    idx_miss_segs);
+        cache_obj->add("idx_cache_bytes",  idx_cache_bytes);
+        cache_obj->add("idx_s3_bytes",     idx_s3_bytes);
+        cache_obj->add("idx_cache_read_ms", idx_cache_read_ms);
+        cache_obj->add("idx_s3_read_ms",   idx_s3_read_ms);
+        runtime_stats->add(RuntimeAttributeKeys::CacheStats, std::move(cache_obj));
+    }
+
+    if (!index_by_step.empty())
+    {
+        auto idx_arr = std::make_unique<JSONBuilder::JSONArray>();
+        for (auto & [step_id, step_agg] : index_by_step)
+        {
+            auto step_obj = std::make_unique<JSONBuilder::JSONMap>();
+            step_obj->add("total_parts", step_agg.total_parts);
+            auto stages_arr = std::make_unique<JSONBuilder::JSONArray>();
+            for (const auto & stage : step_agg.stages)
+            {
+                auto s = std::make_unique<JSONBuilder::JSONMap>();
+                s->add("type", stage.type);
+                if (!stage.name.empty())      s->add("name",      stage.name);
+                if (!stage.condition.empty()) s->add("condition", stage.condition);
+                if (!stage.keys.empty())      s->add("keys",      stage.keys);
+                s->add("parts_after",    stage.parts_after);
+                s->add("granules_after", stage.granules_after);
+                stages_arr->add(std::move(s));
+            }
+            step_obj->add("stages", std::move(stages_arr));
+            idx_arr->add(std::move(step_obj));
+        }
+        runtime_stats->add("IndexUsage", std::move(idx_arr));
+    }
+
+    auto outer = std::make_unique<JSONBuilder::JSONMap>();
+    outer->add("RuntimeStats", std::move(runtime_stats));
+
+    WriteBufferFromOwnString buf;
+    JSONBuilder::FormatSettings json_fmt{.settings = {}};
+    JSONBuilder::FormatContext fmt_ctx{.out = buf};
+    outer->format(json_fmt, fmt_ctx);
+    return buf.str();
 }
 
 static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
@@ -1553,6 +1715,7 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
                      log_queries_min_type = settings.log_queries_min_type,
                      log_queries_min_query_duration_ms = settings.log_queries_min_query_duration_ms.totalMilliseconds(),
                      log_processors_profiles = settings.log_processors_profiles,
+                     log_segment_profiles = settings.log_segment_profiles,
                      status_info_to_query_log,
                      query_id,
                      finish_current_transaction](
@@ -1697,6 +1860,43 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
                         elem.used_table_functions = factories_info.table_functions;
                         elem.partition_ids = context->getPartitionIds();
 
+                        if (log_segment_profiles)
+                        {
+                            if (auto scheduler = context->getSegmentScheduler())
+                            {
+                                // Worker profile RPCs race with query finish: profiles are sent before the final
+                                // segment status, but RPC scheduling can deliver them after the query is logged,
+                                // leaving segment_profiles without runtime (cache/index) stats. EXPLAIN ANALYZE
+                                // already waits for them (ExplainAnalyzeTransform); do the same bounded wait here.
+                                // Stop once the received count is non-zero and stable across a poll, or at 100ms.
+                                const auto profile_wait_start = std::chrono::steady_clock::now();
+                                size_t last_received = 0;
+                                while (true)
+                                {
+                                    size_t received = 0;
+                                    for (const auto & [seg_id, profs] : scheduler->getSegmentsProfile(elem.client_info.current_query_id))
+                                        received += profs.size();
+                                    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - profile_wait_start).count();
+                                    if ((received > 0 && received == last_received) || elapsed_ms >= 100)
+                                        break;
+                                    last_received = received;
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                                }
+
+                                auto seg_profiles = scheduler->getSegmentsProfile(elem.client_info.current_query_id);
+                                if (!seg_profiles.empty())
+                                {
+                                    auto runtime_stats = buildRuntimeStatsJSON(seg_profiles);
+                                    if (!runtime_stats.empty())
+                                    {
+                                        if (!elem.segment_profiles)
+                                            elem.segment_profiles = std::make_shared<std::vector<String>>();
+                                        elem.segment_profiles->emplace_back(std::move(runtime_stats));
+                                    }
+                                }
+                            }
+                        }
                         if (log_queries && elem.type >= log_queries_min_type
                             && Int64(elem.query_duration_ms) >= log_queries_min_query_duration_ms)
                             logQuery(context, elem);

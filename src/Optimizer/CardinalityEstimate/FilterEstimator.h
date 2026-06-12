@@ -64,6 +64,10 @@ public:
     static double estimateFilterSelectivity(
         PlanNodeStatisticsPtr & child_stats, const ConstASTPtr & predicate, const NamesAndTypes & column_types, ContextPtr context);
 
+    /// Like estimateFilterSelectivity, but returns nullopt when selectivity could not be estimated
+    static std::optional<double> estimateFilterSelectivityOpt(
+        PlanNodeStatisticsPtr & child_stats, const ConstASTPtr & predicate, const NamesAndTypes & column_types, ContextPtr context);
+
     static FilterEstimateResult estimateFilter(PlanNodeStatistics & stats, const ConstASTPtr & predicate, FilterEstimatorContext & context);
 
 private:

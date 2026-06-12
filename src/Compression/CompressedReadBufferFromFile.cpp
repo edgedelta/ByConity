@@ -26,7 +26,17 @@
 #include <Compression/LZ4_decompress_faster.h>
 #include <IO/WriteHelpers.h>
 #include <IO/createReadBufferFromFileBase.h>
+#include <Common/Stopwatch.h>
+#include <Common/ProfileEvents.h>
+#include <common/logger_useful.h>
 
+namespace ProfileEvents
+{
+    extern const Event DiskCacheDiskReadMicroseconds;
+    extern const Event DiskCacheDecompressMicroseconds;
+}
+
+static Poco::Logger * getLog() { return &Poco::Logger::get("CompressedReadBufferFromFile"); }
 
 namespace DB
 {
@@ -48,7 +58,11 @@ bool CompressedReadBufferFromFile::nextImpl()
 
     size_t size_decompressed = 0;
     size_t size_compressed_without_checksum;
+    Stopwatch io_sw;
     size_compressed = readCompressedData(size_decompressed, size_compressed_without_checksum, false);
+    const auto io_us = io_sw.elapsedMicroseconds();
+    ProfileEvents::increment(ProfileEvents::DiskCacheDiskReadMicroseconds, io_us);
+
     if (!size_compressed)
         return false;
 
@@ -60,7 +74,14 @@ bool CompressedReadBufferFromFile::nextImpl()
     memory.resize(size_decompressed + additional_size_at_the_end_of_buffer);
     working_buffer = Buffer(memory.data(), &memory[size_decompressed]);
 
+    Stopwatch decomp_sw;
     decompress(working_buffer, size_decompressed, size_compressed_without_checksum);
+    const auto decomp_us = decomp_sw.elapsedMicroseconds();
+    ProfileEvents::increment(ProfileEvents::DiskCacheDecompressMicroseconds, decomp_us);
+
+    if (log_cache_perf_)
+        LOG_DEBUG(getLog(), "[cache-perf] col={} path={} compressed={}B decompressed={}B disk_read={}us decompress={}us",
+            column_name_, file_in.getFileName(), size_compressed, size_decompressed, io_us, decomp_us);
 
     /// nextimpl_working_buffer_offset is set in the seek function (lazy seek). So we have to
     /// check that we are not seeking beyond working buffer.
@@ -163,7 +184,11 @@ size_t CompressedReadBufferFromFile::readBig(char * to, size_t n)
         size_t size_decompressed = 0;
         size_t size_compressed_without_checksum = 0;
 
+        Stopwatch io_sw2;
         size_t new_size_compressed = readCompressedData(size_decompressed, size_compressed_without_checksum, false);
+        const auto io_us2 = io_sw2.elapsedMicroseconds();
+        ProfileEvents::increment(ProfileEvents::DiskCacheDiskReadMicroseconds, io_us2);
+
         size_compressed = 0; /// file_in no longer points to the end of the block in working_buffer.
         if (!new_size_compressed)
             return bytes_read;
@@ -174,7 +199,15 @@ size_t CompressedReadBufferFromFile::readBig(char * to, size_t n)
         /// need to skip some bytes in decompressed data (seek happened before readBig call).
         if (nextimpl_working_buffer_offset == 0 && size_decompressed + additional_size_at_the_end_of_buffer <= n - bytes_read)
         {
+            Stopwatch decomp_sw2;
             decompressTo(to + bytes_read, size_decompressed, size_compressed_without_checksum);
+            const auto decomp_us2 = decomp_sw2.elapsedMicroseconds();
+            ProfileEvents::increment(ProfileEvents::DiskCacheDecompressMicroseconds, decomp_us2);
+
+            if (log_cache_perf_)
+                LOG_DEBUG(getLog(), "[cache-perf] path={} compressed={}B decompressed={}B disk_read={}us decompress={}us",
+                    file_in.getFileName(), new_size_compressed, size_decompressed, io_us2, decomp_us2);
+
             bytes_read += size_decompressed;
             bytes += size_decompressed;
         }

@@ -534,6 +534,16 @@ void HTTPHandler::processQuery(
         /// see also https://github.com/ClickHouse/ClickHouse/pull/26864
         context = Context::createCopy(session->context);
         context->setSessionContext(session->context);
+
+        // Re-apply per-request database/tenant_id: they were set on the old context
+        // before the session copy replaced it, so they must be restored explicitly.
+        if (!database.empty())
+            context->setCurrentDatabase(database);
+        if (!tenant_id.empty())
+        {
+            context->setSetting("tenant_id", tenant_id);
+            context->setTenantId(tenant_id);
+        }
     }
 
     SCOPE_EXIT({

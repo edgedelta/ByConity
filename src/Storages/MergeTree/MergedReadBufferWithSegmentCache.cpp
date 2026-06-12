@@ -13,12 +13,17 @@
  * limitations under the License.
  */
 
+#include <Common/Stopwatch.h>
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <optional>
 #include <math.h>
 #include <IO/createReadBufferFromFileBase.h>
+#include <Storages/DiskCache/DiskCacheTTL.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/PartFileDiskCacheSegment.h>
+#include <Common/CurrentThread.h>
 #include <Storages/MergeTree/MergeTreeSuffix.h>
 #include <Storages/MergeTree/MergedReadBufferWithSegmentCache.h>
 #include "Compression/CachedCompressedReadBuffer.h"
@@ -149,9 +154,50 @@ MergedReadBufferWithSegmentCache::MergedReadBufferWithSegmentCache(
         total_segment_count(total_segment_count_), marks_loader(marks_loader_),
         current_segment_idx(0), current_compressed_offset(std::nullopt), part_host(part_host_),
         stream_extension(stream_extension_),
-        logger(&Poco::Logger::get("MergedReadBufferWithSegmentCache"))
+        is_idx(stream_extension_ == INDEX_FILE_EXTENSION),
+        logger(&Poco::Logger::get("MergedReadBufferWithSegmentCache")),
+        cached_query_id(CurrentThread::getQueryId().toString())
 {
+    // Collect read stats whenever profiling is requested, independent of whether a disk
+    // cache is present. With no/disabled cache every read falls through to S3, and we
+    // still want its open/io/bytes timing in the profile (it all lands in the S3 columns).
+    if (auto ctx = CurrentThread::get().getQueryContext())
+        collect_cache_stats = ctx->getSettingsRef().report_segment_profiles
+                           || ctx->getSettingsRef().log_segment_profiles;
     initialize();
+}
+
+MergedReadBufferWithSegmentCache::~MergedReadBufferWithSegmentCache()
+{
+    try { flushLocalCacheStats(); }
+    catch (...) { tryLogCurrentException(logger, "flushLocalCacheStats in destructor"); }
+}
+
+void MergedReadBufferWithSegmentCache::flushLocalCacheStats()
+{
+    if (!collect_cache_stats || local_cache_stats.empty())
+        return;
+    // Close out any open segment timer
+    if (active_segment_start_us > 0)
+    {
+        uint64_t elapsed = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count()) - active_segment_start_us;
+        if (is_idx)
+        {
+            if (active_is_cache) local_cache_stats.idx_cache_read_us += elapsed;
+            else local_cache_stats.idx_s3_read_us += elapsed;
+        }
+        else
+        {
+            if (active_is_cache) local_cache_stats.cache_open_us += elapsed;
+            else local_cache_stats.s3_open_us += elapsed;
+        }
+        active_segment_start_us = 0;
+    }
+    if (!cached_query_id.empty())
+        DiskCacheFactory::instance().mergeQueryCacheStats(cached_query_id, local_cache_stats, part_name);
+    local_cache_stats = {};
 }
 
 void MergedReadBufferWithSegmentCache::initialize() {
@@ -179,7 +225,19 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
         // There is a active cache buffer, trying to use it
         ReadBuffer& active_buffer = cache_buffer.activeBuffer();
 
-        if (likely(!active_buffer.eof()))
+        // eof() performs the actual disk read + decompression when the buffer is drained,
+        // time it to get pure IO cost, as opposed to the segment-open wall time tracked at boundaries.
+        bool cache_buffer_eof;
+        if (collect_cache_stats && !is_idx)
+        {
+            Stopwatch refill_watch;
+            cache_buffer_eof = active_buffer.eof();
+            local_cache_stats.cache_io_us += refill_watch.elapsedMicroseconds();
+        }
+        else
+            cache_buffer_eof = active_buffer.eof();
+
+        if (likely(!cache_buffer_eof))
         {
             // Cache buffer not eof yet, use it
             Position buf_pos = active_buffer.position();
@@ -190,6 +248,11 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
 
             ProfileEvents::increment(ProfileEvents::CnchReadSizeFromDiskCache,
                 buf_size);
+            if (collect_cache_stats)
+            {
+                if (is_idx) local_cache_stats.idx_cache_bytes += buf_size;
+                else local_cache_stats.cache_bytes += buf_size;
+            }
             if (progress_callback)
                 progress_callback({0, 0, 0, 0, buf_size});
 
@@ -198,6 +261,32 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
 
         current_compressed_offset = marks_loader.getMark(current_segment_idx * cache_segment_size).offset_in_compressed_file
             + cache_buffer.compressedOffset();
+
+        // Segment boundary: stop timer, then flush to DiskCacheFactory immediately.
+        // Flushing per-boundary ensures stats are available even for LIMIT queries
+        // that cancel before reaching EOF.
+        if (collect_cache_stats && active_segment_start_us > 0)
+        {
+            uint64_t elapsed = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count()) - active_segment_start_us;
+            if (is_idx)
+            {
+                if (active_is_cache) local_cache_stats.idx_cache_read_us += elapsed;
+                else local_cache_stats.idx_s3_read_us += elapsed;
+            }
+            else
+            {
+                if (active_is_cache) local_cache_stats.cache_open_us += elapsed;
+                else local_cache_stats.s3_open_us += elapsed;
+            }
+            active_segment_start_us = 0;
+        }
+        if (collect_cache_stats && !local_cache_stats.empty())
+        {
+            DiskCacheFactory::instance().mergeQueryCacheStats(cached_query_id, local_cache_stats, part_name);
+            local_cache_stats = {};
+        }
 
         cache_buffer.reset();
 
@@ -214,9 +303,7 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
     if (unlikely(segment_cache != nullptr && current_compressed_offset.has_value()))
     {
         if (current_segment_idx + 1 >= total_segment_count)
-        {
             return false;
-        }
         size_t new_segment_idx = current_segment_idx;
         while (new_segment_idx + 1 < total_segment_count
             && (current_compressed_offset.value() >= marks_loader.getMark((new_segment_idx + 1) * cache_segment_size).offset_in_compressed_file))
@@ -232,7 +319,16 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
     ReadBuffer& active_buffer = cache_buffer.initialized() ?
         cache_buffer.activeBuffer() : source_buffer.activeBuffer();
 
-    bool encounter_eof = active_buffer.eof();
+    bool encounter_eof;
+    if (collect_cache_stats && !is_idx)
+    {
+        Stopwatch refill_watch;
+        encounter_eof = active_buffer.eof();
+        (cache_buffer.initialized() ? local_cache_stats.cache_io_us : local_cache_stats.s3_io_us)
+            += refill_watch.elapsedMicroseconds();
+    }
+    else
+        encounter_eof = active_buffer.eof();
     if (!encounter_eof)
     {
         Position buf_pos = active_buffer.position();
@@ -245,6 +341,19 @@ bool MergedReadBufferWithSegmentCache::nextImpl()
                 ProfileEvents::CnchReadSizeFromDiskCache
                 : ProfileEvents::CnchReadSizeFromRemote,
             buf_size);
+        if (collect_cache_stats)
+        {
+            if (is_idx)
+            {
+                if (cache_buffer.initialized()) local_cache_stats.idx_cache_bytes += buf_size;
+                else local_cache_stats.idx_s3_bytes += buf_size;
+            }
+            else
+            {
+                if (cache_buffer.initialized()) local_cache_stats.cache_bytes += buf_size;
+                else local_cache_stats.s3_bytes += buf_size;
+            }
+        }
             if (cache_buffer.initialized() && progress_callback)
                 progress_callback({0, 0, 0, 0, buf_size});
 
@@ -323,6 +432,16 @@ void MergedReadBufferWithSegmentCache::seekToPosition(size_t segment_idx,
     }
 
     // No segment cache, trying to use source reader
+    if (collect_cache_stats)
+    {
+        // For data: count s3_fallback_segs here (complements cache_miss_segs from seekToMarkInSegmentCache).
+        // For idx: miss already counted in seekToMarkInSegmentCache; skip here to avoid double-count.
+        if (!is_idx) ++local_cache_stats.s3_fallback_segs;
+        active_segment_start_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        active_is_cache = false;
+    }
     initSourceBufferIfNeeded();
 
     LOG_TRACE(logger, fmt::format("Seek to remote file {} in part {}, offset {}:{}, base offset {}, limit {}",
@@ -370,11 +489,38 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
         if (settings.read_settings.disk_cache_mode == DiskCacheMode::FORCE_DISK_CACHE)
             throw Exception(ErrorCodes::DISK_CACHE_NOT_USED, "Can't find disk cache {} but enable `FORCE_DISK_CACHE`", segment_key);
 
-        if ((settings.remote_disk_cache_stealing == StealingCacheMode::READ_WRITE
-             || settings.remote_disk_cache_stealing == StealingCacheMode::READ_ONLY)
-            && parsed_assign_compute_host.has_value() && parsed_disk_cache_host.has_value()
-            && removeBracketsIfIpv6(parsed_assign_compute_host.value()) != removeBracketsIfIpv6(parsed_disk_cache_host.value()))
-            return seekToMarkInRemoteSegmentCache(segment_idx, mark_pos, segment_key);
+        if (settings.remote_disk_cache_stealing == StealingCacheMode::READ_WRITE
+            || settings.remote_disk_cache_stealing == StealingCacheMode::READ_ONLY)
+        {
+            // FDB-backed peer lookup: topology-aware, fires on scale events and post-restart gaps.
+            // Takes precedence over routing-hint stealing for TTL caches.
+            auto * ttl_cache = dynamic_cast<DiskCacheTTL *>(segment_cache);
+            if (ttl_cache)
+            {
+                if (auto peer_endpoint = ttl_cache->findPeerOwner(segment_key))
+                {
+                    bool stolen = seekToMarkInRemoteSegmentCache(segment_idx, mark_pos, segment_key, *peer_endpoint);
+                    if (collect_cache_stats)
+                    {
+                        if (stolen) ++local_cache_stats.steal_segs;
+                        else if (is_idx) ++local_cache_stats.idx_miss_segs;
+                        else ++local_cache_stats.cache_miss_segs;
+                    }
+                    return stolen;
+                }
+            }
+            else if (parsed_assign_compute_host.has_value() && parsed_disk_cache_host.has_value()
+                && removeBracketsIfIpv6(parsed_assign_compute_host.value()) != removeBracketsIfIpv6(parsed_disk_cache_host.value()))
+            {
+                // Legacy routing-hint stealing for non-TTL caches.
+                return seekToMarkInRemoteSegmentCache(segment_idx, mark_pos, segment_key, {});
+            }
+        }
+        if (collect_cache_stats)
+        {
+            if (is_idx) ++local_cache_stats.idx_miss_segs;
+            else ++local_cache_stats.cache_miss_segs;
+        }
         LOG_TRACE(
             logger,
             "Can't find disk cache key {} and fallback to read from remote fs. (current buffer at {}), segment {}, offset {}:{}",
@@ -398,6 +544,15 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
         cache_buffer.seek(mark_pos.offset_in_compressed_file - segment_start_compressed_offset,
             mark_pos.offset_in_decompressed_block);
         current_segment_idx = segment_idx;
+        if (collect_cache_stats)
+        {
+            if (is_idx) ++local_cache_stats.idx_hit_segs;
+            else ++local_cache_stats.cache_hit_segs;
+            active_segment_start_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            active_is_cache = true;
+        }
     }
     catch(...)
     {
@@ -410,9 +565,13 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
 }
 
 bool MergedReadBufferWithSegmentCache::seekToMarkInRemoteSegmentCache(size_t segment_idx,
-    const MarkInCompressedFile& mark_pos, const String & segment_key)
+    const MarkInCompressedFile& mark_pos, const String & segment_key, const String & endpoint)
 {
     if (!segment_cache)
+        return false;
+
+    const String & peer = endpoint.empty() ? part_host.disk_cache_host_port : endpoint;
+    if (peer.empty())
         return false;
 
     DistributedDataClientOption option{
@@ -423,19 +582,27 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInRemoteSegmentCache(size_t seg
         .retry_sleep_ms = segment_cache->getSettings().stealing_retry_sleep_ms,
         .max_queue_count = segment_cache->getSettings().stealing_max_queue_count,
     };
-    auto remote_data_client = std::make_shared<DistributedDataClient>(part_host.disk_cache_host_port, segment_key, option);
+    auto remote_data_client = std::make_shared<DistributedDataClient>(peer, segment_key, option);
     auto remote_cache_file = std::make_unique<ReadBufferFromRpcStreamFile>(remote_data_client, settings.read_settings.remote_fs_buffer_size);
     if (remote_cache_file->getFileName().empty())
         return false;
     try
     {
         size_t segment_start_compressed_offset = marks_loader.getMark(segment_idx * cache_segment_size).offset_in_compressed_file;
+        size_t seek_offset = mark_pos.offset_in_compressed_file - segment_start_compressed_offset;
+        size_t remote_file_size = remote_cache_file->getFileSize();
+        if (remote_file_size <= seek_offset)
+        {
+            LOG_WARNING(logger, "Peer {} reported truncated cache file for segment {} ({} <= seek offset {}) — falling back to S3",
+                peer, segment_key, remote_file_size, seek_offset);
+            return false;
+        }
 
         LOG_TRACE(
             logger,
             fmt::format(
                 "Seek to remote diskcache {}:{} (current buffer at {}), segment {}, offset {}:{}",
-                part_host.disk_cache_host_port,
+                peer,
                 remote_cache_file->getFileName(),
                 cache_buffer.initialized() ? cache_buffer.path() : "Uninitialized",
                 segment_idx,
@@ -443,7 +610,25 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInRemoteSegmentCache(size_t seg
                 mark_pos.offset_in_decompressed_block));
         initCacheBufferIfNeeded(nullptr, "", std::move(remote_cache_file));
         cache_buffer.seek(mark_pos.offset_in_compressed_file - segment_start_compressed_offset, mark_pos.offset_in_decompressed_block);
+        // Same probe as local path: catch sparse/in-flight stolen files that pass
+        // the size check but return 0 bytes on first read.
+        if (cache_buffer.activeBuffer().eof())
+        {
+            LOG_WARNING(logger, "Stolen cache EOF right after seek (offset {}) for {} from {} — falling back to S3",
+                seek_offset, segment_key, peer);
+            cache_buffer.reset();
+            return false;
+        }
         current_segment_idx = segment_idx;
+        if (collect_cache_stats)
+        {
+            if (is_idx) ++local_cache_stats.idx_hit_segs;
+            else ++local_cache_stats.cache_hit_segs;
+            active_segment_start_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            active_is_cache = true;
+        }
     }
     catch (...)
     {
@@ -464,12 +649,15 @@ void MergedReadBufferWithSegmentCache::initCacheBufferIfNeeded(
         cache_buffer.reset();
 
         // Init cache buffer
+        const bool log_perf = dynamic_cast<DiskCacheTTL *>(segment_cache) != nullptr;
+
         if (uncompressed_cache && cache_disk)
         {
             auto cached_compressed_buffer = std::make_unique<CachedCompressedReadBuffer>(
                 fullPath(cache_disk, cache_path),
                 [this, cache_disk, cache_path]() { return cache_disk->readFile(cache_path, settings.read_settings); },
                 uncompressed_cache);
+            cached_compressed_buffer->setLogCachePerf(log_perf, stream_name);
 
             cache_buffer.initialize(std::move(cached_compressed_buffer), nullptr);
         }
@@ -479,11 +667,13 @@ void MergedReadBufferWithSegmentCache::initCacheBufferIfNeeded(
             {
                 auto non_cached_compressed_buffer
                     = std::make_unique<CompressedReadBufferFromFile>(cache_disk->readFile(cache_path, settings.read_settings));
+                non_cached_compressed_buffer->setLogCachePerf(log_perf, stream_name);
                 cache_buffer.initialize(nullptr, std::move(non_cached_compressed_buffer));
             }
             else if (remote_cache)
             {
                 auto non_cached_compressed_buffer = std::make_unique<CompressedReadBufferFromFile>(std::move(remote_cache));
+                non_cached_compressed_buffer->setLogCachePerf(log_perf, stream_name);
                 cache_buffer.initialize(nullptr, std::move(non_cached_compressed_buffer));
             }
             else

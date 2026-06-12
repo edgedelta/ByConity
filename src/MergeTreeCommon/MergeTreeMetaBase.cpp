@@ -57,6 +57,7 @@
 #include <Storages/MergeTree/MergeTreeDataPartCNCH.h>
 #include <Storages/MergeTree/localBackup.h>
 #include <Storages/VirtualColumnUtils.h>
+#include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/MutationCommands.h>
 #include <Interpreters/ExpressionAnalyzer.h>
 #include <Interpreters/TreeRewriter.h>
@@ -200,6 +201,13 @@ void MergeTreeMetaBase::setRelativeDataPath(StorageLocation location, const Stri
             ErrorCodes::LOGICAL_ERROR);
     }
     relative_data_path = rel_path;
+}
+
+IDiskCachePtr MergeTreeMetaBase::getDiskCache() const
+{
+    // Default implementation: return global LRU cache
+    // Override in StorageCloudMergeTree for per-table TTL cache support
+    return DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
 }
 
 static void checkKeyExpression(const ExpressionActions & expr, const Block & sample_block, const String & key_name, bool allow_nullable_key)
@@ -2033,8 +2041,22 @@ ASTPtr MergeTreeMetaBase::applyFilter(
         for (const auto & col_name : used_columns)
             names_and_types.emplace_back(columns_desc.getPhysical(col_name));
 
+        Names partition_key_names = getInMemoryMetadataPtr()->getPartitionKey().column_names;
+        Names virtual_key_names = getVirtuals().getNames();
+        partition_key_names.insert(partition_key_names.end(), virtual_key_names.begin(), virtual_key_names.end());
+
         for (const auto & conjunct : full_conjuncts)
         {
+            // Partition-key conditions are always true within a partition — pushing them to
+            // prewhere reads an extra column for zero filtering benefit.
+            PartitionPredicateVisitor::Data visitor_data{query_context, partition_key_names};
+            PartitionPredicateVisitor(visitor_data).visit(conjunct);
+            if (visitor_data.getMatch())
+            {
+                where_conjuncts.push_back(conjunct);
+                continue;
+            }
+
             double selectivity = FilterEstimator::estimateFilterSelectivity(storage_statistics, conjunct, names_and_types, query_context);
             LOG_DEBUG(
                 &Poco::Logger::get("OptimizerActivePrewhere"),
