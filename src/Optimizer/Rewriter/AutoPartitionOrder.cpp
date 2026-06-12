@@ -41,6 +41,30 @@ namespace
             return Void{};
         }
 
+        /// Blocking / row-changing operators. A LIMIT above them does NOT bound the rows their child scan
+        /// must read: aggregation must scan every row to form its groups; joins/distinct/window/union/
+        /// array-join reshape the row set so N output rows != N input rows. Reset the carried limit to 0
+        /// below them so the gate only ever sees scans the LIMIT genuinely bounds.
+        /// Without this a post-aggregation LIMIT could thread down to a full-scan aggregation and wrongly
+        /// arm partition-order, whose serial concat over all partitions loses to the parallel merge in performance.
+        Void clearLimitBelow(PlanNodeBase & node)
+        {
+            UInt64 zero = 0;
+            for (const auto & child : node.getChildren())
+                VisitorUtil::accept(*child, *this, zero);
+            return Void{};
+        }
+
+        Void visitAggregatingNode(AggregatingNode & node, UInt64 &) override { return clearLimitBelow(node); }
+        Void visitMergingAggregatedNode(MergingAggregatedNode & node, UInt64 &) override { return clearLimitBelow(node); }
+        Void visitJoinNode(JoinNode & node, UInt64 &) override { return clearLimitBelow(node); }
+        Void visitMultiJoinNode(MultiJoinNode & node, UInt64 &) override { return clearLimitBelow(node); }
+        Void visitDistinctNode(DistinctNode & node, UInt64 &) override { return clearLimitBelow(node); }
+        Void visitMarkDistinctNode(MarkDistinctNode & node, UInt64 &) override { return clearLimitBelow(node); }
+        Void visitWindowNode(WindowNode & node, UInt64 &) override { return clearLimitBelow(node); }
+        Void visitUnionNode(UnionNode & node, UInt64 &) override { return clearLimitBelow(node); }
+        Void visitArrayJoinNode(ArrayJoinNode & node, UInt64 &) override { return clearLimitBelow(node); }
+
         Void visitTableScanNode(TableScanNode & node, UInt64 & limit) override
         {
             auto step = node.getStep();
