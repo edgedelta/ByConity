@@ -230,6 +230,12 @@ public:
         Protos::ScheduleGlobalGCResp * response,
         google::protobuf::Closure * done) override;
 
+    void preloadHotCacheTables(
+        google::protobuf::RpcController * cntl,
+        const Protos::PreloadHotCacheTablesReq * request,
+        Protos::PreloadHotCacheTablesResp * response,
+        google::protobuf::Closure * done) override;
+
     void getNumOfTablesCanSendForGlobalGC(
         google::protobuf::RpcController * cntl,
         const Protos::GetNumOfTablesCanSendForGlobalGCReq * request,

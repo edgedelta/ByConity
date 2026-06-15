@@ -932,6 +932,21 @@ bool CnchServerClient::scheduleGlobalGC(const std::vector<Protos::DataModelTable
     return response.ret();
 }
 
+UInt32 CnchServerClient::preloadHotCacheTables(UInt64 ts, const String & database)
+{
+    brpc::Controller cntl;
+    Protos::PreloadHotCacheTablesReq request;
+    request.set_ts(ts);
+    request.set_database(database);
+    Protos::PreloadHotCacheTablesResp response;
+
+    stub->preloadHotCacheTables(&cntl, &request, &response, nullptr);
+
+    assertController(cntl);
+    RPCHelpers::checkResponse(response);
+    return response.preloaded_tables();
+}
+
 std::unordered_map<UUID, UInt64> CnchServerClient::queryUdiCounter()
 {
     brpc::Controller cntl;

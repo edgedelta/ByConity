@@ -64,6 +64,8 @@ bvar::Adder<int> & getExecuteMetric(CnchBGThreadType type)
             return g_executeImpl_PartMover;
         case CnchBGThreadType::ManifestCheckpoint:
             return g_executeImpl_ManifestCheckpoint;
+        case CnchBGThreadType::WorkerCachePreload:
+            return g_executeImpl_WorkerCachePreload;
         default:
             throw Exception(String{"No metric add for daemon job type "} + toString(type) + ", this is coding mistake", ErrorCodes::LOGICAL_ERROR);
     }
@@ -100,6 +102,8 @@ bvar::Adder<int> & getExecuteErrorMetric(CnchBGThreadType type)
             return g_executeImpl_PartMover_error;
         case DB::CnchBGThreadType::ManifestCheckpoint:
             return g_executeImpl_ManifestCheckpoint_error;
+        case CnchBGThreadType::WorkerCachePreload:
+            return g_executeImpl_WorkerCachePreload_error;
         default:
             throw Exception(String{"No error metric add for daemon job type "} + toString(type) + ", this is coding mistake", ErrorCodes::LOGICAL_ERROR);
     }
