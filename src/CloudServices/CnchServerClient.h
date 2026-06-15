@@ -189,9 +189,10 @@ public:
 
     UInt64 getServerStartTime();
     bool scheduleGlobalGC(const std::vector<Protos::DataModelTable> & tables);
-    /// Ask this server to re-warm the TTL disk cache for the tables it hosts. Returns the
-    /// number of tables for which preload was triggered. Used after a worker restart.
-    UInt32 preloadHotCacheTables(UInt64 ts);
+    /// Ask this server to re-warm the TTL disk cache for the tables it hosts (optionally
+    /// restricted to one database; empty = all). Returns the number of tables for which
+    /// preload was triggered. Used after a worker restart.
+    UInt32 preloadHotCacheTables(UInt64 ts, const String & database);
     size_t getNumOfTablesCanSendForGlobalGC();
     google::protobuf::RepeatedPtrField<DB::Protos::BackgroundThreadStatus>
     getBackGroundStatus(const CnchBGThreadType & type);
