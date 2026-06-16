@@ -1662,6 +1662,7 @@ void CnchServerServiceImpl::preloadHotCacheTables(
 
             /// Wall-clock seconds used by the TTL window filter inside preload.
             const UInt64 ts = request->has_ts() ? request->ts() : static_cast<UInt64>(time(nullptr));
+            const time_t now_sec = static_cast<time_t>(ts);
             const String rpc_port = std::to_string(gc->getRPCPort());
 
             UInt32 preloaded = 0;
@@ -1691,8 +1692,24 @@ void CnchServerServiceImpl::preloadHotCacheTables(
                 {
                     ServerDataPartsVector parts = cnch->getAllPartsWithDBM(rpc_context).first;
                     parts = CnchPartsHelper::calcVisibleParts(parts, false);
+
+                    /// Submit only the parts the TTL cache would actually keep.
+                    /// max time 0 == non-time partition, which the cache never keeps.
+                    const time_t ttl_seconds = static_cast<time_t>(settings->disk_cache_ttl_hours.value) * 3600;
+                    const Int64 time_col_pos = cnch->minmax_idx_time_column_pos;
+                    const size_t visible_parts = parts.size();
+                    std::erase_if(parts, [&](const auto & p) {
+                        const time_t pt = p->getMaxTime(time_col_pos);
+                        return pt == 0 || now_sec - pt > ttl_seconds;
+                    });
                     if (parts.empty())
+                    {
+                        /// Distinguish "no parts at all" from "had parts but none within the TTL
+                        /// window or non-time partition"
+                        if (visible_parts > 0)
+                            LOG_DEBUG(log, "preloadHotCacheTables: table {}: none of {} visible parts are within the TTL window (or non-time partition), skipping", uuid, visible_parts);
                         continue;
+                    }
 
                     cnch->sendPreloadTasks(
                         rpc_context,
