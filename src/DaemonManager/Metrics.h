@@ -47,5 +47,7 @@ namespace DB::DaemonManager::BRPCMetrics
     extern bvar::Adder< int > g_executeImpl_CnchRefreshMaterializedView;
     extern bvar::Adder< int > g_executeImpl_PartMover_error;
     extern bvar::Adder< int > g_executeImpl_PartMover;
+    extern bvar::Adder< int > g_executeImpl_WorkerCachePreload_error;
+    extern bvar::Adder< int > g_executeImpl_WorkerCachePreload;
 }/// end namespace
 

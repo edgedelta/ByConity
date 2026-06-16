@@ -56,8 +56,22 @@
                 <interval>600000</interval>
                 <disable>false</disable>
             </job>
+            <job>
+                <!-- Detects worker restarts and re-warms the TTL disk cache. -->
+                <name>WORKER_CACHE_PRELOAD</name>
+                <interval>30000</interval>
+                <disable>false</disable>
+            </job>
         </daemon_jobs>
     </daemon_manager>
+
+    <!-- WORKER_CACHE_PRELOAD tuning (seconds). -->
+    <!-- Skip a worker until it has been (re)registered at least this long (avoid preloading a half-initialized worker). -->
+    <worker_cache_preload_grace_sec>30</worker_cache_preload_grace_sec>
+    <!-- Minimum gap between preload broadcasts; collapses bursts (RM failover, rolling restart, mass scale-out) into one fan-out. -->
+    <worker_cache_preload_cooldown_sec>300</worker_cache_preload_cooldown_sec>
+    <!-- Restrict warming to this database; empty = every database the server hosts. -->
+    <worker_cache_preload_database></worker_cache_preload_database>
 
     <storage_configuration>
         <disks>
