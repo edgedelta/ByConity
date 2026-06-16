@@ -24,6 +24,7 @@
 #include <Storages/StorageCnchMergeTree.h>
 #include <Common/serverLocality.h>
 #include <Core/Defines.h>
+#include <common/scope_guard_safe.h>
 #include <CloudServices/DedupWorkerManager.h>
 #include <CloudServices/DedupWorkerStatus.h>
 #include <Interpreters/Context.h>
@@ -1640,11 +1641,21 @@ void CnchServerServiceImpl::preloadHotCacheTables(
     Protos::PreloadHotCacheTablesResp * response,
     google::protobuf::Closure * done)
 {
-    RPCHelpers::serviceHandler(done, response, [c = cntl, request, response, done, gc = getContext(), log = log] {
+    RPCHelpers::serviceHandler(done, response, [this, c = cntl, request, response, done, gc = getContext(), log = log] {
         brpc::ClosureGuard done_guard(done);
 
         try
         {
+            /// Only one sweep at a time: if the daemon re-broadcasts, skip rather than start a second concurrent scan.
+            bool expected = false;
+            if (!hot_cache_preload_running.compare_exchange_strong(expected, true))
+            {
+                LOG_INFO(log, "preloadHotCacheTables: a preload sweep is already running here, skipping this request");
+                response->set_preloaded_tables(0);
+                return;
+            }
+            SCOPE_EXIT({ hot_cache_preload_running.store(false); });
+
             auto rpc_context = RPCHelpers::createSessionContextForRPC(gc, *c);
             const TxnTimestamp txn_id = rpc_context->getTimestamp();
             rpc_context->setTemporaryTransaction(txn_id, {}, /*check catalog*/ false);

@@ -935,6 +935,9 @@ bool CnchServerClient::scheduleGlobalGC(const std::vector<Protos::DataModelTable
 UInt32 CnchServerClient::preloadHotCacheTables(UInt64 ts, const String & database)
 {
     brpc::Controller cntl;
+    /// The handler scans the catalog for hosted TTL tables, which can take well over the
+    /// 3s brpc default
+    cntl.set_timeout_ms(60 * 1000);
     Protos::PreloadHotCacheTablesReq request;
     request.set_ts(ts);
     request.set_database(database);
