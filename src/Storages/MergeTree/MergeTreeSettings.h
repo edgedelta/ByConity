@@ -508,6 +508,9 @@ enum StealingCacheMode : UInt64
     M(UInt64, disk_cache_ttl_hours, 0, "Per-table TTL cache: cache parts with max_timestamp within this age. 0 = disabled (use global LRU). >0 = enable per-table TTL cache.", 0) \
     M(UInt64, disk_cache_max_size_bytes, 0, "Per-table cache size limit in bytes. 0 = unlimited (constrained by global limit). Only applies when disk_cache_ttl_hours > 0.", 0) \
     M(Bool, enable_auto_statistics, false, "Enable automatic statistics collection for this table. When enabled, stats are collected after sufficient data changes (controlled by server-level update_ratio_threshold).", 0) \
+    M(Float, statistics_auto_sample_ratio, 0, "Per-table override for auto statistics sample ratio. 0 = inherit server default (statistics_sample_ratio).", 0) \
+    M(UInt64, statistics_auto_sample_row_count, 0, "Per-table override for auto statistics minimal sample row count. 0 = inherit server default (statistics_sample_row_count).", 0) \
+    M(String, statistics_auto_accurate_sample_ndv, "", "Per-table override for auto statistics accurate-NDV mode (NEVER/AUTO/ALWAYS). Empty = inherit server default. Set NEVER on huge high-cardinality tables to skip the accurate-NDV GROUP BY pass that can OOM workers.", 0) \
     \
     /* Renamed settings - cannot be ignored */\
     M(Bool, enable_nullable_sorting_key, false, "Alias of `allow_nullable_key`", 0) \
