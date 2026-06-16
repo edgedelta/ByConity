@@ -345,20 +345,17 @@ bool AutoStatisticsManager::executeOneTask(const std::shared_ptr<TaskInfo> & cho
             settings.fromJsonStr(chosen_task->getSettingsJson());
         }
 
-        // Overlay per-table auto-stats overrides (0 / empty = inherit server defaults).
-        if (auto storage = catalog->tryGetStorageByUUID(uuid))
+        // Overlay per-table auto-stats overrides
+        auto storage = catalog->tryGetStorageByUUID(uuid);
+        if (auto * mt = storage ? dynamic_cast<MergeTreeMetaBase *>(storage.get()) : nullptr)
         {
-            if (auto * mt = dynamic_cast<MergeTreeMetaBase *>(storage.get()))
-            {
-                const auto & table_settings = mt->getSettings();
-                if (table_settings->statistics_auto_sample_ratio > 0)
-                    settings.sample_ratio = table_settings->statistics_auto_sample_ratio;
-                if (table_settings->statistics_auto_sample_row_count > 0)
-                    settings.sample_row_count = table_settings->statistics_auto_sample_row_count;
-                const auto & ndv_mode = table_settings->statistics_auto_accurate_sample_ndv.value;
-                if (!ndv_mode.empty())
-                    settings.accurate_sample_ndv = SettingFieldStatisticsAccurateSampleNdvModeTraits::fromString(ndv_mode);
-            }
+            const auto & table_settings = mt->getSettings();
+            if (table_settings->statistics_auto_sample_ratio > 0)
+                settings.sample_ratio = table_settings->statistics_auto_sample_ratio;
+            if (table_settings->statistics_auto_sample_row_count > 0)
+                settings.sample_row_count = table_settings->statistics_auto_sample_row_count;
+            if (table_settings->statistics_auto_accurate_sample_ndv.changed)
+                settings.accurate_sample_ndv = table_settings->statistics_auto_accurate_sample_ndv;
         }
 
         auto task_context = Context::createCopy(context);
