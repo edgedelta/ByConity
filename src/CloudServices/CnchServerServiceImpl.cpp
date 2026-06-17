@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <CloudServices/CnchServerServiceImpl.h>
+#include <CloudServices/HotCachePreloadHelper.h>
 
 #include <Catalog/Catalog.h>
 #include <Catalog/CatalogUtils.h>
@@ -1635,6 +1636,11 @@ void CnchServerServiceImpl::submitPreloadTask(
     });
 }
 
+bool isPreloadTopologyReady(const std::list<CnchServerTopology> & topology)
+{
+    return !topology.empty() && !topology.back().getServerList().empty();
+}
+
 void CnchServerServiceImpl::preloadHotCacheTables(
     google::protobuf::RpcController * cntl,
     const Protos::PreloadHotCacheTablesReq * request,
@@ -1668,6 +1674,13 @@ void CnchServerServiceImpl::preloadHotCacheTables(
             UInt32 preloaded = 0;
             auto catalog = rpc_context->getCnchCatalog();
             auto topology = rpc_context->getCnchTopologyMaster();
+
+            /// If our topology view has not settled yet, we cannot resolve table ownership and would silently warm
+            /// nothing. Report not-ready so the daemon defers and retries on a later tick instead of consuming the worker-restart event.
+            if (!isPreloadTopologyReady(topology->getCurrentTopology()))
+                throw Exception(
+                    "preloadHotCacheTables: server topology not settled yet, deferring preload",
+                    ErrorCodes::CNCH_TOPOLOGY_NOT_MATCH_ERROR);
 
             /// Scan tables; act only on the TTL-cached ones this server hosts.
             for (const auto & model : catalog->getAllTables(request->database()))
