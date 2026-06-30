@@ -24,6 +24,7 @@
 #include <CloudServices/CnchPartsHelper.h>
 #include <CloudServices/CnchServerResource.h>
 #include <CloudServices/CnchWorkerClient.h>
+#include <CloudServices/CnchHotCacheWarmer.h>
 #include <Core/Protocol.h>
 #include <Core/Settings.h>
 #include <DaemonManager/DaemonManagerClient.h>
@@ -1448,13 +1449,27 @@ void StorageCnchMergeTree::collectResource(
         cnch_resource->setResourceReplicated(storage_uuid, replicated);
 }
 
-void StorageCnchMergeTree::sendPreloadTasks(ContextPtr local_context, ServerDataPartsVector parts, bool enable_parts_sync_preload, UInt64 parts_preload_level, UInt64 ts)
+void StorageCnchMergeTree::sendPreloadTasks(ContextPtr local_context, ServerDataPartsVector parts, bool enable_parts_sync_preload, UInt64 parts_preload_level, UInt64 ts, const std::unordered_set<String> & target_workers)
 {
     ProfileEvents::increment(ProfileEvents::PreloadSubmitTotalOps, 1, Metrics::MetricType::Rate);
     Stopwatch timer;
 
     auto worker_group = getWorkerGroupForTable(*this, local_context);
     local_context->setCurrentWorkerGroup(worker_group);
+
+    /// Restrict the warm to the restarted workers. The authoritative filter is isPreloadTargetWorker
+    /// in the sendResources callback below: it runs after the real (consistent-hash OR hybrid) part
+    /// assignment, so it is correct for every allocation mode. Here we only short-circuit the common
+    /// case where none of the restarted workers serve this table at all -- a cheap membership test.
+    if (!target_workers.empty())
+    {
+        const auto & hosts = worker_group->getHostWithPortsVec();
+        if (std::none_of(hosts.begin(), hosts.end(), [&](const auto & h) { return target_workers.contains(h.id); }))
+        {
+            LOG_DEBUG(log, "sendPreloadTasks: no restarted worker serves this table, skipping");
+            return;
+        }
+    }
 
     TxnTimestamp txn_id = local_context->getCurrentTransactionID();
     String create_table_query = genCreateTableQueryForWorker(txn_id.toString());
@@ -1476,6 +1491,11 @@ void StorageCnchMergeTree::sendPreloadTasks(ContextPtr local_context, ServerData
 
     server_resource->sendResources(local_context, [&](CnchWorkerClientPtr client, const auto & resources, const ExceptionHandlerPtr & handler) {
         std::vector<brpc::CallId> ids;
+        /// Authoritative target-worker filter: runs after the real (consistent-hash OR hybrid)
+        /// assignment, so it never disagrees with the dispatch mapping. host_ports.id here is the
+        /// same worker-id form carried in target_workers (the warmer's restarted-worker ids).
+        if (!isPreloadTargetWorker(target_workers, client->getHostWithPortsID()))
+            return ids;
         for (const auto & resource : resources)
         {
             /// Big parts split by hybrid allocation arrive as virtual_parts, not server_parts

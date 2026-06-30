@@ -281,6 +281,7 @@ using ServiceDiscoveryClientPtr = std::shared_ptr<IServiceDiscovery>;
 class CnchTopologyMaster;
 class CnchServerTopology;
 class CnchServerManager;
+class CnchHotCacheWarmer;
 struct RootConfiguration;
 class TxnTimestamp;
 class TransactionCoordinatorRcCnch;
@@ -1598,6 +1599,10 @@ public:
 
     void setCnchServerManager(const Poco::Util::AbstractConfiguration & config);
     std::shared_ptr<CnchServerManager> getCnchServerManager() const;
+
+    /// Server-side loop that re-warms the worker TTL disk cache after a worker restart.
+    void setCnchHotCacheWarmer(const Poco::Util::AbstractConfiguration & config);
+    std::shared_ptr<CnchHotCacheWarmer> getCnchHotCacheWarmer() const;
     void updateServerVirtualWarehouses(const ConfigurationPtr & config);
     void setCnchTopologyMaster();
     std::shared_ptr<CnchTopologyMaster> getCnchTopologyMaster() const;

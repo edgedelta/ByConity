@@ -42,6 +42,7 @@
 #include <Access/AeolusAccessUtil.h>
 #include <Catalog/Catalog.h>
 #include <CloudServices/CnchBGThreadsMap.h>
+#include <CloudServices/CnchHotCacheWarmer.h>
 #include <CloudServices/CnchMergeMutateThread.h>
 #include <CloudServices/CnchServerClient.h>
 #include <CloudServices/CnchServerResource.h>
@@ -423,6 +424,7 @@ struct ContextSharedPart
     mutable PartCacheManagerPtr cache_manager; /// Manage cache of parts for cnch tables.
     mutable std::shared_ptr<Catalog::Catalog> cnch_catalog;
     mutable CnchServerManagerPtr server_manager;
+    mutable CnchHotCacheWarmerPtr hot_cache_warmer; /// Re-warms worker TTL disk cache on worker restart.
     mutable CnchTopologyMasterPtr topology_master;
     mutable ResourceManagerClientPtr rm_client;
     mutable std::unique_ptr<VirtualWarehousePool> vw_pool;
@@ -569,6 +571,11 @@ struct ContextSharedPart
 
         if (cnch_bg_threads_array)
             cnch_bg_threads_array->shutdown();
+
+        /// Stop the warmer before tearing down what its ticks use (txn coordinator, catalog, RM).
+        /// shutDown() blocks until any in-flight tick finishes, so nothing runs past this point.
+        if (hot_cache_warmer)
+            hot_cache_warmer->shutDown();
 
         if (cnch_txn_coordinator)
         {
@@ -5199,6 +5206,22 @@ std::shared_ptr<CnchServerManager> Context::getCnchServerManager() const
         throw Exception("Server manager is not initiailized.", ErrorCodes::LOGICAL_ERROR);
 
     return shared->server_manager;
+}
+
+void Context::setCnchHotCacheWarmer(const Poco::Util::AbstractConfiguration & config)
+{
+    auto lock = getLock(); // checked
+    if (shared->hot_cache_warmer)
+        throw Exception("Hot cache warmer has been already created.", ErrorCodes::LOGICAL_ERROR);
+
+    shared->hot_cache_warmer = std::make_shared<CnchHotCacheWarmer>(shared_from_this(), config);
+    shared->hot_cache_warmer->start();
+}
+
+std::shared_ptr<CnchHotCacheWarmer> Context::getCnchHotCacheWarmer() const
+{
+    auto lock = getLock(); // checked
+    return shared->hot_cache_warmer;
 }
 
 void Context::updateServerVirtualWarehouses(const ConfigurationPtr & config)

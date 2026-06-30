@@ -16,7 +16,6 @@
 #include <Catalog/DataModelPartWrapper.h>
 #include <Interpreters/CnchSystemLog.h>
 #include <Protos/DataModelHelpers.h>
-#include <Core/Field.h>
 #include "Storages/MergeTree/DeleteBitmapCache.h"
 
 namespace DB
@@ -160,24 +159,6 @@ const MergeTreePartInfo & ServerDataPart::info() const { return *part_model_wrap
 const String & ServerDataPart::name() const { return part_model_wrapper->name; }
 const MergeTreePartition & ServerDataPart::partition() const { return *(part_model_wrapper->partition); }
 const std::shared_ptr<IMergeTreeDataPart::MinMaxIndex> & ServerDataPart::minmax_idx() const { return part_model_wrapper->minmax_idx; }
-
-time_t ServerDataPart::getMaxTime(Int64 time_col_pos) const
-{
-    const auto & mm = minmax_idx();
-    if (time_col_pos < 0 || !mm || !mm->initialized || static_cast<size_t>(time_col_pos) >= mm->hyperrectangle.size())
-        return 0;
-    const auto & hr = mm->hyperrectangle[time_col_pos];
-    /// The case of DateTime.
-    if (hr.right.getType() == Field::Types::UInt64)
-        return static_cast<time_t>(hr.right.get<UInt64>());
-    /// The case of DateTime64.
-    if (hr.right.getType() == Field::Types::Decimal64)
-    {
-        const auto r = hr.right.get<DecimalField<Decimal64>>();
-        return static_cast<time_t>(r.getValue() / r.getScaleMultiplier());
-    }
-    return 0;
-}
 
 UUID ServerDataPart::get_uuid() const
 {

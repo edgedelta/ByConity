@@ -15,17 +15,11 @@
 
 #include <atomic>
 #include <CloudServices/CnchServerServiceImpl.h>
-#include <CloudServices/HotCachePreloadHelper.h>
 
 #include <Catalog/Catalog.h>
 #include <Catalog/CatalogUtils.h>
 #include <CloudServices/CnchDataWriter.h>
 #include <CloudServices/CnchMergeMutateThread.h>
-#include <CloudServices/CnchPartsHelper.h>
-#include <Storages/StorageCnchMergeTree.h>
-#include <Common/serverLocality.h>
-#include <Core/Defines.h>
-#include <common/scope_guard_safe.h>
 #include <CloudServices/DedupWorkerManager.h>
 #include <CloudServices/DedupWorkerStatus.h>
 #include <Interpreters/Context.h>
@@ -1631,121 +1625,6 @@ void CnchServerServiceImpl::submitPreloadTask(
         catch (...)
         {
             tryLogCurrentException(log);
-            RPCHelpers::handleException(response->mutable_exception());
-        }
-    });
-}
-
-bool isPreloadTopologyReady(const std::list<CnchServerTopology> & topology)
-{
-    return !topology.empty() && !topology.back().getServerList().empty();
-}
-
-void CnchServerServiceImpl::preloadHotCacheTables(
-    google::protobuf::RpcController * cntl,
-    const Protos::PreloadHotCacheTablesReq * request,
-    Protos::PreloadHotCacheTablesResp * response,
-    google::protobuf::Closure * done)
-{
-    RPCHelpers::serviceHandler(done, response, [this, c = cntl, request, response, done, gc = getContext(), log = log] {
-        brpc::ClosureGuard done_guard(done);
-
-        try
-        {
-            /// Only one sweep at a time: if the daemon re-broadcasts, skip rather than start a second concurrent scan.
-            bool expected = false;
-            if (!hot_cache_preload_running.compare_exchange_strong(expected, true))
-            {
-                LOG_INFO(log, "preloadHotCacheTables: a preload sweep is already running here, skipping this request");
-                response->set_preloaded_tables(0);
-                return;
-            }
-            SCOPE_EXIT({ hot_cache_preload_running.store(false); });
-
-            auto rpc_context = RPCHelpers::createSessionContextForRPC(gc, *c);
-            const TxnTimestamp txn_id = rpc_context->getTimestamp();
-            rpc_context->setTemporaryTransaction(txn_id, {}, /*check catalog*/ false);
-
-            /// Wall-clock seconds used by the TTL window filter inside preload.
-            const UInt64 ts = request->has_ts() ? request->ts() : static_cast<UInt64>(time(nullptr));
-            const time_t now_sec = static_cast<time_t>(ts);
-            const String rpc_port = std::to_string(gc->getRPCPort());
-
-            UInt32 preloaded = 0;
-            auto catalog = rpc_context->getCnchCatalog();
-            auto topology = rpc_context->getCnchTopologyMaster();
-
-            /// If our topology view has not settled yet, we cannot resolve table ownership and would silently warm
-            /// nothing. Report not-ready so the daemon defers and retries on a later tick instead of consuming the worker-restart event.
-            if (!isPreloadTopologyReady(topology->getCurrentTopology()))
-                throw Exception(
-                    "preloadHotCacheTables: server topology not settled yet, deferring preload",
-                    ErrorCodes::CNCH_TOPOLOGY_NOT_MATCH_ERROR);
-
-            /// Scan tables; act only on the TTL-cached ones this server hosts.
-            for (const auto & model : catalog->getAllTables(request->database()))
-            {
-                const String uuid = UUIDHelpers::UUIDToString(RPCHelpers::createUUID(model.uuid()));
-                const String server_vw = model.has_server_vw_name() ? model.server_vw_name() : String(DEFAULT_SERVER_VW_NAME);
-
-                /// Ownership check first — cheap, avoids loading storages we don't host.
-                auto host = topology->getTargetServer(uuid, server_vw, /*allow_empty_result=*/true);
-                if (host.empty() || !isLocalServer(host.getRPCAddress(), rpc_port))
-                    continue;
-
-                StoragePtr storage = catalog->tryGetTableByUUID(*rpc_context, uuid, TxnTimestamp::maxTS());
-                auto * cnch = dynamic_cast<StorageCnchMergeTree *>(storage.get());
-                if (!cnch)
-                    continue;
-                auto settings = cnch->getSettings();
-                if (settings->disk_cache_ttl_hours.value == 0)
-                    continue;
-
-                try
-                {
-                    ServerDataPartsVector parts = cnch->getAllPartsWithDBM(rpc_context).first;
-                    parts = CnchPartsHelper::calcVisibleParts(parts, false);
-
-                    /// Submit only the parts the TTL cache would actually keep.
-                    /// max time 0 == non-time partition, which the cache never keeps.
-                    const time_t ttl_seconds = static_cast<time_t>(settings->disk_cache_ttl_hours.value) * 3600;
-                    const Int64 time_col_pos = cnch->minmax_idx_time_column_pos;
-                    const size_t visible_parts = parts.size();
-                    std::erase_if(parts, [&](const auto & p) {
-                        const time_t pt = p->getMaxTime(time_col_pos);
-                        return pt == 0 || now_sec - pt > ttl_seconds;
-                    });
-                    if (parts.empty())
-                    {
-                        /// Distinguish "no parts at all" from "had parts but none within the TTL
-                        /// window or non-time partition"
-                        if (visible_parts > 0)
-                            LOG_DEBUG(log, "preloadHotCacheTables: table {}: none of {} visible parts are within the TTL window (or non-time partition), skipping", uuid, visible_parts);
-                        continue;
-                    }
-
-                    cnch->sendPreloadTasks(
-                        rpc_context,
-                        std::move(parts),
-                        /*enable_parts_sync_preload=*/false,  // background warm: never block on completion
-                        (settings->enable_preload_parts ? PreloadLevelSettings::AllPreload
-                                                         : settings->parts_preload_level.value),
-                        ts);
-                    ++preloaded;
-                }
-                catch (...)
-                {
-                    /// One bad table shouldn't abort warming the rest.
-                    tryLogCurrentException(log, "preloadHotCacheTables failed for table " + uuid);
-                }
-            }
-
-            LOG_INFO(log, "preloadHotCacheTables: triggered preload for {} TTL-cached tables hosted here", preloaded);
-            response->set_preloaded_tables(preloaded);
-        }
-        catch (...)
-        {
-            tryLogCurrentException(log, __PRETTY_FUNCTION__);
             RPCHelpers::handleException(response->mutable_exception());
         }
     });

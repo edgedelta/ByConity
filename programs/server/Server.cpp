@@ -1442,6 +1442,13 @@ int Server::main(const std::vector<std::string> & /*args*/)
         /// only server need start up server manager
         global_context->setCnchServerManager(config());
 
+        /// Re-warms the worker TTL disk cache after a worker restart. Runs on every server.
+        if (config().getBool("enable_hot_cache_warmup", true))
+        {
+            LOG_INFO(log, "Init hot cache warmer.");
+            global_context->setCnchHotCacheWarmer(config());
+        }
+
         // size_t masking_policy_cache_size = config().getUInt64("mark_cache_size", 128);
         // size_t masking_policy_cache_lifetime = config().getUInt64("mark_cache_size_lifetime", 10000);
         // global_context->setMaskingPolicyCache(masking_policy_cache_size, masking_policy_cache_lifetime);

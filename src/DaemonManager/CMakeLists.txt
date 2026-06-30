@@ -16,7 +16,6 @@ set(CLICKHOUSE_DAEMONMANAGER_SOURCE
         ${CMAKE_CURRENT_SOURCE_DIR}/TargetServerCalculator.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/FixCatalogMetaDataTask.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/DaemonJobAutoStatistics.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/DaemonJobWorkerCachePreload.cpp
         )
 
 add_library(daemon_manager_lib ${CLICKHOUSE_DAEMONMANAGER_SOURCE})
