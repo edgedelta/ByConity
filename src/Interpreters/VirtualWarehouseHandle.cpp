@@ -33,6 +33,26 @@ namespace ErrorCodes
     extern const int RESOURCE_MANAGER_WRONG_VW_SCHEDULE_ALGO;
 }
 
+namespace
+{
+    /// Comma-joined worker addresses across all groups, for logging the currently-served
+    /// worker view. Caller must hold state_mutex.
+    String joinWorkerAddresses(const VirtualWarehouseHandleImpl::Container & groups)
+    {
+        String res;
+        for (const auto & [_, group] : groups)
+        {
+            for (const auto & host : group->getHostWithPortsVec())
+            {
+                if (!res.empty())
+                    res += ",";
+                res += host.getRPCAddress();
+            }
+        }
+        return res;
+    }
+}
+
 VirtualWarehouseHandleImpl::VirtualWarehouseHandleImpl(
     VirtualWarehouseHandleSource source_,
     std::string name_,
@@ -158,11 +178,39 @@ void VirtualWarehouseHandleImpl::tryUpdateWorkerGroups(UpdateMode update_mode)
         success = updateWorkerGroupsFromPSM();
 
     if (!success || worker_groups.empty())
-        LOG_WARNING(log, "Failed to update worker groups for VW:{}", name);
+    {
+        std::lock_guard lock(state_mutex);
+        LOG_WARNING(
+            log,
+            "Failed to update worker groups for VW:{}. Keeping {} stale worker group(s), serving workers=[{}].",
+            name,
+            worker_groups.size(),
+            joinWorkerAddresses(worker_groups));
+    }
 
     last_update_time_ns.store(current_ns);
 }
 
+
+void VirtualWarehouseHandleImpl::forceRefresh(const String & reason)
+{
+    UInt64 current_ns = clock_gettime_ns(CLOCK_MONOTONIC_COARSE);
+    UInt64 the_last_force_ns = last_force_refresh_time_ns.load();
+
+    /// Debounce: at most one forced re-resolve per refresh_debounce_interval_ns per VW.
+    if (current_ns < the_last_force_ns + refresh_debounce_interval_ns)
+        return;
+    if (!last_force_refresh_time_ns.compare_exchange_strong(the_last_force_ns, current_ns))
+        return;
+
+    /// Push last_update_time_ns back by one try-interval so the next tryUpdateWorkerGroups()
+    /// passes the throttle and one thread (single-flight via the CAS there) re-resolves the
+    /// worker groups from RM/PSM, dropping any stale/dead addresses. We deliberately do NOT
+    /// trigger the all-threads ForceUpdate path here: a single refresh is enough, and forcing
+    /// every query thread would stampede RM during a deploy when many dispatches fail at once.
+    last_update_time_ns.store(current_ns - try_update_interval_ns);
+    LOG_WARNING(log, "Forcing worker group re-resolve for VW:{}, reason: {}", name, reason);
+}
 
 bool VirtualWarehouseHandleImpl::addWorkerGroupImpl(const WorkerGroupHandle & worker_group, const std::lock_guard<std::mutex> & /*lock*/)
 {
@@ -217,7 +265,14 @@ bool VirtualWarehouseHandleImpl::updateWorkerGroupsFromRM()
             if (auto it = old_groups.find(group_data.id); it == old_groups.end()) /// new worker group
                 worker_groups.try_emplace(group_data.id, std::make_shared<WorkerGroupHandleImpl>(group_data, getContext()));
             else if (!it->second->isSame(group_data)) /// replace with the new one because of diff
+            {
+                LOG_INFO(
+                    log,
+                    "Worker group {} changed in VW:{} from RM. Rebuilding handle (this drops any stale addresses).",
+                    group_data.id,
+                    name);
                 worker_groups.try_emplace(group_data.id, std::make_shared<WorkerGroupHandleImpl>(group_data, getContext()));
+            }
             else /// reuse the old worker group handle and update metrics.
             {
                 it->second->setMetrics(group_data.metrics);

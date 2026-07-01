@@ -105,6 +105,11 @@ public:
     Container getAll(UpdateMode mode = NoUpdate);
     size_t getNumWorkers(UpdateMode mode = NoUpdate);
 
+    /// Force the worker groups to be re-resolved from RM/PSM on the next access.
+    /// Called when a dispatch hits a dead worker address (brpc E112 etc.) so a stale
+    /// worker view is dropped instead of latched. Debounced to avoid hammering RM.
+    void forceRefresh(const String & reason);
+
     WorkerGroupHandle getWorkerGroup(const String & worker_group_id, UpdateMode mode = TryUpdate);
     WorkerGroupHandle pickWorkerGroup(VWScheduleAlgo query_algo, const Requirement & requirement = {}, UpdateMode mode = TryUpdate);
     WorkerGroupHandle pickLocally(const VWScheduleAlgo & algo, const Requirement & requirement = {});
@@ -157,7 +162,11 @@ private:
     /// To fix this issue, we do a ForceUpdate if the data is not updated for a long time (the timeout of auto-suspend).
     size_t force_update_interval_ns = 5ULL * 60 * 1000 * 1000 * 1000;
     size_t try_update_interval_ns = 500ULL * 1000 * 1000;
+    /// Min gap between two forceRefresh() calls, so a burst of dead-worker errors
+    /// during a deploy does not hammer RM with re-resolves.
+    size_t refresh_debounce_interval_ns = 5ULL * 1000 * 1000 * 1000;
     std::atomic<UInt64> last_update_time_ns{0};
+    std::atomic<UInt64> last_force_refresh_time_ns{0};
     std::atomic<UInt64> last_settings_timestamp{0};
 
     mutable std::mutex state_mutex;

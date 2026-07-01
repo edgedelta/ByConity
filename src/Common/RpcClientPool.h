@@ -80,6 +80,9 @@ public:
         {
             if (iter->second->ok())
                 return iter->second;
+            /// Cached client is unhealthy: drop it so it is recreated below. Without this,
+            /// try_emplace is a no-op for the existing key and keeps returning the dead client.
+            clients_map.erase(iter);
         }
 
         return clients_map.try_emplace(host_ports, creator(host_ports)).first->second;

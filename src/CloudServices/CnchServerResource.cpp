@@ -21,9 +21,11 @@
 #include <CloudServices/CnchPartsHelper.h>
 #include <CloudServices/CnchServerResource.h>
 #include <CloudServices/CnchWorkerResource.h>
+#include <CloudServices/RpcClientBase.h>
 #include <DataTypes/ObjectUtils.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/Context_fwd.h>
+#include <Interpreters/VirtualWarehouseHandle.h>
 #include <Interpreters/WorkerStatusManager.h>
 #include <MergeTreeCommon/assignCnchParts.h>
 #include <Storages/Hive/HiveFile/IHiveFile.h>
@@ -362,10 +364,11 @@ void CnchServerResource::sendResources(const ContextPtr & context, std::optional
     for (auto & call_id : call_ids)
         brpc::Join(call_id);
 
+    const auto & rpc_infos = handler->getFailedRpcInfo();
+
     auto worker_group_status = context->getWorkerGroupStatusPtr();
     if (worker_group_status)
     {
-        auto rpc_infos = handler->getFailedRpcInfo();
         for (const auto & [worker_id, error_code] : rpc_infos)
             context->getWorkerStatusManager()->setWorkerNodeDead(worker_id, error_code);
 
@@ -375,6 +378,19 @@ void CnchServerResource::sendResources(const ContextPtr & context, std::optional
                 context->getWorkerStatusManager()->CloseCircuitBreaker(worker_id);
         }
         worker_group_status->clearHalfOpenWorkers();
+    }
+
+    /// If a resource dispatch failed because a worker address is dead (pod gone / replaced,
+    /// e.g. brpc E112 after a deploy), force the VW handle to re-resolve worker groups so the
+    /// stale address is dropped instead of latched for up to force_update_interval.
+    /// forceRefresh is debounced, so triggering it per dead worker is harmless.
+    for (const auto & [worker_id, error_code] : rpc_infos)
+    {
+        if (isBrpcConnectionDeadError(error_code))
+        {
+            if (auto vw = context->tryGetCurrentVW())
+                vw->forceRefresh("worker " + worker_id.ToString() + " dispatch failed with errno " + std::to_string(error_code));
+        }
     }
 
     handler->throwIfException();
