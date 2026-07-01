@@ -1529,6 +1529,18 @@ void StorageCnchMergeTree::sendPreloadTasks(ContextPtr local_context, ServerData
     });
 }
 
+void StorageCnchMergeTree::filterPartsWithinDiskCacheTTL(ServerDataPartsVector & parts, time_t now_sec) const
+{
+    /// Keep only the parts the TTL disk cache would actually retain.
+    /// max time 0 == non-time partition, which the cache never keeps.
+    const time_t ttl_seconds = static_cast<time_t>(getSettings()->disk_cache_ttl_hours.value) * 3600;
+    const Int64 time_col_pos = minmax_idx_time_column_pos;
+    std::erase_if(parts, [&](const auto & p) {
+        const time_t pt = p->getMaxTime(time_col_pos);
+        return pt == 0 || now_sec - pt > ttl_seconds;
+    });
+}
+
 void StorageCnchMergeTree::sendDropDiskCacheTasks(ContextPtr local_context, const ServerDataPartsVector & parts, bool sync, bool drop_vw_disk_cache)
 {
     TxnTimestamp txn_id(local_context->getTimestamp());

@@ -222,6 +222,7 @@ UInt32 CnchHotCacheWarmer::warmHostedTables(const std::unordered_set<String> & t
     });
 
     const UInt64 ts = static_cast<UInt64>(now);
+    const time_t now_sec = static_cast<time_t>(now);
     const String rpc_port = std::to_string(getContext()->getRPCPort());
     auto topology = getContext()->getCnchTopologyMaster();
 
@@ -248,12 +249,12 @@ UInt32 CnchHotCacheWarmer::warmHostedTables(const std::unordered_set<String> & t
         {
             ServerDataPartsVector parts = cnch->getAllPartsWithDBM(task_context).first;
             parts = CnchPartsHelper::calcVisibleParts(parts, false);
+            /// Pre-filter to the TTL window server-side: shipping a table's whole history and letting
+            /// each worker reject out-of-window parts one at a time is too slow. The worker's
+            /// shouldCache remains the backstop; both key off disk_cache_ttl_hours.
+            cnch->filterPartsWithinDiskCacheTTL(parts, now_sec);
             if (parts.empty())
                 continue;
-
-            /// No server-side TTL-window filter: the worker's DiskCacheTTL::set (shouldCache) rejects
-            /// non-time and out-of-TTL parts itself, so the worker authoritatively owns that policy.
-            /// We just send the visible parts for the restarted workers.
 
             cnch->sendPreloadTasks(
                 task_context,
@@ -292,18 +293,29 @@ WarmDecision decideWarm(
         if (!w.running)
             continue;
 
-        /// Guard against clock skew and skip workers still inside the warmup grace.
-        if (now < w.register_time || now - w.register_time < warmup_grace_seconds)
+        /// Clock-skew guard: never trust a register_time in the future.
+        if (now < w.register_time)
+            continue;
+
+        /// Seed tick: establish the baseline for EVERY running worker and warm none, regardless of grace.
+        if (!warm_new_workers)
+        {
+            decision.updated_baseline[w.id] = w.register_time;
+            continue;
+        }
+
+        /// Steady state: skip until the worker clears the grace window, so we don't warm a
+        /// half-initialized worker. We record the baseline only when we actually warm, so a restart
+        /// detected mid-grace keeps being seen (register_time > baseline) until grace clears.
+        if (now - w.register_time < warmup_grace_seconds)
             continue;
 
         auto it = decision.updated_baseline.find(w.id);
         if (it == decision.updated_baseline.end())
         {
-            /// First time this server sees this worker_id: record it. Warm it only when not seeding;
-            /// on the initial seed tick we must not warm every worker at once.
+            /// First time this server sees this worker_id: warm it.
             decision.updated_baseline.emplace(w.id, w.register_time);
-            if (warm_new_workers)
-                decision.restarted_workers.push_back(w.id);
+            decision.restarted_workers.push_back(w.id);
             continue;
         }
 

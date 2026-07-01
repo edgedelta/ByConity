@@ -16,6 +16,7 @@
 #include <Catalog/DataModelPartWrapper.h>
 #include <Interpreters/CnchSystemLog.h>
 #include <Protos/DataModelHelpers.h>
+#include <Storages/MergeTree/IMergeTreeDataPart.h>
 #include "Storages/MergeTree/DeleteBitmapCache.h"
 
 namespace DB
@@ -159,6 +160,18 @@ const MergeTreePartInfo & ServerDataPart::info() const { return *part_model_wrap
 const String & ServerDataPart::name() const { return part_model_wrapper->name; }
 const MergeTreePartition & ServerDataPart::partition() const { return *(part_model_wrapper->partition); }
 const std::shared_ptr<IMergeTreeDataPart::MinMaxIndex> & ServerDataPart::minmax_idx() const { return part_model_wrapper->minmax_idx; }
+
+time_t ServerDataPart::getMaxTime(Int64 time_col_pos) const
+{
+    /// Shares MinMaxIndex::tryGetTimeRange with IMergeTreeDataPart::getMinMaxTime — the exact decode
+    /// the worker's TTL cache uses (PartFileDiskCacheSegment passes getMinMaxTime().second) — so the
+    /// server-side pre-filter and the worker's shouldCache can't disagree on a part's time.
+    const auto & mm = minmax_idx();
+    if (!mm)
+        return 0;
+    auto range = mm->tryGetTimeRange(time_col_pos);
+    return range ? range->second : 0;
+}
 
 UUID ServerDataPart::get_uuid() const
 {

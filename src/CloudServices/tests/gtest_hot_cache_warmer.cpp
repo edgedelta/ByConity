@@ -54,6 +54,16 @@ TEST(HotCacheWarmer, seed_tick_records_without_warming)
     EXPECT_EQ(d.updated_baseline.at("w0"), 100u);
 }
 
+/// Deterministic seed: a worker still INSIDE the grace window is also recorded on the seed tick.
+/// Both readers restarting during a deploy therefore get the same treatment.
+TEST(HotCacheWarmer, seed_records_in_grace_worker)
+{
+    std::vector<WorkerRegistration> workers{{"w0", 990, true}}; // age 10s < grace 30s
+    auto d = decideWarm(workers, /*baseline=*/{}, /*now=*/1000, /*grace=*/30, /*warm_new=*/false);
+    EXPECT_TRUE(d.restarted_workers.empty());
+    EXPECT_EQ(d.updated_baseline.at("w0"), 990u);
+}
+
 /// A known worker that comes back with a newer register_time restarted => warm it, advance baseline.
 TEST(HotCacheWarmer, increased_register_time_triggers_warm)
 {

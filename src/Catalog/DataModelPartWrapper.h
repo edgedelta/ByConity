@@ -123,6 +123,7 @@ public:
     bool deleted() const;
     const Protos::DataModelPart & part_model() const;
     const std::shared_ptr<IMergeTreeDataPart::MinMaxIndex> & minmax_idx() const;
+    time_t getMaxTime(Int64 time_col_pos) const;
     UInt64 txnID() const;
     bool hasStagingTxnID() const;
 

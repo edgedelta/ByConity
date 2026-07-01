@@ -204,6 +204,11 @@ public:
 
     /// When target_workers is non-empty, only parts owned by those workers are warmed.
     void sendPreloadTasks(ContextPtr local_context, ServerDataPartsVector parts, bool enable_parts_sync_preload = true, UInt64 parts_preload_level = 0, UInt64 ts = {}, const std::unordered_set<String> & target_workers = {});
+
+    /// Drops the parts the TTL disk cache would not keep. A server-side pre-filter so a warm doesn't ship a table's whole
+    /// history for the worker to reject one part at a time. The worker's DiskCacheTTL::shouldCache is
+    /// the authoritative backstop; both key off disk_cache_ttl_hours, so keep the two rules in sync.
+    void filterPartsWithinDiskCacheTTL(ServerDataPartsVector & parts, time_t now_sec) const;
     void sendDropDiskCacheTasks(ContextPtr local_context, const ServerDataPartsVector & parts, bool sync = false, bool drop_vw_disk_cache = false);
 
     PrunedPartitions getPrunedPartitions(const SelectQueryInfo & query_info, const Names & column_names_to_return, ContextPtr local_context, const bool & ignore_ttl) const ;
