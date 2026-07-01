@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include <optional>
+#include <utility>
 #include <DataStreams/IBlockInputStream.h>
 
 #include <Core/Block.h>
@@ -394,6 +396,12 @@ public:
 
         void update(const Block & block, const Names & column_names);
         void merge(const MinMaxIndex & other);
+
+        /// Decode the time column's [min, max] as epoch seconds from the minmax hyperrectangle.
+        /// nullopt when the index is uninitialized, time_col_pos is out of range, or the field type
+        /// is neither DateTime (UInt64) nor DateTime64 (Decimal64). Single source of the decode so
+        /// server-side (ServerDataPart::getMaxTime) and worker-side (getMinMaxTime) can't drift.
+        std::optional<std::pair<time_t, time_t>> tryGetTimeRange(Int64 time_col_pos) const;
     };
 
     MinMaxIndex minmax_idx;

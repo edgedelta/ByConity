@@ -22,7 +22,6 @@ void registerServerBGThreads(DaemonFactory & factory);
 void registerGlobalGCDaemon(DaemonFactory & factory);
 void registerAutoStatisticsDaemon(DaemonFactory & factory);
 void registerTxnGCDaemon(DaemonFactory & factory);
-void registerWorkerCachePreloadDaemon(DaemonFactory & factory);
 
 void registerDaemonJobs()
 {
@@ -32,7 +31,6 @@ void registerDaemonJobs()
     registerGlobalGCDaemon(factory);
     registerAutoStatisticsDaemon(factory);
     registerTxnGCDaemon(factory);
-    registerWorkerCachePreloadDaemon(factory);
 }
 
 }

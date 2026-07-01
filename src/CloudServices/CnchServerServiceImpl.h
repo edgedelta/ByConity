@@ -25,8 +25,6 @@
 #include <common/logger_useful.h>
 #include <Common/Brpc/BrpcServiceDefines.h>
 
-#include <atomic>
-
 namespace DB
 {
 
@@ -232,12 +230,6 @@ public:
         Protos::ScheduleGlobalGCResp * response,
         google::protobuf::Closure * done) override;
 
-    void preloadHotCacheTables(
-        google::protobuf::RpcController * cntl,
-        const Protos::PreloadHotCacheTablesReq * request,
-        Protos::PreloadHotCacheTablesResp * response,
-        google::protobuf::Closure * done) override;
-
     void getNumOfTablesCanSendForGlobalGC(
         google::protobuf::RpcController * cntl,
         const Protos::GetNumOfTablesCanSendForGlobalGCReq * request,
@@ -403,8 +395,6 @@ private:
     const UInt64 server_start_time;
     std::optional<GlobalGCManager> global_gc_manager;
     Poco::Logger * log;
-    /// Ensures only one hot-cache preload sweep runs at a time on this server
-    std::atomic<bool> hot_cache_preload_running{false};
 };
 
 REGISTER_SERVICE_IMPL(CnchServerServiceImpl);

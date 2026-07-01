@@ -485,35 +485,39 @@ std::pair<DayNum, DayNum> IMergeTreeDataPart::getMinMaxDate() const
         return {};
 }
 
+std::optional<std::pair<time_t, time_t>> IMergeTreeDataPart::MinMaxIndex::tryGetTimeRange(Int64 time_col_pos) const
+{
+    if (time_col_pos < 0 || !initialized || static_cast<size_t>(time_col_pos) >= hyperrectangle.size())
+        return {};
+
+    const auto & hr = hyperrectangle[time_col_pos];
+
+    /// The case of DateTime
+    if (hr.left.getType() == Field::Types::UInt64 && hr.right.getType() == Field::Types::UInt64)
+        return std::make_pair(static_cast<time_t>(hr.left.get<UInt64>()), static_cast<time_t>(hr.right.get<UInt64>()));
+
+    /// The case of DateTime64
+    if (hr.left.getType() == Field::Types::Decimal64 && hr.right.getType() == Field::Types::Decimal64)
+    {
+        auto left = hr.left.get<DecimalField<Decimal64>>();
+        auto right = hr.right.get<DecimalField<Decimal64>>();
+        return std::make_pair(
+            static_cast<time_t>(left.getValue() / left.getScaleMultiplier()),
+            static_cast<time_t>(right.getValue() / right.getScaleMultiplier()));
+    }
+
+    return {};
+}
+
 std::pair<time_t, time_t> IMergeTreeDataPart::getMinMaxTime() const
 {
     if (storage.minmax_idx_time_column_pos != -1 && minmax_idx.initialized)
     {
-        const auto & hyperrectangle = minmax_idx.hyperrectangle[storage.minmax_idx_time_column_pos];
-
-        /// The case of DateTime
-        if (hyperrectangle.left.getType() == Field::Types::UInt64)
-        {
-            assert(hyperrectangle.right.getType() == Field::Types::UInt64);
-            return {hyperrectangle.left.get<UInt64>(), hyperrectangle.right.get<UInt64>()};
-        }
-        /// The case of DateTime64
-        else if (hyperrectangle.left.getType() == Field::Types::Decimal64)
-        {
-            assert(hyperrectangle.right.getType() == Field::Types::Decimal64);
-
-            auto left = hyperrectangle.left.get<DecimalField<Decimal64>>();
-            auto right = hyperrectangle.right.get<DecimalField<Decimal64>>();
-
-            assert(left.getScale() == right.getScale());
-
-            return { left.getValue() / left.getScaleMultiplier(), right.getValue() / right.getScaleMultiplier() };
-        }
-        else
-            throw Exception(ErrorCodes::LOGICAL_ERROR, "Part minmax index by time is neither DateTime or DateTime64");
+        if (auto range = minmax_idx.tryGetTimeRange(storage.minmax_idx_time_column_pos))
+            return *range;
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Part minmax index by time is neither DateTime or DateTime64");
     }
-    else
-        return {};
+    return {};
 }
 
 

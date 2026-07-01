@@ -329,20 +329,6 @@ message ScheduleGlobalGCResp {
   optional bool ret = 1;
   optional string exception = 2;
 }
-
-// Parameterless broadcast: the receiving server re-warms the TTL disk cache for
-// every table it hosts. Sent by DaemonManager when a worker restart is detected.
-message PreloadHotCacheTablesReq {
-  optional uint64 ts = 1;
-  // Restrict the warm to this database; empty = every database the server hosts.
-  optional string database = 2;
-}
-
-message PreloadHotCacheTablesResp {
-  optional uint32 preloaded_tables = 1;
-  optional string exception = 2;
-}
-
 message RedirectUdiCounterReq {
   repeated UUID tables = 1;
   repeated uint64 udi_counts = 2;
@@ -629,8 +615,6 @@ service CnchServerService {
   rpc getServerStartTime(GetServerStartTimeReq) returns(GetServerStartTimeResp);
 
   rpc scheduleGlobalGC(ScheduleGlobalGCReq) returns(ScheduleGlobalGCResp);
-
-  rpc preloadHotCacheTables(PreloadHotCacheTablesReq) returns(PreloadHotCacheTablesResp);
 
   // for auto statistics
   rpc queryUdiCounter(QueryUdiCounterReq) returns(QueryUdiCounterResp);
