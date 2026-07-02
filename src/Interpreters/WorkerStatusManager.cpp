@@ -2,9 +2,13 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <CloudServices/RpcClientBase.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/VirtualWarehouseHandle.h>
+#include <Interpreters/VirtualWarehousePool.h>
 #include <Interpreters/WorkerStatusManager.h>
 #include <ResourceManagement/ResourceManagerClient.h>
+#include <Common/Exception.h>
 #include <Poco/Util/AbstractConfiguration.h>
 namespace CurrentMetrics
 {
@@ -233,6 +237,24 @@ void WorkerStatusManager::setWorkerNodeDead(const WorkerId & key, int error_code
             new_val.worker_status = std::make_shared<WorkerStatus>();
             new_val.worker_status->scheduler_status = WorkerSchedulerStatus::NotConnected;
         });
+
+    /// If the worker address is dead (host down / connection refused/reset/unreachable), ask its
+    /// VW handle to re-resolve worker groups so the stale address is dropped and replaced with the
+    /// current one from RM/PSM. This is the single choke point every dead-worker dispatch path
+    /// reports through (resource send + plan-segment/exchange), so re-resolve is triggered no matter
+    /// which path hit the dead worker. forceRefresh is debounced, so calling it per failed RPC is cheap.
+    if (isBrpcConnectionDeadError(error_code))
+    {
+        try
+        {
+            if (auto vw = getContext()->getVirtualWarehousePool().tryGet(key.vw_name))
+                vw->forceRefresh("worker " + key.ToString() + " dead (errno " + std::to_string(error_code) + ")");
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log, "Failed to trigger worker group re-resolve for dead worker " + key.ToString());
+        }
+    }
 }
 
 UnhealthWorkerStatusMap WorkerStatusManager::getWorkersCannotUpdateFromRM()
