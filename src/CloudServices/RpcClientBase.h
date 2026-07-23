@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include <cerrno>
+
 #include <Core/Types.h>
 #include <Common/HostWithPorts.h>
 
@@ -31,6 +33,14 @@ class Controller;
 
 namespace DB
 {
+/// True if a brpc RPC error code means the peer address is dead/unreachable (host down or
+/// connection refused/reset/unreachable) — i.e. the address should be re-resolved rather than
+/// retried against the same endpoint. Mirrors the codes classified in RpcClientBase::assertController.
+inline bool isBrpcConnectionDeadError(int error_code)
+{
+    return error_code == EHOSTDOWN || error_code == ECONNREFUSED || error_code == ECONNRESET || error_code == ENETUNREACH;
+}
+
 class RpcClientBase : private boost::noncopyable
 {
 public:

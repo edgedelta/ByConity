@@ -38,6 +38,9 @@ public:
 
     VirtualWarehouseHandle get(const String & vw_name);
 
+    /// Non-creating lookup: returns the existing handle or nullptr. Safe to call from RPC
+    /// callback threads where creating a handle must be avoided.
+    using ConcurrentMapForCreating::tryGet;
     using ConcurrentMapForCreating::erase;
     using ConcurrentMapForCreating::size;
     using ConcurrentMapForCreating::getAll;

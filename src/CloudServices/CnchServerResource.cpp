@@ -365,7 +365,7 @@ void CnchServerResource::sendResources(const ContextPtr & context, std::optional
     auto worker_group_status = context->getWorkerGroupStatusPtr();
     if (worker_group_status)
     {
-        auto rpc_infos = handler->getFailedRpcInfo();
+        const auto & rpc_infos = handler->getFailedRpcInfo();
         for (const auto & [worker_id, error_code] : rpc_infos)
             context->getWorkerStatusManager()->setWorkerNodeDead(worker_id, error_code);
 

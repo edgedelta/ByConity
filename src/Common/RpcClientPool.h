@@ -78,8 +78,14 @@ public:
         std::unique_lock lock(state_mutex);
         if (auto iter = clients_map.find(host_ports); iter != clients_map.end())
         {
-            if (iter->second->ok())
+            /// Return broken clients younger than 1s as-is to cap rebuild churn at one
+            /// client per second per endpoint during brownouts; between rebuilds callers
+            /// keep brpc's instant-fail behavior.
+            if (iter->second->ok() || iter->second->getActiveTime() < 1)
                 return iter->second;
+            /// Cached client is unhealthy: drop it so it is recreated below. Without this,
+            /// try_emplace is a no-op for the existing key and keeps returning the dead client.
+            clients_map.erase(iter);
         }
 
         return clients_map.try_emplace(host_ports, creator(host_ports)).first->second;
