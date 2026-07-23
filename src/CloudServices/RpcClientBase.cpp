@@ -84,8 +84,12 @@ void RpcClientBase::assertController(const brpc::Controller & cntl)
         }
         else if (err == EHOSTDOWN)
         {
-            /// TODO: handle more error codes, temporarily remove EHOSTDOWN error https://github.com/apache/incubator-brpc/issues/936
-
+            /// brpc returns EHOSTDOWN when the channel's resolved endpoint is gone for good,
+            /// e.g. a worker pod rescheduled to a new IP. Mark the client broken so RpcClientPool
+            /// evicts it and a new channel (with fresh address resolution) is built.
+            /// brpc#936 concerns spurious EHOSTDOWN from health checks; recreating the client
+            /// on a false positive is cheap compared to dispatching to a dead endpoint forever.
+            ok_.store(false, std::memory_order_relaxed);
             throw Exception(err_prefix + std::to_string(err) + ":" + cntl.ErrorText(), ErrorCodes::BRPC_HOST_DOWN);
         }
         else if (err == brpc::Errno::ERPCTIMEDOUT)
