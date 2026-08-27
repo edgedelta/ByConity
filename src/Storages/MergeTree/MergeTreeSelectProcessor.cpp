@@ -80,8 +80,9 @@ try
     {
         all_mark_ranges = mark_ranges_filter_callback(data_part, all_mark_ranges);
     }
-    /// Produce no more than one task
-    if (!is_first_task || total_marks_count == 0)
+    /// Produce no more than one task. `total_marks_count` was computed from the unfiltered ranges, so also
+    /// bail out when the deferred skip-index filter above dropped every granule of this part
+    if (!is_first_task || total_marks_count == 0 || all_mark_ranges.empty())
     {
         finish();
         return false;

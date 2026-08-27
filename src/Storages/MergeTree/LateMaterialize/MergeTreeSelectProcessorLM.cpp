@@ -57,17 +57,19 @@ bool MergeTreeSelectProcessorLM::getNewTaskImpl()
 {
     try
     {
+        /// Apply the deferred skip-index filter first: it may drop every granule of this part, in which case
+        /// we must not build a task over empty mark ranges
+        if (mark_ranges_filter_callback && !all_mark_ranges.empty())
+        {
+            all_mark_ranges = mark_ranges_filter_callback(data_part, all_mark_ranges);
+        }
+
         if (all_mark_ranges.empty())
         {
             readers.clear();
             range_readers.clear();
             data_part.reset();
             return false;
-        }
-
-        if (mark_ranges_filter_callback)
-        {
-            all_mark_ranges = mark_ranges_filter_callback(data_part, all_mark_ranges);
         }
 
         auto size_predictor = (stream_settings.preferred_block_size_bytes == 0)
