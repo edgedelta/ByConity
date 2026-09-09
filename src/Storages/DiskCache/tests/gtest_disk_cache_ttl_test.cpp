@@ -1765,4 +1765,47 @@ TEST_F(DiskCacheTTLTest, SizeEvictionPreservesUntrackedFilesInPartitionDir)
     EXPECT_TRUE(disk->exists(stray)) << "untracked file in partition dir must survive exact-file eviction";
 }
 
+// Regression: load() must not delete cached files. It used to removeRecursive() the shared cache
+// root (part_disk_cache), wiping every other table's files on the worker while their in-memory
+// indexes still claimed them present — a flood of `open ... No such file or directory` on the read
+// path. The cache disk is instance NVMe wiped on pod restart, so there is nothing to clean up.
+TEST_F(DiskCacheTTLTest, LoadDeletesNothing)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+    UInt64 ttl_minutes = 60;
+
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
+    String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    String seg = fmt::format("uuid/{}/column.bin/offset_1", part);
+
+    // Two tables warm on the same volume, i.e. sharing one cache root.
+    DiskCacheTTL keeper("keeper", "8f14e45f-ceea-467a-9575-1f1b65dd4d1e", volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL other("other", "c9f0f895-fb98-4b6a-b90a-6d5ff4b2c1d5", volume, nullptr, settings, strategy, ttl_minutes, 0);
+    for (auto * cache : {&keeper, &other})
+    {
+        String payload = "payload";
+        ReadBufferFromString buf(payload);
+        cache->set(seg, buf, payload.size(), false, now);
+    }
+
+    auto [keeper_disk, keeper_path] = keeper.get(seg);
+    auto [other_disk, other_path] = other.get(seg);
+    ASSERT_TRUE(keeper_disk != nullptr);
+    ASSERT_TRUE(other_disk != nullptr);
+    ASSERT_TRUE(keeper_disk->exists(keeper_path));
+    ASSERT_TRUE(other_disk->exists(other_path));
+
+    other.load();
+
+    EXPECT_TRUE(keeper_disk->exists(keeper_path)) << "load() deleted another table's cached file: " << keeper_path;
+    EXPECT_TRUE(other_disk->exists(other_path)) << "load() deleted its own live cached file: " << other_path;
+    EXPECT_FALSE(keeper.get(seg).second.empty()) << "keeper's index entry no longer resolves after another table's load()";
+    EXPECT_FALSE(other.get(seg).second.empty()) << "other's index entry no longer resolves after its own load()";
+}
+
 } // namespace DB
