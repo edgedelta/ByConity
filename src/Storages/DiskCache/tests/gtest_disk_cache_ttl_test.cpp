@@ -1808,4 +1808,91 @@ TEST_F(DiskCacheTTLTest, LoadDeletesNothing)
     EXPECT_FALSE(other.get(seg).second.empty()) << "other's index entry no longer resolves after its own load()";
 }
 
+// A cached file can disappear underneath the index (cache dir wiped by ops, kubelet pressure,
+// eviction race). invalidate() drops the entry so the next read is an ordinary miss instead of the
+// reader re-throwing on every read of that segment.
+TEST_F(DiskCacheTTLTest, InvalidateDropsUnreadableEntry)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
+    String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    String seg = fmt::format("uuid/{}/column.bin/offset_1", part);
+    String other_seg = fmt::format("uuid/{}/column.bin/offset_2", part);
+
+    DiskCacheTTL cache("test-cache", "8f14e45f-ceea-467a-9575-1f1b65dd4d1e", volume, nullptr, settings, strategy, 60, 0);
+
+    String payload = "payload";
+    for (const auto & name : {seg, other_seg})
+    {
+        ReadBufferFromString buf(payload);
+        cache.set(name, buf, payload.size(), false, now);
+    }
+    ASSERT_EQ(cache.getKeyCount(), 2u);
+    size_t size_before = cache.getCachedSize();
+    ASSERT_GT(size_before, 0u);
+
+    auto [disk, path] = cache.get(seg);
+    ASSERT_TRUE(disk != nullptr);
+    ASSERT_TRUE(disk->exists(path));
+
+    // Delete the file behind the cache's back, as an external wipe would.
+    disk->removeFileIfExists(path);
+
+    cache.invalidate(seg);
+
+    EXPECT_TRUE(cache.get(seg).second.empty()) << "invalidated entry still resolves";
+    EXPECT_EQ(cache.getKeyCount(), 1u) << "invalidate must drop exactly one entry";
+    EXPECT_LT(cache.getCachedSize(), size_before) << "invalidate must release the entry's bytes";
+
+    // The untouched segment is unaffected.
+    auto [other_disk, other_path] = cache.get(other_seg);
+    EXPECT_FALSE(other_path.empty());
+    ASSERT_TRUE(other_disk != nullptr);
+    EXPECT_TRUE(other_disk->exists(other_path));
+
+    // Idempotent, and an unknown key is a no-op: no counter underflow.
+    cache.invalidate(seg);
+    cache.invalidate("uuid/20260101_1_1_0/column.bin/offset_9");
+    EXPECT_EQ(cache.getKeyCount(), 1u);
+    EXPECT_GT(cache.getCachedSize(), 0u);
+}
+
+// invalidate() also removes the file when the open failed for a reason that left it in place
+// (permissions, IO error), so the bytes don't stay on disk untracked.
+TEST_F(DiskCacheTTLTest, InvalidateRemovesFileThatIsStillPresent)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
+    String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    String seg = fmt::format("uuid/{}/column.bin/offset_1", part);
+
+    DiskCacheTTL cache("test-cache", "c9f0f895-fb98-4b6a-b90a-6d5ff4b2c1d5", volume, nullptr, settings, strategy, 60, 0);
+
+    String payload = "payload";
+    ReadBufferFromString buf(payload);
+    cache.set(seg, buf, payload.size(), false, now);
+
+    auto [disk, path] = cache.get(seg);
+    ASSERT_TRUE(disk != nullptr);
+    ASSERT_TRUE(disk->exists(path));
+
+    cache.invalidate(seg);
+
+    EXPECT_FALSE(disk->exists(path)) << "invalidate left the file on disk with nothing tracking it";
+    EXPECT_EQ(cache.getKeyCount(), 0u);
+    EXPECT_EQ(cache.getCachedSize(), 0u);
+}
+
 } // namespace DB

@@ -388,9 +388,12 @@ DiskCacheTTL::CacheEraseResult DiskCacheTTL::cacheEraseLocked(Shard & shard, Key
         return result;
 
     size_t bytes = it->second->size;
+    if (it->second->disk && !it->second->rel_path.empty())
+        result.files.emplace_back(it->second->disk, it->second->rel_path);
     shard.cache_map.erase(it);
 
     UInt64 hash_high = key.items[0];
+    result.hash_high = hash_high;
     auto pit = shard.part_index.find(hash_high);
     if (pit != shard.part_index.end())
     {
@@ -664,6 +667,55 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
     }
 
     return {disk, rel_path};
+}
+
+void DiskCacheTTL::invalidate(const String & seg_name)
+{
+    auto key = hash(seg_name);
+    auto & shard = getShard(key.items[0]);
+
+    CacheEraseResult erase_result;
+    {
+        std::unique_lock<std::shared_mutex> lock(shard.mutex);
+        auto it = shard.cache_map.find(key);
+        if (it == shard.cache_map.end())
+            return;
+        // A State::Caching entry is a placeholder for a write still in flight.
+        if (it->second->state != DiskCacheTTLMeta::State::Cached)
+            return;
+        erase_result = cacheEraseLocked(shard, key);
+    }
+
+    if (erase_result.count == 0)
+        return;
+
+    atomicSubClamped(total_entries, erase_result.count);
+    atomicSubClamped(total_size, erase_result.bytes);
+    DiskCacheFactory::instance().releaseGlobalTTL(erase_result.bytes);
+
+    // The caller reached us because the cached file was unusable, but it may still be on disk (a
+    // corrupt or truncated file). Remove it, otherwise the bytes stay there with nothing tracking
+    // them: TTL and size eviction are both driven off the index we just erased from.
+    for (const auto & [disk, path] : erase_result.files)
+    {
+        try
+        {
+            disk->removeFileIfExists(path);
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log, fmt::format("invalidate: failed to remove {}", path));
+        }
+    }
+
+    // Stop advertising this one segment to peers looking to steal it. Deliberately not evictPart():
+    // that cleans the whole part's reverse entries, which would un-advertise the part's other
+    // segments that are still cached and still valid.
+    if (fdb_index && !erase_result.partition_id.empty())
+        fdb_index->evictSegment(key, erase_result.partition_id);
+
+    LOG_WARNING(log, "Invalidated unusable cache entry {} ({} bytes); the next read will be a miss",
+        seg_name, erase_result.bytes);
 }
 
 size_t DiskCacheTTL::writeSegment(ReadBuffer& buffer, ReservationPtr& reservation, const String& cache_rel_path)
