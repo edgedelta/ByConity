@@ -193,8 +193,9 @@ DiskCacheTTL::DiskCacheTTL(
             "must be positive or -1", settings.cache_load_dispatcher_drill_down_level),
             ErrorCodes::BAD_ARGUMENTS);
     }
-    // load() is called by the factory after this object wins the registry race,
-    // so only one disk scan runs per table UUID.
+    // No startup cleanup, here or in load(): the cache disk is instance NVMe, wiped when the pod
+    // restarts, so nothing survives to clean. A cleanup would race the reads and writes this object
+    // starts serving the moment the factory publishes it.
 }
 
 DiskCacheTTL::~DiskCacheTTL()
@@ -387,9 +388,12 @@ DiskCacheTTL::CacheEraseResult DiskCacheTTL::cacheEraseLocked(Shard & shard, Key
         return result;
 
     size_t bytes = it->second->size;
+    if (it->second->disk && !it->second->rel_path.empty())
+        result.files.emplace_back(it->second->disk, it->second->rel_path);
     shard.cache_map.erase(it);
 
     UInt64 hash_high = key.items[0];
+    result.hash_high = hash_high;
     auto pit = shard.part_index.find(hash_high);
     if (pit != shard.part_index.end())
     {
@@ -665,6 +669,55 @@ std::pair<DiskPtr, String> DiskCacheTTL::get(const String & seg_name)
     return {disk, rel_path};
 }
 
+void DiskCacheTTL::invalidate(const String & seg_name)
+{
+    auto key = hash(seg_name);
+    auto & shard = getShard(key.items[0]);
+
+    CacheEraseResult erase_result;
+    {
+        std::unique_lock<std::shared_mutex> lock(shard.mutex);
+        auto it = shard.cache_map.find(key);
+        if (it == shard.cache_map.end())
+            return;
+        // A State::Caching entry is a placeholder for a write still in flight.
+        if (it->second->state != DiskCacheTTLMeta::State::Cached)
+            return;
+        erase_result = cacheEraseLocked(shard, key);
+    }
+
+    if (erase_result.count == 0)
+        return;
+
+    atomicSubClamped(total_entries, erase_result.count);
+    atomicSubClamped(total_size, erase_result.bytes);
+    DiskCacheFactory::instance().releaseGlobalTTL(erase_result.bytes);
+
+    // The caller reached us because the cached file was unusable, but it may still be on disk (a
+    // corrupt or truncated file). Remove it, otherwise the bytes stay there with nothing tracking
+    // them: TTL and size eviction are both driven off the index we just erased from.
+    for (const auto & [disk, path] : erase_result.files)
+    {
+        try
+        {
+            disk->removeFileIfExists(path);
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log, fmt::format("invalidate: failed to remove {}", path));
+        }
+    }
+
+    // Stop advertising this one segment to peers looking to steal it. Deliberately not evictPart():
+    // that cleans the whole part's reverse entries, which would un-advertise the part's other
+    // segments that are still cached and still valid.
+    if (fdb_index && !erase_result.partition_id.empty())
+        fdb_index->evictSegment(key, erase_result.partition_id);
+
+    LOG_WARNING(log, "Invalidated unusable cache entry {} ({} bytes); the next read will be a miss",
+        seg_name, erase_result.bytes);
+}
+
 size_t DiskCacheTTL::writeSegment(ReadBuffer& buffer, ReservationPtr& reservation, const String& cache_rel_path)
 {
     DiskPtr disk = reservation->getDisk();
@@ -861,26 +914,15 @@ void DiskCacheTTL::updateSettings(UInt64 new_ttl_minutes, size_t new_max_size_by
 
 void DiskCacheTTL::load()
 {
-    // Instance-disk deployment: the local NVMe cache directory does not survive a restart, so
-    // there is nothing to restore — no FDB reconcile, no disk scan. We always start cold.
-    // Defensively wipe any directory that did survive (non-instance disk), because an in-memory
-    // index that starts empty would never learn about those files, i.e. leaked disk forever.
-    for (const auto & disk : volume->getDisks())
-    {
-        try
-        {
-            if (disk->exists(latest_disk_cache_dir))
-                disk->removeRecursive(latest_disk_cache_dir);
-            for (const auto & prev : previous_disk_cache_dirs)
-                if (disk->exists(prev))
-                    disk->removeRecursive(prev);
-        }
-        catch (...)
-        {
-            tryLogCurrentException(log, fmt::format("TTL cache for {}: failed to clear stale cache dir on load", table_uuid));
-        }
-    }
-    LOG_INFO(log, "TTL disk cache for {} started cold (instance disk: nothing to restore)", table_uuid);
+    // Deliberately empty. The cache lives on instance NVMe that is wiped when the pod restarts, so
+    // this object always starts cold and there is nothing on disk to reconcile or clean up.
+    //
+    // This used to removeRecursive() latest_disk_cache_dir — the cache root shared by every table on
+    // the worker — from a pool task scheduled *after* the factory published this object. It deleted
+    // other tables' live files while their in-memory indexes still reported them cached, and raced
+    // this object's own writes: 92k `open ... No such file or directory` on the read path and
+    // `rename ... .temp` ENOENT on the write path in one staging worker restart.
+    LOG_INFO(log, "TTL disk cache for {} started cold", table_uuid);
 }
 
 size_t DiskCacheTTL::drop(const String & part_base_path)

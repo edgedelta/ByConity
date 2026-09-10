@@ -83,6 +83,19 @@ void TTLCacheFDBIndex::evictPart(const String & partition_id, UInt64 hash_high)
     cv.notify_one();
 }
 
+void TTLCacheFDBIndex::evictSegment(UInt128 key, const String & partition_id)
+{
+    PendingOp rev;
+    rev.type = PendingOp::Type::Evict;
+    rev.key  = makeRevKey(key, partition_id);
+
+    {
+        std::lock_guard lk(mu);
+        queue.push_back(std::move(rev));
+    }
+    cv.notify_one();
+}
+
 void TTLCacheFDBIndex::evictTable()
 {
     PendingOp rev;

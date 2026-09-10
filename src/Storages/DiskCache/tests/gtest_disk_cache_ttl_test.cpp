@@ -1765,4 +1765,134 @@ TEST_F(DiskCacheTTLTest, SizeEvictionPreservesUntrackedFilesInPartitionDir)
     EXPECT_TRUE(disk->exists(stray)) << "untracked file in partition dir must survive exact-file eviction";
 }
 
+// Regression: load() must not delete cached files. It used to removeRecursive() the shared cache
+// root (part_disk_cache), wiping every other table's files on the worker while their in-memory
+// indexes still claimed them present — a flood of `open ... No such file or directory` on the read
+// path. The cache disk is instance NVMe wiped on pod restart, so there is nothing to clean up.
+TEST_F(DiskCacheTTLTest, LoadDeletesNothing)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+    UInt64 ttl_minutes = 60;
+
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
+    String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    String seg = fmt::format("uuid/{}/column.bin/offset_1", part);
+
+    // Two tables warm on the same volume, i.e. sharing one cache root.
+    DiskCacheTTL keeper("keeper", "8f14e45f-ceea-467a-9575-1f1b65dd4d1e", volume, nullptr, settings, strategy, ttl_minutes, 0);
+    DiskCacheTTL other("other", "c9f0f895-fb98-4b6a-b90a-6d5ff4b2c1d5", volume, nullptr, settings, strategy, ttl_minutes, 0);
+    for (auto * cache : {&keeper, &other})
+    {
+        String payload = "payload";
+        ReadBufferFromString buf(payload);
+        cache->set(seg, buf, payload.size(), false, now);
+    }
+
+    auto [keeper_disk, keeper_path] = keeper.get(seg);
+    auto [other_disk, other_path] = other.get(seg);
+    ASSERT_TRUE(keeper_disk != nullptr);
+    ASSERT_TRUE(other_disk != nullptr);
+    ASSERT_TRUE(keeper_disk->exists(keeper_path));
+    ASSERT_TRUE(other_disk->exists(other_path));
+
+    other.load();
+
+    EXPECT_TRUE(keeper_disk->exists(keeper_path)) << "load() deleted another table's cached file: " << keeper_path;
+    EXPECT_TRUE(other_disk->exists(other_path)) << "load() deleted its own live cached file: " << other_path;
+    EXPECT_FALSE(keeper.get(seg).second.empty()) << "keeper's index entry no longer resolves after another table's load()";
+    EXPECT_FALSE(other.get(seg).second.empty()) << "other's index entry no longer resolves after its own load()";
+}
+
+// A cached file can disappear underneath the index (cache dir wiped by ops, kubelet pressure,
+// eviction race). invalidate() drops the entry so the next read is an ordinary miss instead of the
+// reader re-throwing on every read of that segment.
+TEST_F(DiskCacheTTLTest, InvalidateDropsUnreadableEntry)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
+    String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    String seg = fmt::format("uuid/{}/column.bin/offset_1", part);
+    String other_seg = fmt::format("uuid/{}/column.bin/offset_2", part);
+
+    DiskCacheTTL cache("test-cache", "8f14e45f-ceea-467a-9575-1f1b65dd4d1e", volume, nullptr, settings, strategy, 60, 0);
+
+    String payload = "payload";
+    for (const auto & name : {seg, other_seg})
+    {
+        ReadBufferFromString buf(payload);
+        cache.set(name, buf, payload.size(), false, now);
+    }
+    ASSERT_EQ(cache.getKeyCount(), 2u);
+    size_t size_before = cache.getCachedSize();
+    ASSERT_GT(size_before, 0u);
+
+    auto [disk, path] = cache.get(seg);
+    ASSERT_TRUE(disk != nullptr);
+    ASSERT_TRUE(disk->exists(path));
+
+    // Delete the file behind the cache's back, as an external wipe would.
+    disk->removeFileIfExists(path);
+
+    cache.invalidate(seg);
+
+    EXPECT_TRUE(cache.get(seg).second.empty()) << "invalidated entry still resolves";
+    EXPECT_EQ(cache.getKeyCount(), 1u) << "invalidate must drop exactly one entry";
+    EXPECT_LT(cache.getCachedSize(), size_before) << "invalidate must release the entry's bytes";
+
+    // The untouched segment is unaffected.
+    auto [other_disk, other_path] = cache.get(other_seg);
+    EXPECT_FALSE(other_path.empty());
+    ASSERT_TRUE(other_disk != nullptr);
+    EXPECT_TRUE(other_disk->exists(other_path));
+
+    // Idempotent, and an unknown key is a no-op: no counter underflow.
+    cache.invalidate(seg);
+    cache.invalidate("uuid/20260101_1_1_0/column.bin/offset_9");
+    EXPECT_EQ(cache.getKeyCount(), 1u);
+    EXPECT_GT(cache.getCachedSize(), 0u);
+}
+
+// invalidate() also removes the file when the open failed for a reason that left it in place
+// (permissions, IO error), so the bytes don't stay on disk untracked.
+TEST_F(DiskCacheTTLTest, InvalidateRemovesFileThatIsStillPresent)
+{
+    auto volume = createTestVolume();
+    DiskCacheSettings settings;
+    settings.ttl_cache_max_size = 1024 * 1024;
+    auto strategy = std::make_shared<DiskCacheSimpleStrategy>(settings);
+
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
+    String part = fmt::format("{:04d}{:02d}{:02d}_1_100_2", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    String seg = fmt::format("uuid/{}/column.bin/offset_1", part);
+
+    DiskCacheTTL cache("test-cache", "c9f0f895-fb98-4b6a-b90a-6d5ff4b2c1d5", volume, nullptr, settings, strategy, 60, 0);
+
+    String payload = "payload";
+    ReadBufferFromString buf(payload);
+    cache.set(seg, buf, payload.size(), false, now);
+
+    auto [disk, path] = cache.get(seg);
+    ASSERT_TRUE(disk != nullptr);
+    ASSERT_TRUE(disk->exists(path));
+
+    cache.invalidate(seg);
+
+    EXPECT_FALSE(disk->exists(path)) << "invalidate left the file on disk with nothing tracking it";
+    EXPECT_EQ(cache.getKeyCount(), 0u);
+    EXPECT_EQ(cache.getCachedSize(), 0u);
+}
+
 } // namespace DB

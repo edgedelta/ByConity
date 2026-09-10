@@ -88,6 +88,12 @@ public:
     /// get segment from cache and return local path if exists.
     virtual std::pair<DiskPtr, String> get(const String & key) = 0;
 
+    /// Drop a key whose cached file turned out to be unusable, e.g. deleted underneath us.
+    /// Without this the index keeps advertising the file and every later read of that segment
+    /// repeats the failed open. Default: no-op, so DiskCacheLRU keeps its previous behaviour and
+    /// this defence only applies to the per-table TTL cache.
+    virtual void invalidate(const String & /*key*/) {}
+
     /// initialize disk cache from local disk
     virtual void load() = 0;
 

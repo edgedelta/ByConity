@@ -186,6 +186,9 @@ private:
     QueryCacheStatsSnapshot local_cache_stats;
     uint64_t active_segment_start_us{0};  // wall-clock us when current segment read started
     bool active_is_cache{false};          // true = cache_buffer active, false = source_buffer
+    /// One warning per reader when a cached file turns out to be unreadable: a wiped cache dir
+    /// would otherwise log once per segment read.
+    bool logged_cache_file_error{false};
 
     void flushLocalCacheStats();
 };

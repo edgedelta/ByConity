@@ -49,6 +49,25 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int DISK_CACHE_NOT_USED;
+    extern const int CANNOT_OPEN_FILE;
+    extern const int FILE_DOESNT_EXIST;
+    extern const int ATTEMPT_TO_READ_AFTER_EOF;
+    extern const int CHECKSUM_DOESNT_MATCH;
+    extern const int TOO_LARGE_SIZE_COMPRESSED;
+    extern const int CANNOT_DECOMPRESS;
+    extern const int CORRUPTED_DATA;
+}
+
+namespace
+{
+/// The cached file's content is wrong, not merely unreachable: as useless as a missing file, and it
+/// fails the same way on every later read, so the entry is worth dropping.
+bool isCacheContentError(int code)
+{
+    return code == ErrorCodes::CHECKSUM_DOESNT_MATCH || code == ErrorCodes::CANNOT_DECOMPRESS
+        || code == ErrorCodes::TOO_LARGE_SIZE_COMPRESSED || code == ErrorCodes::CORRUPTED_DATA
+        || code == ErrorCodes::ATTEMPT_TO_READ_AFTER_EOF;
+}
 }
 
 bool MergedReadBufferWithSegmentCache::DualCompressedReadBuffer::initialized() const
@@ -556,7 +575,42 @@ bool MergedReadBufferWithSegmentCache::seekToMarkInSegmentCache(size_t segment_i
     }
     catch(...)
     {
-        tryLogCurrentException("MergedReadBufferWithSegmentCache");
+        int code = getCurrentExceptionCode();
+        String error = getCurrentExceptionMessage(false);
+
+        // Only drop the index entry when the cached file is provably useless. Every open() errno
+        // arrives as CANNOT_OPEN_FILE (Common/File.cpp), so that code alone does not mean the file
+        // is gone: under fd exhaustion (EMFILE) or a permission problem.
+        bool drop_entry = code == ErrorCodes::FILE_DOESNT_EXIST || isCacheContentError(code);
+        if (!drop_entry && code == ErrorCodes::CANNOT_OPEN_FILE)
+        {
+            try { drop_entry = !cache_disk->exists(cache_path); }
+            catch (...) { drop_entry = false; }
+        }
+
+        // The index keeps advertising the file and every later read of the segment lands here again.
+        if (drop_entry)
+            segment_cache->invalidate(segment_key);
+
+        // One line per reader. invalidate() logs each entry it drops, but a no-op invalidate
+        // (DiskCacheLRU) or a transient failure would otherwise re-log on every segment read.
+        if (!logged_cache_file_error)
+        {
+            logged_cache_file_error = true;
+            LOG_WARNING(logger, "Cache file {} for segment {} could not be read ({}); {} and falling back "
+                "to remote read", cache_path, segment_key, error,
+                drop_entry ? "invalidated the entry" : "keeping the entry");
+        }
+        else
+            LOG_TRACE(logger, "Cache file {} for segment {} could not be read ({})", cache_path, segment_key, error);
+
+        // Either way this segment is served from remote, so count it as a miss. It used to be
+        // counted as neither hit nor miss, which is what made CacheStats read `hit=0 miss=0 s3=N`.
+        if (collect_cache_stats)
+        {
+            if (is_idx) ++local_cache_stats.idx_miss_segs;
+            else ++local_cache_stats.cache_miss_segs;
+        }
         cache_buffer.reset();
         return false;
     }

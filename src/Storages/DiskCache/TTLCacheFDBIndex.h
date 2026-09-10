@@ -50,6 +50,11 @@ public:
     /// partition_id: same derivation used at onSet().
     void evictPart(const String & partition_id, UInt64 hash_high);
 
+    /// Issue FDB clean() for the reverse entry of a single segment. The reverse key is fixed-width,
+    /// so it is not a prefix of any other key: use this instead of evictPart() when only one
+    /// segment is gone and the part's other segments are still cached.
+    void evictSegment(UInt128 key, const String & partition_id);
+
     /// Issue FDB clean() for all reverse entries of this table.
     void evictTable();
 
