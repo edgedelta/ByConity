@@ -1186,6 +1186,11 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
         && client_info.query_kind == ClientInfo::QueryKind::INITIAL_QUERY
         && (ast->as<ASTSelectQuery>() || ast->as<ASTSelectWithUnionQuery>());
 
+    /// Before anything picks a worker group, and outside the transaction branch below: a group
+    /// inherited from a context that outlived its own query would otherwise be reused here and send
+    /// this query to workers that may be long gone.
+    refreshCurrentWorkerGroup(context);
+
     auto txn = prepareCnchTransaction(context, ast);
     if (txn)
     {

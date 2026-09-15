@@ -106,14 +106,19 @@ size_t VirtualWarehouseHandleImpl::getNumWorkers(UpdateMode update_mode)
 
 WorkerGroupHandle VirtualWarehouseHandleImpl::getWorkerGroup(const String & worker_group_id, UpdateMode update_mode)
 {
+    if (auto res = tryGetWorkerGroup(worker_group_id, update_mode))
+        return res;
+    throw Exception("There is no worker group with id " + worker_group_id + " in VW " + name, ErrorCodes::LOGICAL_ERROR);
+}
+
+WorkerGroupHandle VirtualWarehouseHandleImpl::tryGetWorkerGroup(const String & worker_group_id, UpdateMode update_mode)
+{
     tryUpdateWorkerGroups(update_mode);
 
     std::lock_guard lock(state_mutex);
 
     auto it = worker_groups.find(worker_group_id);
-    if (it == worker_groups.end())
-        throw Exception("There is no worker group with id " + worker_group_id + " in VW " + name, ErrorCodes::LOGICAL_ERROR);
-    return it->second;
+    return it == worker_groups.end() ? nullptr : it->second;
 }
 
 void VirtualWarehouseHandleImpl::updateWorkerStatusFromRM(const std::vector<WorkerGroupData> & groups_data)

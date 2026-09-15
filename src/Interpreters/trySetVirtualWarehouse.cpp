@@ -16,9 +16,11 @@
 #include <memory>
 #include <Interpreters/trySetVirtualWarehouse.h>
 
+#include <Interpreters/Context.h>
 #include <Interpreters/DatabaseAndTableWithAlias.h>
 #include <Interpreters/InterpreterSelectWithUnionQuery.h>
 #include <Interpreters/VirtualWarehousePool.h>
+#include <common/logger_useful.h>
 #include <Interpreters/evaluateConstantExpression.h>
 #include <MergeTreeCommon/MergeTreeMetaBase.h>
 #include <Optimizer/QueryUseOptimizerChecker.h>
@@ -524,6 +526,45 @@ bool trySetVirtualWarehouse(const ASTPtr & ast, ContextMutablePtr & context)
     }
 }
 
+void refreshCurrentWorkerGroup(ContextMutablePtr & context)
+{
+    /// A worker dispatches to the group its RPC handed it and cannot re-pick from a cloud table, so
+    /// clearing the pin there would leave the query with no group at all.
+    if (context->getServerType() != ServerType::cnch_server)
+        return;
+
+    auto pinned = context->tryGetCurrentWorkerGroup();
+    if (!pinned)
+        return;
+
+    /// Query boundary only. Once CnchServerResource exists the parts of this query have been
+    /// allocated for the group it latched, so
+    /// changing the group now would dispatch to a different worker set than they were allocated for.
+    if (context->tryGetCnchServerResource())
+        return;
+
+    /// A pin left by a background task carries no VW, so fall back to the one the group itself names.
+    auto vw = context->tryGetCurrentVW();
+    if (!vw || vw->getName() != pinned->getVWName())
+        vw = context->getVirtualWarehousePool().tryGet(pinned->getVWName());
+
+    static Poco::Logger * log = &Poco::Logger::get("VirtualWarehouse");
+    WorkerGroupHandle current = vw ? vw->tryGetWorkerGroup(pinned->getID()) : nullptr;
+
+    if (!current)
+    {
+        LOG_INFO(log, "Clearing worker group {} pinned on this context: it no longer exists in VW {}",
+            pinned->getID(), pinned->getVWName());
+        context->setCurrentVW(nullptr);
+    }
+    /// A different handle object means the pool rebuilt the group, i.e. the pin had gone stale.
+    else if (current.get() != pinned.get())
+        LOG_INFO(log, "Re-resolved worker group {} pinned on this context; it had been rebuilt since the pin was taken",
+            pinned->getID());
+
+    context->setCurrentWorkerGroup(std::move(current));
+}
+
 bool trySetVirtualWarehouseAndWorkerGroup(const std::string & vw_name, ContextMutablePtr & context)
 {
     if (context->tryGetCurrentWorkerGroup())
@@ -540,8 +581,18 @@ bool trySetVirtualWarehouseAndWorkerGroup(const std::string & vw_name, ContextMu
 
 bool trySetVirtualWarehouseAndWorkerGroup(const ASTPtr & ast, ContextMutablePtr & context)
 {
-    if (context->tryGetCurrentWorkerGroup())
+    if (auto pinned = context->tryGetCurrentWorkerGroup())
+    {
+        /// a whole query, subqueries included, dispatches to one worker set.
+        /// It does mean an explicit `virtual_warehouse` setting is ignored, so say when
+        /// that happens rather than leaving it to be rediscovered from dispatch addresses.
+        const auto & requested_vw = context->getSettingsRef().virtual_warehouse.value;
+        if (!requested_vw.empty() && requested_vw != pinned->getVWName())
+            LOG_DEBUG(&Poco::Logger::get("VirtualWarehouse"),
+                "Ignoring virtual_warehouse={}: this context already dispatches to worker group {} in VW {}",
+                requested_vw, pinned->getID(), pinned->getVWName());
         return true;
+    }
 
     if (trySetVirtualWarehouse(ast, context))
     {
