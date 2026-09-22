@@ -111,6 +111,8 @@ public:
     void forceRefresh(const String & reason);
 
     WorkerGroupHandle getWorkerGroup(const String & worker_group_id, UpdateMode mode = TryUpdate);
+    /// Same, but returns nullptr instead of throwing when this VW has no such group.
+    WorkerGroupHandle tryGetWorkerGroup(const String & worker_group_id, UpdateMode mode = TryUpdate);
     WorkerGroupHandle pickWorkerGroup(VWScheduleAlgo query_algo, const Requirement & requirement = {}, UpdateMode mode = TryUpdate);
     WorkerGroupHandle pickLocally(const VWScheduleAlgo & algo, const Requirement & requirement = {});
     WorkerGroupHandle randomWorkerGroup(UpdateMode mode = TryUpdate);

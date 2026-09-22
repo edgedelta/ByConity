@@ -1455,7 +1455,6 @@ void StorageCnchMergeTree::sendPreloadTasks(ContextPtr local_context, ServerData
     Stopwatch timer;
 
     auto worker_group = getWorkerGroupForTable(*this, local_context);
-    local_context->setCurrentWorkerGroup(worker_group);
 
     /// Restrict the warm to the restarted workers. The authoritative filter is isPreloadTargetWorker
     /// in the sendResources callback below: it runs after the real (consistent-hash OR hybrid) part
@@ -1477,6 +1476,8 @@ void StorageCnchMergeTree::sendPreloadTasks(ContextPtr local_context, ServerData
     /// reuse server resource for part allocation
     /// no worker session context is created
     auto server_resource = std::make_shared<CnchServerResource>(txn_id);
+    /// Give the resource the group directly instead of pinning it on the context
+    server_resource->setWorkerGroup(worker_group);
     server_resource->skipCleanWorker();
     /// all bucket numbers are required
     std::set<Int64> bucket_numbers;
@@ -1547,11 +1548,12 @@ void StorageCnchMergeTree::sendDropDiskCacheTasks(ContextPtr local_context, cons
     String create_table_query = genCreateTableQueryForWorker(txn_id.toString());
 
     auto worker_group = getWorkerGroupForTable(*this, local_context);
-    local_context->setCurrentWorkerGroup(worker_group);
 
     /// reuse server resource for part allocation
     /// no worker session context is created
     auto server_resource = std::make_shared<CnchServerResource>(txn_id);
+    /// As in sendPreloadTasks: hand the group to the resource rather than pinning it on a context
+    server_resource->setWorkerGroup(worker_group);
     server_resource->skipCleanWorker();
     /// all bucket numbers are required
     std::set<Int64> bucket_numbers;
