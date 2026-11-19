@@ -202,12 +202,14 @@ public:
 
     /// Resolve a stable worker_id (e.g. byconity-vw-vw-default-0) to its current RPC
     /// host:port + register_time by querying the Resource Manager. Result cached for 30 seconds.
+    /// If another caller is refreshing an expired cache, return no peer rather than wait.
     std::optional<WorkerPeerInfo> resolvePeer(const String & worker_id);
     std::optional<String> resolveWorkerEndpoint(const String & worker_id);
 
     /// Test-only: inject the worker resolver
     void setWorkerResolverForTest(std::function<std::unordered_map<String, WorkerPeerInfo>()> r)
     {
+        std::lock_guard refresh_lock(worker_endpoint_refresh_mutex);
         std::lock_guard lk(worker_endpoint_cache_mutex);
         worker_endpoint_resolver = std::move(r);
         worker_endpoint_cache.clear();
@@ -232,6 +234,8 @@ private:
     /// Worker resolution: worker_id → {endpoint, register_time}, refreshed every 30s from RM.
     std::function<std::unordered_map<String, WorkerPeerInfo>()> worker_endpoint_resolver;
     mutable std::mutex worker_endpoint_cache_mutex;
+    /// Only one caller refreshes; other callers must not wait for its network RPC.
+    std::mutex worker_endpoint_refresh_mutex;
     std::unordered_map<String, WorkerPeerInfo> worker_endpoint_cache;
     time_t worker_endpoint_cache_refresh_time{0};
     static constexpr int WORKER_ENDPOINT_CACHE_TTL_SEC = 30;

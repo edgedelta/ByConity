@@ -16,10 +16,13 @@
 #include <CloudServices/CnchHotCacheWarmer.h>
 #include <MergeTreeCommon/CnchServerTopology.h>
 #include <Common/HostWithPorts.h>
+#include <Common/ThreadPool.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <future>
 #include <list>
+#include <stdexcept>
 #include <unordered_set>
 
 namespace GtestHotCacheWarmer
@@ -181,6 +184,78 @@ TEST(HotCacheWarmer, latest_topology_empty_not_ready)
 {
     std::list<CnchServerTopology> topology{topologyWith({"10.0.0.1"}), topologyWith({})};
     EXPECT_FALSE(isPreloadTopologyReady(topology));
+}
+
+TEST(HotCacheWarmer, saturated_submission_retries_before_advancing_baseline)
+{
+    std::map<String, UInt32> baseline{{"w0", 100}, {"stable", 100}};
+    const auto original = baseline;
+    const std::vector<WorkerRegistration> workers{{"w0", 200, true}, {"new", 200, true}, {"stable", 100, true}};
+    FreeThreadPool pool(1, 1, 1);
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    pool.scheduleOrThrow([released] { released.wait(); }, 0, 0);
+
+    unsigned attempts = 0;
+    auto submit = [&](const std::vector<String> & targets) {
+        ++attempts;
+        EXPECT_TRUE(contains(targets, "w0"));
+        EXPECT_TRUE(contains(targets, "new"));
+        EXPECT_FALSE(contains(targets, "stable"));
+        try
+        {
+            // Same nonblocking admission as preloadDataParts: overload becomes RPC failure.
+            pool.scheduleOrThrow([] {}, 0, 0);
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    };
+    auto decision = decideWarm(workers, baseline, 1000, 30, true);
+    EXPECT_FALSE(applyWarmDecision(decision, baseline, submit));
+    EXPECT_EQ(baseline, original);
+    release.set_value();
+    pool.wait();
+
+    // The same registrations must trigger another attempt once capacity is available.
+    decision = decideWarm(workers, baseline, 1060, 30, true);
+    EXPECT_TRUE(applyWarmDecision(decision, baseline, submit));
+    pool.wait();
+    EXPECT_EQ(baseline.at("w0"), 200u);
+    EXPECT_EQ(baseline.at("new"), 200u);
+    EXPECT_EQ(baseline.at("stable"), 100u);
+
+    decision = decideWarm(workers, baseline, 1120, 30, true);
+    EXPECT_TRUE(applyWarmDecision(decision, baseline, submit));
+    EXPECT_EQ(attempts, 2u); // Successful submission is not repeated on the next tick.
+}
+
+TEST(HotCacheWarmer, submission_exception_preserves_retry_baseline)
+{
+    std::map<String, UInt32> baseline{{"w0", 100}};
+    const std::vector<WorkerRegistration> workers{{"w0", 200, true}};
+    const auto decision = decideWarm(workers, baseline, 1000, 30, true);
+    EXPECT_THROW(applyWarmDecision(decision, baseline, [](const auto &) -> bool {
+        throw std::runtime_error("RPC failure");
+    }), std::runtime_error);
+    EXPECT_EQ(baseline.at("w0"), 100u);
+    EXPECT_TRUE(contains(decideWarm(workers, baseline, 1060, 30, true).restarted_workers, "w0"));
+}
+
+TEST(HotCacheWarmer, seed_baseline_does_not_submit)
+{
+    std::map<String, UInt32> baseline;
+    const std::vector<WorkerRegistration> workers{{"w0", 100, true}};
+    const auto decision = decideWarm(workers, baseline, 1000, 30, false);
+    unsigned attempts = 0;
+    EXPECT_TRUE(applyWarmDecision(decision, baseline, [&](const auto &) {
+        ++attempts;
+        return false;
+    }));
+    EXPECT_EQ(baseline.at("w0"), 100u);
+    EXPECT_EQ(attempts, 0u);
 }
 
 } // namespace GtestHotCacheWarmer
