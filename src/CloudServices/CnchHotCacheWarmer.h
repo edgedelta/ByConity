@@ -21,7 +21,9 @@
 #include <MergeTreeCommon/CnchServerTopology.h>
 
 #include <list>
+#include <functional>
 #include <map>
+#include <optional>
 #include <unordered_set>
 #include <vector>
 
@@ -60,8 +62,8 @@ public:
 
 private:
     void run();
-    /// Warm every TTL-cached table this server hosts, scoped to target_workers. Returns table count.
-    UInt32 warmHostedTables(const std::unordered_set<String> & target_workers, UInt32 now);
+    /// Returns submitted table count, or nullopt if any submission failed and must be retried.
+    std::optional<UInt32> warmHostedTables(const std::unordered_set<String> & target_workers, UInt32 now);
     void loadBaselineFromFDB();
     void persistBaselineToFDB();
 
@@ -123,6 +125,13 @@ WarmDecision decideWarm(
     UInt32 now,
     UInt32 warmup_grace_seconds,
     bool warm_new_workers);
+
+/// Advance the baseline only after every requested warm submission succeeds.
+/// False (or an exception) leaves the old baseline intact for the next scheduled tick.
+bool applyWarmDecision(
+    const WarmDecision & decision,
+    std::map<String, UInt32> & baseline,
+    const std::function<bool(const std::vector<String> &)> & submit);
 
 /// A server can only resolve which TTL-cached tables it hosts once its topology view has settled.
 /// Immediately after a (re)start getCurrentTopology() is empty until the topology is fetched, so a

@@ -184,16 +184,27 @@ void CnchHotCacheWarmer::run()
                 task->scheduleAfter(interval_ms);
                 return;
             }
+        }
 
-            const std::unordered_set<String> target_workers(decision.restarted_workers.begin(), decision.restarted_workers.end());
-            const UInt32 warmed = warmHostedTables(target_workers, now);
-            LOG_INFO(log, "CnchHotCacheWarmer: warmed {} TTL tables for {} restarted worker(s)", warmed, decision.restarted_workers.size());
+        const bool baseline_changed = baseline != decision.updated_baseline;
+        const bool submitted = HotCacheWarmerHelpers::applyWarmDecision(decision, baseline, [&](const auto & restarted_workers) {
+            const std::unordered_set<String> target_workers(restarted_workers.begin(), restarted_workers.end());
+            const auto warmed = warmHostedTables(target_workers, now);
+            if (!warmed)
+                return false;
+            LOG_INFO(log, "CnchHotCacheWarmer: submitted {} TTL tables for {} restarted worker(s)", *warmed, restarted_workers.size());
+            return true;
+        });
+        if (!submitted)
+        {
+            LOG_WARNING(log, "Hot-cache submission incomplete; retaining baseline and retrying next tick");
+            task->scheduleAfter(interval_ms);
+            return;
         }
 
         /// Only touch FDB when the baseline actually changed; steady state is a no-op every tick.
-        if (baseline != decision.updated_baseline)
+        if (baseline_changed)
         {
-            baseline = std::move(decision.updated_baseline);
             persistBaselineToFDB();
         }
     }
@@ -205,10 +216,10 @@ void CnchHotCacheWarmer::run()
     task->scheduleAfter(interval_ms);
 }
 
-UInt32 CnchHotCacheWarmer::warmHostedTables(const std::unordered_set<String> & target_workers, UInt32 now)
+std::optional<UInt32> CnchHotCacheWarmer::warmHostedTables(const std::unordered_set<String> & target_workers, UInt32 now)
 {
     /// Background read-only query context with a transaction: we only read parts and dispatch
-    /// fire-and-forget preload RPCs to the workers (no commit). Mirrors AutoStatisticsManager.
+    /// preload RPCs to the workers (no commit). Wait for admission, not preload completion.
     auto task_context = Context::createCopy(getContext());
     task_context->makeQueryContext();
     auto [interserver_user, interserver_password] = const_cast<const Context &>(*task_context).getCnchInterserverCredentials();
@@ -227,6 +238,7 @@ UInt32 CnchHotCacheWarmer::warmHostedTables(const std::unordered_set<String> & t
     auto topology = getContext()->getCnchTopologyMaster();
 
     UInt32 warmed = 0;
+    bool failed = false;
     for (const auto & model : catalog->getAllTables(preload_database))
     {
         const String uuid = UUIDHelpers::UUIDToString(RPCHelpers::createUUID(model.uuid()));
@@ -269,14 +281,28 @@ UInt32 CnchHotCacheWarmer::warmHostedTables(const std::unordered_set<String> & t
         catch (...)
         {
             /// One bad table shouldn't abort warming the rest.
+            failed = true;
             tryLogCurrentException(log, "CnchHotCacheWarmer: warm failed for table " + uuid);
         }
     }
+    if (failed)
+        return std::nullopt;
     return warmed;
 }
 
 namespace HotCacheWarmerHelpers
 {
+
+bool applyWarmDecision(
+    const WarmDecision & decision,
+    std::map<String, UInt32> & baseline,
+    const std::function<bool(const std::vector<String> &)> & submit)
+{
+    if (!decision.restarted_workers.empty() && !submit(decision.restarted_workers))
+        return false;
+    baseline = decision.updated_baseline;
+    return true;
+}
 
 WarmDecision decideWarm(
     const std::vector<WorkerRegistration> & workers,

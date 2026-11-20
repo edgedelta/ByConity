@@ -231,9 +231,10 @@ IDiskCachePtr DiskCacheFactory::createDiskCacheFromTableSettings(
             static_pointer_cast<DiskCacheTTL>(cache)->setFDBIndex(std::move(fdb_idx));
 
             // Set up worker endpoint resolver on first use (captures rm_client shared_ptr).
+            auto rm = context.getResourceManagerClient();
+            std::lock_guard resolver_lock(worker_endpoint_cache_mutex);
             if (!worker_endpoint_resolver)
             {
-                auto rm = context.getResourceManagerClient();
                 worker_endpoint_resolver = [rm]() -> std::unordered_map<String, WorkerPeerInfo> {
                     std::unordered_map<String, WorkerPeerInfo> result;
                     if (!rm)
@@ -456,15 +457,24 @@ void DiskCacheFactory::discardQueryCacheStats(const String & query_id)
 
 std::optional<WorkerPeerInfo> DiskCacheFactory::resolvePeer(const String & worker_id)
 {
+    std::unique_lock refresh_lock(worker_endpoint_refresh_mutex, std::try_to_lock);
+    std::unique_lock cache_lock(worker_endpoint_cache_mutex);
     if (!worker_endpoint_resolver)
         return std::nullopt;
 
-    std::lock_guard lk(worker_endpoint_cache_mutex);
     time_t now = time(nullptr);
     if (now - worker_endpoint_cache_refresh_time >= WORKER_ENDPOINT_CACHE_TTL_SEC)
     {
-        worker_endpoint_cache = worker_endpoint_resolver();
-        worker_endpoint_cache_refresh_time = now;
+        // An expired address/epoch is unsafe after a pod restart. Let callers fall
+        // back to the source while another thread refreshes, rather than wait for RM.
+        if (!refresh_lock.owns_lock())
+            return std::nullopt;
+        auto resolver = worker_endpoint_resolver;
+        cache_lock.unlock();
+        auto refreshed = resolver();
+        cache_lock.lock();
+        worker_endpoint_cache = std::move(refreshed);
+        worker_endpoint_cache_refresh_time = time(nullptr);
     }
     auto it = worker_endpoint_cache.find(worker_id);
     if (it != worker_endpoint_cache.end())

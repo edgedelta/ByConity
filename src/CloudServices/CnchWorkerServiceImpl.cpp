@@ -125,7 +125,8 @@ CnchWorkerServiceImpl::~CnchWorkerServiceImpl()
 #define THREADPOOL_SCHEDULE(func) \
     try \
     { \
-        thread_pool.scheduleOrThrowOnError(std::move(func)); \
+        /* Never park a BRPC worker waiting for service queue capacity. */ \
+        thread_pool.scheduleOrThrow(std::move(func), 0, 0); \
     } \
     catch (...) \
     { \
@@ -627,11 +628,13 @@ void CnchWorkerServiceImpl::preloadDataParts(
                 // This makes the in-flight count impossible to strand.
                 auto handle = std::make_shared<PreloadHandle>(
                     registry.registerPart(table_name, table_uuid_str, part->info.partition_id, preload_level));
-                preload_thread_pool->scheduleOrThrowOnError([part, preload_level, submit_ts, read_injection, storage, handle]() mutable {
+                // Preload is optional: report overload instead of blocking a service thread.
+                // Already admitted parts can finish; the RAII handle cleans up a rejected part.
+                preload_thread_pool->scheduleOrThrow([part, preload_level, submit_ts, read_injection, storage, handle]() mutable {
                     part->remote_fs_read_failed_injection = read_injection;
                     part->disk_cache_mode = DiskCacheMode::SKIP_DISK_CACHE;// avoid getCheckum & getIndex re-cache
                     part->preload(preload_level, submit_ts);
-                });
+                }, 0, 0);
             }
         }
     })
